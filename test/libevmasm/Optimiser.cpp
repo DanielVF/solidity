@@ -212,6 +212,53 @@ BOOST_AUTO_TEST_CASE(constant_optimizer_keeps_cleanup_mask_for_high_runs)
 	BOOST_CHECK_EQUAL_COLLECTIONS(expected.begin(), expected.end(), output.begin(), output.end());
 }
 
+BOOST_AUTO_TEST_CASE(constant_optimizer_uses_not_shr_for_computed_cleanup_mask)
+{
+	u256 const mask = (u256(1) << 64) - 1;
+	Assembly assembly{EVMVersion::constantinople(), false, std::nullopt, {}};
+	assembly << mask;
+
+	BOOST_CHECK_GT(
+		ConstantOptimisationMethod::optimiseConstants(
+			false,
+			1,
+			EVMVersion::constantinople(),
+			assembly
+		),
+		0
+	);
+
+	AssemblyItems const expected{
+		u256(0),
+		Instruction::NOT,
+		u256(192),
+		Instruction::SHR
+	};
+	AssemblyItems const& output = assembly.codeSections().front().items;
+	BOOST_CHECK_EQUAL_COLLECTIONS(expected.begin(), expected.end(), output.begin(), output.end());
+}
+
+BOOST_AUTO_TEST_CASE(constant_optimizer_keeps_literal_cleanup_mask_for_high_runs)
+{
+	u256 const mask = (u256(1) << 64) - 1;
+	Assembly assembly{EVMVersion::constantinople(), false, std::nullopt, {}};
+	assembly << mask;
+
+	BOOST_CHECK_EQUAL(
+		ConstantOptimisationMethod::optimiseConstants(
+			false,
+			1000,
+			EVMVersion::constantinople(),
+			assembly
+		),
+		0
+	);
+
+	AssemblyItems const expected{mask};
+	AssemblyItems const& output = assembly.codeSections().front().items;
+	BOOST_CHECK_EQUAL_COLLECTIONS(expected.begin(), expected.end(), output.begin(), output.end());
+}
+
 BOOST_AUTO_TEST_CASE(cse_push_immutable_different)
 {
 	AssemblyItems input{{PushImmutable, 0x1234},{PushImmutable, 0xABCD}};

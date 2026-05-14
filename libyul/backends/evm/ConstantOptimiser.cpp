@@ -267,6 +267,13 @@ Representation const& RepresentationFinder::findRepresentation(u256 const& _valu
 		// Negated is shorter to represent
 		routine = min(std::move(routine), represent(*auxHandles.not_, findRepresentation(~_value)));
 
+	if (m_dialect.evmVersion().hasBitwiseShifting())
+		if (std::optional<unsigned> shiftAmount = cleanupShiftAmount(_value))
+			routine = min(
+				std::move(routine),
+				represent(*auxHandles.shr, represent(*shiftAmount), represent(*auxHandles.not_, represent(0)))
+			);
+
 	// Decompose value into a * 2**k + b where abs(b) << 2**k
 	for (unsigned bits = 255; bits > 8 && m_maxSteps > 0; --bits)
 	{
@@ -285,6 +292,8 @@ Representation const& RepresentationFinder::findRepresentation(u256 const& _valu
 		if (upperPart == 0)
 			continue;
 		if (abs(lowerPart) >= (powerOfTwo >> 8))
+			continue;
+		if (m_dialect.evmVersion().hasBitwiseShifting() && upperPart == 1 && lowerPart == -1)
 			continue;
 		Representation newRoutine;
 		if (m_dialect.evmVersion().hasBitwiseShifting())

@@ -368,6 +368,17 @@ AssemblyItems ComputeMethod::findRepresentation(u256 const& _value)
 		// Is not always better, try literal and decomposition method.
 		AssemblyItems routine{u256(_value)};
 		bigint bestGas = gasNeeded(routine);
+		if (m_params.evmVersion.hasBitwiseShifting())
+			if (std::optional<unsigned> shiftAmount = cleanupShiftAmount(_value))
+			{
+				AssemblyItems newRoutine{u256(0), Instruction::NOT, u256(*shiftAmount), Instruction::SHR};
+				bigint newGas = gasNeeded(newRoutine);
+				if (newGas < bestGas)
+				{
+					bestGas = std::move(newGas);
+					routine = std::move(newRoutine);
+				}
+			}
 		for (unsigned bits = 255; bits > 8 && m_maxSteps > 0; --bits)
 		{
 			unsigned gapDetector = unsigned((_value >> (bits - 8)) & 0x1ff);
@@ -385,6 +396,8 @@ AssemblyItems ComputeMethod::findRepresentation(u256 const& _value)
 			if (upperPart == 0)
 				continue;
 			if (abs(lowerPart) >= (powerOfTwo >> 8))
+				continue;
+			if (m_params.evmVersion.hasBitwiseShifting() && upperPart == 1 && lowerPart == -1)
 				continue;
 
 			AssemblyItems newRoutine;
