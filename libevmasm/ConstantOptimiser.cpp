@@ -24,8 +24,30 @@
 #include <libevmasm/Assembly.h>
 #include <libevmasm/GasMeter.h>
 
+#include <boost/multiprecision/integer.hpp>
+
+#include <algorithm>
+#include <optional>
+
 using namespace solidity;
 using namespace solidity::evmasm;
+
+namespace
+{
+
+std::optional<unsigned> cleanupShiftAmount(u256 const& _mask)
+{
+	if (_mask == 0 || _mask == u256(-1))
+		return std::nullopt;
+	if ((_mask & (_mask + 1)) != 0)
+		return std::nullopt;
+
+	unsigned keptBits = static_cast<unsigned>(boost::multiprecision::msb(_mask)) + 1;
+	solAssert(keptBits < 256, "");
+	return 256 - keptBits;
+}
+
+}
 
 unsigned ConstantOptimisationMethod::optimiseConstants(
 	bool _isCreation,
@@ -39,6 +61,8 @@ unsigned ConstantOptimisationMethod::optimiseConstants(
 	for (auto& codeSection: _assembly.codeSections())
 	{
 		AssemblyItems& _items = codeSection.items;
+
+		optimisations += optimiseCleanupMasks(_isCreation, _runs, _evmVersion, _items);
 
 		std::map<AssemblyItem, size_t> pushes;
 		for (AssemblyItem const& item: _items)
@@ -78,6 +102,88 @@ unsigned ConstantOptimisationMethod::optimiseConstants(
 		if (!pendingReplacements.empty())
 			replaceConstants(_items, pendingReplacements);
 	}
+	return optimisations;
+}
+
+unsigned ConstantOptimisationMethod::optimiseCleanupMasks(
+	bool _isCreation,
+	size_t _runs,
+	langutil::EVMVersion _evmVersion,
+	AssemblyItems& _items
+)
+{
+	if (!_evmVersion.hasBitwiseShifting())
+		return 0;
+
+	auto const dataGasPerByte = _isCreation ?
+		GasCosts::txDataNonZeroGas(_evmVersion) :
+		GasCosts::createDataGas;
+	auto sequenceCost = [&](AssemblyItems const& _sequence)
+	{
+		return
+			bigint(_runs) * simpleRunGas(_sequence, _evmVersion) +
+			bigint(bytesRequired(_sequence, _evmVersion)) * dataGasPerByte;
+	};
+	auto const andCost = sequenceCost({Instruction::AND});
+
+	std::map<u256, bool> shouldReplaceMask;
+	auto shouldReplace = [&](u256 const& _mask)
+	{
+		if (auto const it = shouldReplaceMask.find(_mask); it != shouldReplaceMask.end())
+			return it->second;
+
+		std::optional<unsigned> shiftAmount = cleanupShiftAmount(_mask);
+		if (!shiftAmount)
+			return shouldReplaceMask[_mask] = false;
+
+		AssemblyItems shiftCleanup{
+			u256(*shiftAmount),
+			Instruction::SHL,
+			u256(*shiftAmount),
+			Instruction::SHR
+		};
+
+		Params params;
+		params.multiplicity = 1;
+		params.isCreation = _isCreation;
+		params.runs = _runs;
+		params.evmVersion = _evmVersion;
+		bigint constantMaskCost = std::min({
+			LiteralMethod(params, _mask).gasNeeded(),
+			CodeCopyMethod(params, _mask).gasNeeded(),
+			ComputeMethod(params, _mask).gasNeeded()
+		});
+
+		return shouldReplaceMask[_mask] = sequenceCost(shiftCleanup) < constantMaskCost + andCost;
+	};
+
+	AssemblyItems replaced;
+	unsigned optimisations = 0;
+	for (auto it = _items.begin(); it != _items.end();)
+	{
+		if (
+			std::next(it) != _items.end() &&
+			it->type() == Push &&
+			*std::next(it) == Instruction::AND &&
+			shouldReplace(it->data())
+		)
+		{
+			unsigned shiftAmount = *cleanupShiftAmount(it->data());
+			replaced += AssemblyItems{
+				AssemblyItem{u256(shiftAmount), it->debugData()},
+				AssemblyItem{Instruction::SHL, std::next(it)->debugData()},
+				AssemblyItem{u256(shiftAmount), it->debugData()},
+				AssemblyItem{Instruction::SHR, std::next(it)->debugData()}
+			};
+			it += 2;
+			optimisations++;
+		}
+		else
+			replaced.emplace_back(*it++);
+	}
+
+	if (optimisations > 0)
+		_items = std::move(replaced);
 	return optimisations;
 }
 

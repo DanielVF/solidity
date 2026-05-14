@@ -76,6 +76,7 @@ Language Features:
 
 Compiler Features:
 * ethdebug: Experimental support for instructions and source locations under EOF.
+* EVM: Add experimental support for selecting the `amsterdam` EVM version.
 * EVM: Set default EVM Version to `osaka`.
 
 

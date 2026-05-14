@@ -11,9 +11,11 @@ EVM assembly:
   and
     /* "input.sol":201:206  fun_x */
   or(tag_0_7, shl(0x20, tag_2))
-  sub(shl(0x40, 0x01), 0x01)
     /* "input.sol":179:210  function() r = true ? fun_x : f */
-  and
+  0xc0
+  shl
+  0xc0
+  shr
   or
   swap1
   sstore

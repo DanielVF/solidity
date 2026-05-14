@@ -34,6 +34,7 @@
 #include <tuple>
 #include <map>
 #include <memory>
+#include <optional>
 
 namespace solidity::yul
 {
@@ -62,6 +63,8 @@ public:
 	};
 
 private:
+	std::optional<Expression> tryReplaceMaskingWithShifts(FunctionCall const& _funCall);
+
 	EVMDialect const& m_dialect;
 	GasMeter const& m_meter;
 	std::map<u256, Representation> m_cache;

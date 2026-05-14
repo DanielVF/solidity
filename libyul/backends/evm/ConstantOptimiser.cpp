@@ -28,6 +28,9 @@
 
 #include <libsolutil/CommonData.h>
 
+#include <boost/multiprecision/integer.hpp>
+
+#include <optional>
 #include <variant>
 
 using namespace solidity;
@@ -38,6 +41,32 @@ using Representation = ConstantOptimiser::Representation;
 
 namespace
 {
+std::optional<unsigned> cleanupShiftAmount(u256 const& _mask)
+{
+	if (_mask == 0 || _mask == u256(-1))
+		return std::nullopt;
+	if ((_mask & (_mask + 1)) != 0)
+		return std::nullopt;
+
+	unsigned keptBits = static_cast<unsigned>(boost::multiprecision::msb(_mask)) + 1;
+	yulAssert(keptBits < 256, "");
+	return 256 - keptBits;
+}
+
+Expression literal(langutil::DebugData::ConstPtr _debugData, u256 const& _value)
+{
+	return Literal{std::move(_debugData), LiteralKind::Number, LiteralValue{_value, formatNumber(_value)}};
+}
+
+Expression instructionCall(
+	langutil::DebugData::ConstPtr _debugData,
+	BuiltinHandle const& _instruction,
+	std::vector<Expression> _arguments
+)
+{
+	return FunctionCall{_debugData, BuiltinName{_debugData, _instruction}, std::move(_arguments)};
+}
+
 struct MiniEVMInterpreter
 {
 	explicit MiniEVMInterpreter(EVMDialect const& _dialect): m_dialect(_dialect) {}
@@ -64,6 +93,8 @@ struct MiniEVMInterpreter
 			return exp256(args.at(0), args.at(1));
 		case evmasm::Instruction::SHL:
 			return args.at(0) > 255 ? 0 : (args.at(1) << unsigned(args.at(0)));
+		case evmasm::Instruction::SHR:
+			return args.at(0) > 255 ? 0 : (args.at(1) >> unsigned(args.at(0)));
 		case evmasm::Instruction::NOT:
 			return ~args.at(0);
 		default:
@@ -91,6 +122,14 @@ struct MiniEVMInterpreter
 
 void ConstantOptimiser::visit(Expression& _e)
 {
+	if (FunctionCall const* funCall = std::get_if<FunctionCall>(&_e))
+		if (std::optional<Expression> replacement = tryReplaceMaskingWithShifts(*funCall))
+		{
+			_e = std::move(*replacement);
+			ASTModifier::visit(_e);
+			return;
+		}
+
 	if (std::holds_alternative<Literal>(_e))
 	{
 		Literal const& literal = std::get<Literal>(_e);
@@ -106,6 +145,95 @@ void ConstantOptimiser::visit(Expression& _e)
 	}
 	else
 		ASTModifier::visit(_e);
+}
+
+std::optional<Expression> ConstantOptimiser::tryReplaceMaskingWithShifts(FunctionCall const& _funCall)
+{
+	if (!m_dialect.evmVersion().hasBitwiseShifting())
+		return std::nullopt;
+
+	BuiltinFunctionForEVM const* builtin = resolveBuiltinFunctionForEVM(_funCall.functionName, m_dialect);
+	if (!builtin || !builtin->instruction || *builtin->instruction != evmasm::Instruction::AND)
+		return std::nullopt;
+	yulAssert(_funCall.arguments.size() == 2, "");
+
+	std::optional<size_t> maskArgumentIndex;
+	std::optional<u256> mask;
+	for (size_t i = 0; i < _funCall.arguments.size(); ++i)
+		if (Literal const* literalArgument = std::get_if<Literal>(&_funCall.arguments[i]))
+			if (literalArgument->kind == LiteralKind::Number)
+				if (std::optional<unsigned> shiftAmount = cleanupShiftAmount(literalArgument->value.value()))
+				{
+					maskArgumentIndex = i;
+					mask = literalArgument->value.value();
+					break;
+				}
+
+	if (!maskArgumentIndex || !mask)
+		return std::nullopt;
+
+	auto const& auxHandles = m_dialect.auxiliaryBuiltinHandles();
+	if (!auxHandles.shl || !auxHandles.shr)
+		return std::nullopt;
+
+	unsigned shiftAmount = *cleanupShiftAmount(*mask);
+	Expression const& valueExpression = _funCall.arguments[1 - *maskArgumentIndex];
+	if (std::holds_alternative<Literal>(valueExpression))
+		return std::nullopt;
+	langutil::DebugData::ConstPtr debugData = debugDataOf(_funCall);
+
+	auto shiftLiteral = [&]() { return literal(debugData, shiftAmount); };
+	auto placeholder = []() -> Expression { return Identifier{}; };
+
+	Expression maskExpression = literal(debugData, *mask);
+	if (
+		Expression const* representation =
+			RepresentationFinder(m_dialect, m_meter, debugData, m_cache).tryFindRepresentation(*mask)
+	)
+		maskExpression = ASTCopier{}.translate(*representation);
+
+	std::vector<Expression> originalArguments;
+	originalArguments.reserve(2);
+	if (*maskArgumentIndex == 0)
+	{
+		originalArguments.emplace_back(std::move(maskExpression));
+		originalArguments.emplace_back(placeholder());
+	}
+	else
+	{
+		originalArguments.emplace_back(placeholder());
+		originalArguments.emplace_back(std::move(maskExpression));
+	}
+	Expression originalMasking = FunctionCall{debugData, _funCall.functionName, std::move(originalArguments)};
+
+	Expression shiftedPlaceholder = instructionCall(
+		debugData,
+		*auxHandles.shr,
+		{
+			shiftLiteral(),
+			instructionCall(
+				debugData,
+				*auxHandles.shl,
+				{shiftLiteral(), placeholder()}
+			)
+		}
+	);
+
+	if (m_meter.costs(shiftedPlaceholder) >= m_meter.costs(originalMasking))
+		return std::nullopt;
+
+	return instructionCall(
+		debugData,
+		*auxHandles.shr,
+		{
+			shiftLiteral(),
+			instructionCall(
+				debugData,
+				*auxHandles.shl,
+				{shiftLiteral(), ASTCopier{}.translate(valueExpression)}
+			)
+		}
+	);
 }
 
 Expression const* RepresentationFinder::tryFindRepresentation(u256 const& _value)

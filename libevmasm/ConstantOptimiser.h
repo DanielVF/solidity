@@ -94,6 +94,15 @@ protected:
 	/// Replaces all constants i by the code given in @a _replacement[i].
 	static void replaceConstants(AssemblyItems& _items, std::map<u256, AssemblyItems> const& _replacements);
 
+private:
+	static unsigned optimiseCleanupMasks(
+		bool _isCreation,
+		size_t _runs,
+		langutil::EVMVersion _evmVersion,
+		AssemblyItems& _items
+	);
+
+protected:
 	Params m_params;
 	u256 const& m_value;
 };

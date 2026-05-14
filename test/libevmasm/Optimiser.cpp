@@ -24,6 +24,7 @@
 #include <test/Common.h>
 
 #include <libevmasm/CommonSubexpressionEliminator.h>
+#include <libevmasm/ConstantOptimiser.h>
 #include <libevmasm/PeepholeOptimiser.h>
 #include <libevmasm/Inliner.h>
 #include <libevmasm/JumpdestRemover.h>
@@ -161,6 +162,54 @@ BOOST_AUTO_TEST_CASE(cse_push_immutable_same)
 {
 	AssemblyItem pushImmutable{PushImmutable, 0x1234};
 	checkCSE({pushImmutable, pushImmutable}, {pushImmutable, Instruction::DUP1});
+}
+
+BOOST_AUTO_TEST_CASE(constant_optimizer_replaces_cleanup_mask_by_shifts)
+{
+	u256 const mask = (u256(1) << 248) - 1;
+	Assembly assembly{EVMVersion::constantinople(), false, std::nullopt, {}};
+	assembly << u256(0x1234) << mask << Instruction::AND;
+
+	BOOST_CHECK_GT(
+		ConstantOptimisationMethod::optimiseConstants(
+			false,
+			200,
+			EVMVersion::constantinople(),
+			assembly
+		),
+		0
+	);
+
+	AssemblyItems const expected{
+		u256(0x1234),
+		u256(8),
+		Instruction::SHL,
+		u256(8),
+		Instruction::SHR
+	};
+	AssemblyItems const& output = assembly.codeSections().front().items;
+	BOOST_CHECK_EQUAL_COLLECTIONS(expected.begin(), expected.end(), output.begin(), output.end());
+}
+
+BOOST_AUTO_TEST_CASE(constant_optimizer_keeps_cleanup_mask_for_high_runs)
+{
+	u256 const mask = (u256(1) << 248) - 1;
+	Assembly assembly{EVMVersion::constantinople(), false, std::nullopt, {}};
+	assembly << u256(0x1234) << mask << Instruction::AND;
+
+	BOOST_CHECK_EQUAL(
+		ConstantOptimisationMethod::optimiseConstants(
+			false,
+			10000,
+			EVMVersion::constantinople(),
+			assembly
+		),
+		0
+	);
+
+	AssemblyItems const expected{u256(0x1234), mask, Instruction::AND};
+	AssemblyItems const& output = assembly.codeSections().front().items;
+	BOOST_CHECK_EQUAL_COLLECTIONS(expected.begin(), expected.end(), output.begin(), output.end());
 }
 
 BOOST_AUTO_TEST_CASE(cse_push_immutable_different)
