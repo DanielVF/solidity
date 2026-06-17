@@ -1,0 +1,5 @@
+[workspace]
+members = [
+	"crates/evmasm-optimizer",
+]
+resolver = "2"

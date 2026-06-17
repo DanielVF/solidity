@@ -234,6 +234,7 @@ public:
 	size_t m_modifierDepth = 0;
 
 	void setImmutableOccurrences(size_t _n) const { m_immutableOccurrences = _n; }
+	std::optional<size_t> immutableOccurrences() const { return m_immutableOccurrences; }
 
 private:
 	size_t opcodeCount() const noexcept;

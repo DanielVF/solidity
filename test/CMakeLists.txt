@@ -56,6 +56,7 @@ set(libevmasm_sources
     libevmasm/Optimiser.cpp
     libevmasm/PlainAssemblyParser.cpp
     libevmasm/PlainAssemblyParser.h
+    libevmasm/RustOptimizerBridge.cpp
 )
 detect_stray_source_files("${libevmasm_sources}" "libevmasm/")
 

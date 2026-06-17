@@ -30,6 +30,10 @@
 #include <libevmasm/BlockDeduplicator.h>
 #include <libevmasm/ConstantOptimiser.h>
 
+#if defined(SOLIDITY_USE_RUST_EVMASM_OPTIMIZER)
+#include <libevmasm/RustOptimizerBridge.h>
+#endif
+
 #include <liblangutil/CharStream.h>
 #include <liblangutil/Exceptions.h>
 
@@ -779,6 +783,26 @@ std::map<u256, u256> const& Assembly::optimiseInternal(
 	}
 
 	std::map<u256, u256> tagReplacements;
+
+#if defined(SOLIDITY_USE_RUST_EVMASM_OPTIMIZER)
+	{
+		auto rustBridgeResult = optimizeAssemblyItemsWithRust(
+			m_items,
+			_settings,
+			m_evmVersion,
+			isCreation(),
+			_tagsReferencedFromOutside
+		);
+		assertThrow(rustBridgeResult.ok, OptimizerException, rustBridgeResult.errorMessage);
+		m_items = std::move(rustBridgeResult.optimizedItems);
+		for (auto&& [hash, data]: rustBridgeResult.dataEntries)
+			m_data[hash] = std::move(data);
+		tagReplacements = std::move(rustBridgeResult.tagReplacements);
+		m_tagReplacements = std::move(tagReplacements);
+		return *m_tagReplacements;
+	}
+#endif
+
 	// Iterate until no new optimisation possibilities are found.
 	for (unsigned count = 1; count > 0;)
 	{

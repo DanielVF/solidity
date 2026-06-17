@@ -39,6 +39,8 @@ set(sources
 	PathGasMeter.h
 	PeepholeOptimiser.cpp
 	PeepholeOptimiser.h
+	RustOptimizerBridge.cpp
+	RustOptimizerBridge.h
 	SemanticInformation.cpp
 	SemanticInformation.h
 	SimplificationRule.h
@@ -49,3 +51,8 @@ set(sources
 
 add_library(evmasm ${sources})
 target_link_libraries(evmasm PUBLIC solutil fmt::fmt-header-only)
+
+if (USE_RUST_EVMASM_OPTIMIZER)
+	target_link_libraries(evmasm PUBLIC evmasm_optimizer_bridge PRIVATE evmasm_optimizer)
+	target_compile_definitions(evmasm PUBLIC SOLIDITY_USE_RUST_EVMASM_OPTIMIZER=1)
+endif()
