@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 type Id = u32;
 type ExpressionArguments = SmallVec<[Id; 2]>;
+type ClassPositions = SmallVec<[i32; 2]>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ExpressionKey {
@@ -381,10 +382,7 @@ impl ExpressionClasses {
             arguments,
         };
 
-        for rule in simplification_rules() {
-            if rule.root_opcode != item.opcode {
-                continue;
-            }
+        for rule in simplification_rules_for_opcode(item.opcode) {
             let mut groups = MatchGroups::new();
             if !rule.pattern.matches(expression, self, &mut groups) {
                 continue;
@@ -434,9 +432,22 @@ impl ExpressionClasses {
     }
 }
 
-fn simplification_rules() -> &'static [SimplificationRule] {
-    static RULES: std::sync::OnceLock<Vec<SimplificationRule>> = std::sync::OnceLock::new();
-    RULES.get_or_init(build_simplification_rules).as_slice()
+fn simplification_rules_for_opcode(opcode: u8) -> &'static [SimplificationRule] {
+    static RULES_BY_OPCODE: std::sync::OnceLock<[Vec<SimplificationRule>; 256]> =
+        std::sync::OnceLock::new();
+    RULES_BY_OPCODE
+        .get_or_init(build_simplification_rules_by_opcode)
+        .get(opcode as usize)
+        .expect("opcode must fit in 256 entries")
+        .as_slice()
+}
+
+fn build_simplification_rules_by_opcode() -> [Vec<SimplificationRule>; 256] {
+    let mut rules_by_opcode: [Vec<SimplificationRule>; 256] = std::array::from_fn(|_| Vec::new());
+    for rule in build_simplification_rules() {
+        rules_by_opcode[rule.root_opcode as usize].push(rule);
+    }
+    rules_by_opcode
 }
 
 fn build_simplification_rules() -> Vec<SimplificationRule> {
@@ -2263,17 +2274,111 @@ impl CommonSubexpressionEliminator {
     }
 }
 
+#[derive(Debug, Clone)]
+struct StackState {
+    bottom: i32,
+    elements: Vec<Id>,
+}
+
+impl StackState {
+    fn new() -> Self {
+        Self {
+            bottom: 0,
+            elements: Vec::new(),
+        }
+    }
+
+    fn from_ordered_map(stack: BTreeMap<i32, Id>) -> Result<Self, CseError> {
+        let Some(bottom) = stack.keys().next().copied() else {
+            return Ok(Self::new());
+        };
+        let top = stack
+            .keys()
+            .next_back()
+            .copied()
+            .ok_or(CseError::InvalidState)?;
+        let expected_len = (top - bottom + 1) as usize;
+        if stack.len() != expected_len {
+            return Err(CseError::InvalidState);
+        }
+
+        let mut elements = Vec::with_capacity(expected_len);
+        for position in bottom..=top {
+            elements.push(
+                stack
+                    .get(&position)
+                    .copied()
+                    .ok_or(CseError::InvalidState)?,
+            );
+        }
+        Ok(Self { bottom, elements })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (i32, Id)> + '_ {
+        self.elements
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (self.bottom + index as i32, *id))
+    }
+
+    fn get(&self, position: i32) -> Option<Id> {
+        self.index(position)
+            .and_then(|index| self.elements.get(index).copied())
+    }
+
+    fn push_top(&mut self, position: i32, id: Id) -> Result<(), CseError> {
+        if self.elements.is_empty() {
+            self.bottom = position;
+        } else if position != self.bottom + self.elements.len() as i32 {
+            return Err(CseError::InvalidState);
+        }
+        self.elements.push(id);
+        Ok(())
+    }
+
+    fn pop_top(&mut self, position: i32) -> Result<Id, CseError> {
+        if self.top_position() != Some(position) {
+            return Err(CseError::InvalidState);
+        }
+        self.elements.pop().ok_or(CseError::InvalidState)
+    }
+
+    fn swap(&mut self, a: i32, b: i32) -> Result<(), CseError> {
+        let a_index = self.index(a).ok_or(CseError::InvalidState)?;
+        let b_index = self.index(b).ok_or(CseError::InvalidState)?;
+        self.elements.swap(a_index, b_index);
+        Ok(())
+    }
+
+    fn top_position(&self) -> Option<i32> {
+        (!self.elements.is_empty()).then_some(self.bottom + self.elements.len() as i32 - 1)
+    }
+
+    fn index(&self, position: i32) -> Option<usize> {
+        if self.elements.is_empty() || position < self.bottom {
+            return None;
+        }
+        let index = (position - self.bottom) as usize;
+        (index < self.elements.len()).then_some(index)
+    }
+}
+
 struct CSECodeGenerator {
     generated_items: Vec<ffi::WireAssemblyItem>,
     stack_height: i32,
     needed_by: FxHashMap<Id, Vec<Id>>,
     dependencies_added: FxHashSet<Id>,
-    stack: BTreeMap<i32, Id>,
-    class_positions: BTreeMap<Id, BTreeSet<i32>>,
+    stack: StackState,
+    class_positions: Vec<Option<ClassPositions>>,
     expression_classes: Rc<RefCell<ExpressionClasses>>,
     store_operations: BTreeMap<(StoreTarget, Id), Vec<StoreOperation>>,
-    final_classes: BTreeSet<Id>,
-    target_stack: BTreeMap<i32, Id>,
+    final_classes: FxHashSet<Id>,
+    target_stack: Vec<(i32, Id)>,
+    target_stack_by_position: FxHashMap<i32, Id>,
     evm_version: EvmVersion,
 }
 
@@ -2295,12 +2400,13 @@ impl CSECodeGenerator {
             stack_height: 0,
             needed_by: FxHashMap::default(),
             dependencies_added: FxHashSet::default(),
-            stack: BTreeMap::new(),
-            class_positions: BTreeMap::new(),
+            stack: StackState::new(),
+            class_positions: Vec::new(),
             expression_classes,
             store_operations: grouped,
-            final_classes: BTreeSet::new(),
-            target_stack: BTreeMap::new(),
+            final_classes: FxHashSet::default(),
+            target_stack: Vec::new(),
+            target_stack_by_position: FxHashMap::default(),
             evm_version,
         }
     }
@@ -2313,13 +2419,16 @@ impl CSECodeGenerator {
         target_stack: BTreeMap<i32, Id>,
     ) -> Result<Vec<ffi::WireAssemblyItem>, CseError> {
         self.stack_height = initial_stack_height;
-        self.stack = initial_stack.clone();
-        self.target_stack = target_stack;
-        for (position, id) in &self.stack {
-            self.class_positions
-                .entry(*id)
-                .or_default()
-                .insert(*position);
+        let initial_stack_first = initial_stack.keys().next().copied();
+        self.stack = StackState::from_ordered_map(initial_stack)?;
+        self.target_stack = target_stack
+            .iter()
+            .map(|(position, id)| (*position, *id))
+            .collect();
+        self.target_stack_by_position = self.target_stack.iter().copied().collect();
+        let initial_positions = self.stack.iter().collect::<Vec<_>>();
+        for (position, id) in initial_positions {
+            self.add_class_position(id, position);
         }
 
         let latest_store_expressions = self
@@ -2331,7 +2440,11 @@ impl CSECodeGenerator {
             self.add_dependencies(expression)?;
         }
 
-        let target_ids = self.target_stack.values().copied().collect::<Vec<_>>();
+        let target_ids = self
+            .target_stack
+            .iter()
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>();
         for id in target_ids {
             self.final_classes.insert(id);
             self.add_dependencies(id)?;
@@ -2357,26 +2470,18 @@ impl CSECodeGenerator {
         }
 
         for (_, id) in sequenced {
-            if !self.class_positions.contains_key(&id) {
+            if !self.class_available(id) {
                 self.generate_class_element(id, true)?;
             }
         }
 
-        let targets = self
-            .target_stack
-            .iter()
-            .map(|(position, id)| (*position, *id))
-            .collect::<Vec<_>>();
+        let targets = self.target_stack.clone();
         for (target_position, target_id) in targets {
-            if self.stack.get(&target_position) == Some(&target_id) {
+            if self.stack.get(target_position) == Some(target_id) {
                 continue;
             }
             self.generate_class_element(target_id, false)?;
-            if self
-                .class_positions
-                .get(&target_id)
-                .is_some_and(|positions| positions.contains(&target_position))
-            {
+            if self.class_has_position(target_id, target_position) {
                 continue;
             }
             let debug_data_id = self
@@ -2396,10 +2501,10 @@ impl CSECodeGenerator {
 
         while self.remove_stack_top_if_possible()? {}
 
-        let final_height = if let Some(last) = self.target_stack.keys().next_back() {
+        let final_height = if let Some((last, _)) = self.target_stack.last() {
             *last
-        } else if let Some(first) = initial_stack.keys().next() {
-            *first - 1
+        } else if let Some(first) = initial_stack_first {
+            first - 1
         } else {
             initial_stack_height
         };
@@ -2409,8 +2514,54 @@ impl CSECodeGenerator {
         Ok(self.generated_items)
     }
 
+    fn class_available(&self, id: Id) -> bool {
+        self.class_positions
+            .get(id as usize)
+            .is_some_and(Option::is_some)
+    }
+
+    fn class_positions(&self, id: Id) -> Option<&ClassPositions> {
+        self.class_positions
+            .get(id as usize)
+            .and_then(Option::as_ref)
+    }
+
+    fn class_positions_mut(&mut self, id: Id) -> Option<&mut ClassPositions> {
+        self.class_positions
+            .get_mut(id as usize)
+            .and_then(Option::as_mut)
+    }
+
+    fn ensure_class_positions(&mut self, id: Id) -> &mut ClassPositions {
+        let index = id as usize;
+        if self.class_positions.len() <= index {
+            self.class_positions.resize_with(index + 1, || None);
+        }
+        self.class_positions[index].get_or_insert_with(ClassPositions::new)
+    }
+
+    fn class_has_position(&self, id: Id, position: i32) -> bool {
+        self.class_positions(id)
+            .is_some_and(|positions| positions.contains(&position))
+    }
+
+    fn add_class_position(&mut self, id: Id, position: i32) {
+        let positions = self.ensure_class_positions(id);
+        debug_assert!(!positions.contains(&position));
+        positions.push(position);
+    }
+
+    fn remove_class_position(&mut self, id: Id, position: i32) -> Result<(), CseError> {
+        let positions = self.class_positions_mut(id).ok_or(CseError::InvalidState)?;
+        let Some(index) = positions.iter().position(|known| *known == position) else {
+            return Err(CseError::InvalidState);
+        };
+        positions.swap_remove(index);
+        Ok(())
+    }
+
     fn add_dependencies(&mut self, id: Id) -> Result<(), CseError> {
-        if self.class_positions.contains_key(&id) || !self.dependencies_added.insert(id) {
+        if self.class_available(id) || !self.dependencies_added.insert(id) {
             return Ok(());
         }
         let expression = self.expression_classes.borrow().representative(id).clone();
@@ -2510,7 +2661,7 @@ impl CSECodeGenerator {
     }
 
     fn generate_class_element(&mut self, id: Id, allow_sequenced: bool) -> Result<(), CseError> {
-        if self.class_positions.values().any(|positions| {
+        if self.class_positions.iter().flatten().any(|positions| {
             positions
                 .iter()
                 .any(|position| *position > self.stack_height)
@@ -2518,7 +2669,7 @@ impl CSECodeGenerator {
             return Err(CseError::InvalidState);
         }
         self.remove_stack_top_if_possible()?;
-        if let Some(positions) = self.class_positions.get(&id) {
+        if let Some(positions) = self.class_positions(id) {
             if positions.is_empty() {
                 return Err(CseError::InvalidState);
             }
@@ -2577,7 +2728,7 @@ impl CSECodeGenerator {
         }
 
         for (index, argument) in expression.arguments.iter().enumerate() {
-            if self.stack.get(&(self.stack_height - index as i32)) != Some(argument) {
+            if self.stack.get(self.stack_height - index as i32) != Some(*argument) {
                 return Err(CseError::InvalidState);
             }
         }
@@ -2594,24 +2745,19 @@ impl CSECodeGenerator {
 
         for index in 0..expression.arguments.len() {
             let position = self.stack_height - index as i32;
-            if let Some(class_id) = self.stack.remove(&position) {
-                if let Some(positions) = self.class_positions.get_mut(&class_id) {
-                    positions.remove(&position);
-                }
-            }
+            let class_id = self.stack.get(position).ok_or(CseError::InvalidState)?;
+            self.remove_class_position(class_id, position)?;
+            self.stack.pop_top(position)?;
         }
 
         self.append_item(expression.item.clone());
         if expression.item.kind != wire::KIND_OPERATION
             || opcode::instruction_info(expression.item.opcode).ret == 1
         {
-            self.stack.insert(self.stack_height, id);
-            self.class_positions
-                .entry(id)
-                .or_default()
-                .insert(self.stack_height);
+            self.stack.push_top(self.stack_height, id)?;
+            self.add_class_position(id, self.stack_height);
         } else if opcode::instruction_info(expression.item.opcode).ret == 0 {
-            self.class_positions.entry(id).or_default();
+            self.ensure_class_positions(id);
         } else {
             return Err(CseError::InvalidState);
         }
@@ -2619,9 +2765,8 @@ impl CSECodeGenerator {
     }
 
     fn class_element_position(&self, id: Id) -> Result<i32, CseError> {
-        self.class_positions
-            .get(&id)
-            .and_then(|positions| positions.iter().next_back().copied())
+        self.class_positions(id)
+            .and_then(|positions| positions.iter().copied().max())
             .ok_or(CseError::InvalidState)
     }
 
@@ -2637,16 +2782,16 @@ impl CSECodeGenerator {
             self.class_element_position(element)?
         };
         let positions = self
-            .class_positions
-            .get(&element)
+            .class_positions(element)
             .ok_or(CseError::InvalidState)?;
         let have_copy = positions.len() > 1;
         if self.final_classes.contains(&element) {
-            Ok(have_copy && (self.target_stack.get(&from_position).copied() != Some(element)))
+            Ok(have_copy
+                && (self.target_stack_by_position.get(&from_position).copied() != Some(element)))
         } else if !have_copy {
             if let Some(needed_by) = self.needed_by.get(&element) {
                 for needed_by in needed_by {
-                    if Some(*needed_by) != result && !self.class_positions.contains_key(needed_by) {
+                    if Some(*needed_by) != result && !self.class_available(*needed_by) {
                         return Ok(false);
                     }
                 }
@@ -2661,16 +2806,14 @@ impl CSECodeGenerator {
         if self.stack.is_empty() {
             return Ok(false);
         };
-        let Some(top) = self.stack.get(&self.stack_height).copied() else {
+        let Some(top) = self.stack.get(self.stack_height) else {
             return Err(CseError::InvalidState);
         };
         if !self.can_be_removed(top, None, Some(self.stack_height))? {
             return Ok(false);
         }
-        if let Some(positions) = self.class_positions.get_mut(&top) {
-            positions.remove(&self.stack_height);
-        }
-        self.stack.remove(&self.stack_height);
+        self.remove_class_position(top, self.stack_height)?;
+        self.stack.pop_top(self.stack_height)?;
         self.append_item(item::operation(op::POP, 0));
         Ok(true)
     }
@@ -2684,18 +2827,14 @@ impl CSECodeGenerator {
         }
         let id = self
             .stack
-            .get(&from_position)
-            .copied()
+            .get(from_position)
             .ok_or(CseError::InvalidState)?;
         self.append_item(item::operation(
             opcode::dup_instruction(instruction_num as usize),
             debug_data_id,
         ));
-        self.stack.insert(self.stack_height, id);
-        self.class_positions
-            .entry(id)
-            .or_default()
-            .insert(self.stack_height);
+        self.stack.push_top(self.stack_height, id)?;
+        self.add_class_position(id, self.stack_height);
         Ok(())
     }
 
@@ -2718,25 +2857,18 @@ impl CSECodeGenerator {
 
         let top_id = self
             .stack
-            .get(&self.stack_height)
-            .copied()
+            .get(self.stack_height)
             .ok_or(CseError::InvalidState)?;
         let from_id = self
             .stack
-            .get(&from_position)
-            .copied()
+            .get(from_position)
             .ok_or(CseError::InvalidState)?;
         if top_id != from_id {
-            if let Some(positions) = self.class_positions.get_mut(&top_id) {
-                positions.remove(&self.stack_height);
-                positions.insert(from_position);
-            }
-            if let Some(positions) = self.class_positions.get_mut(&from_id) {
-                positions.remove(&from_position);
-                positions.insert(self.stack_height);
-            }
-            self.stack.insert(self.stack_height, from_id);
-            self.stack.insert(from_position, top_id);
+            self.remove_class_position(top_id, self.stack_height)?;
+            self.remove_class_position(from_id, from_position)?;
+            self.add_class_position(top_id, from_position);
+            self.add_class_position(from_id, self.stack_height);
+            self.stack.swap(self.stack_height, from_position)?;
         }
 
         if self.generated_items.len() >= 2
@@ -3022,5 +3154,29 @@ mod tests {
         let result = classes.find(item::operation(op::SIGNEXTEND, 0), [thirty_one, inner], 0);
 
         assert_eq!(result, inner);
+    }
+
+    #[test]
+    fn simplification_rules_by_opcode_preserve_flat_rule_order() {
+        fn rule_signature(rule: &SimplificationRule) -> String {
+            format!("{}:{:?}", rule.root_opcode, rule.pattern)
+        }
+
+        let flat_rules = build_simplification_rules();
+        let indexed_rules = build_simplification_rules_by_opcode();
+
+        for opcode in 0..=u8::MAX {
+            let expected = flat_rules
+                .iter()
+                .filter(|rule| rule.root_opcode == opcode)
+                .map(rule_signature)
+                .collect::<Vec<_>>();
+            let actual = indexed_rules[opcode as usize]
+                .iter()
+                .map(rule_signature)
+                .collect::<Vec<_>>();
+
+            assert_eq!(actual, expected, "opcode {opcode}");
+        }
     }
 }
