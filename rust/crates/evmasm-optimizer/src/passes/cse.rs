@@ -4,17 +4,20 @@ use crate::opcode::{self, op, Effect, EvmVersion};
 use crate::u256;
 use crate::wire;
 use primitive_types::{U256, U512};
+use rustc_hash::{FxHashMap, FxHashSet};
 use sha3::{Digest, Keccak256};
+use smallvec::SmallVec;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 type Id = u32;
+type ExpressionArguments = SmallVec<[Id; 2]>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ExpressionKey {
     item: ExpressionItemKey,
-    arguments: Vec<Id>,
+    arguments: ExpressionArguments,
     sequence_number: u32,
 }
 
@@ -49,7 +52,7 @@ enum ExpressionItemKey {
 struct Expression {
     id: Id,
     item: ffi::WireAssemblyItem,
-    arguments: Vec<Id>,
+    arguments: ExpressionArguments,
     sequence_number: u32,
 }
 
@@ -229,14 +232,17 @@ struct SimplificationRule {
 #[derive(Debug, Clone)]
 struct ExpressionClasses {
     representatives: Vec<Expression>,
-    expressions: HashMap<ExpressionKey, Id>,
+    expressions: FxHashMap<ExpressionKey, Id>,
 }
 
 impl ExpressionClasses {
     fn with_capacity(item_capacity_hint: usize) -> Self {
         Self {
             representatives: Vec::new(),
-            expressions: HashMap::with_capacity(expression_capacity(item_capacity_hint)),
+            expressions: FxHashMap::with_capacity_and_hasher(
+                expression_capacity(item_capacity_hint),
+                Default::default(),
+            ),
         }
     }
 
@@ -245,15 +251,14 @@ impl ExpressionClasses {
     }
 
     fn find_item(&mut self, item: ffi::WireAssemblyItem) -> Id {
-        self.find(item, Vec::new(), 0)
+        self.find(item, [], 0)
     }
 
-    fn find(
-        &mut self,
-        item: ffi::WireAssemblyItem,
-        mut arguments: Vec<Id>,
-        sequence_number: u32,
-    ) -> Id {
+    fn find<I>(&mut self, item: ffi::WireAssemblyItem, arguments: I, sequence_number: u32) -> Id
+    where
+        I: IntoIterator<Item = Id>,
+    {
+        let mut arguments = arguments.into_iter().collect::<ExpressionArguments>();
         if is_commutative_item(&item) {
             arguments.sort_unstable();
         }
@@ -304,7 +309,7 @@ impl ExpressionClasses {
         let expression = Expression {
             id,
             item: item.clone(),
-            arguments: Vec::new(),
+            arguments: ExpressionArguments::new(),
             sequence_number: 0,
         };
         self.expressions
@@ -334,19 +339,19 @@ impl ExpressionClasses {
             return true;
         }
         let debug_data_id = self.representative(id).item.debug_data_id;
-        let iszero = self.find(item::operation(op::ISZERO, debug_data_id), vec![id], 0);
+        let iszero = self.find(item::operation(op::ISZERO, debug_data_id), [id], 0);
         self.known_zero(iszero)
     }
 
     fn known_to_be_different(&mut self, a: Id, b: Id) -> bool {
         let debug_data_id = self.representative(a).item.debug_data_id;
-        let diff = self.find(item::operation(op::SUB, debug_data_id), vec![a, b], 0);
+        let diff = self.find(item::operation(op::SUB, debug_data_id), [a, b], 0);
         self.known_non_zero(diff)
     }
 
     fn known_to_be_different_by_32(&mut self, a: Id, b: Id) -> bool {
         let debug_data_id = self.representative(a).item.debug_data_id;
-        let diff = self.find(item::operation(op::SUB, debug_data_id), vec![a, b], 0);
+        let diff = self.find(item::operation(op::SUB, debug_data_id), [a, b], 0);
         self.known_constant(diff)
             .is_some_and(|value| value.overflowing_add(U256::from(31u8)).0 > U256::from(62u8))
     }
@@ -414,7 +419,7 @@ impl ExpressionClasses {
             .arguments
             .iter()
             .map(|argument| self.rebuild_pattern(argument, debug_data_id, groups))
-            .collect::<Vec<_>>();
+            .collect::<ExpressionArguments>();
         match &pattern.kind {
             PatternKind::Any | PatternKind::PushAny => {
                 panic!("unmatched wildcard cannot be rebuilt")
@@ -1847,7 +1852,7 @@ impl KnownState {
                 .map(|index| {
                     self.stack_element(self.stack_height - index as i32, item.debug_data_id)
                 })
-                .collect::<Vec<_>>();
+                .collect::<ExpressionArguments>();
             match item.opcode {
                 op::SSTORE => {
                     store_operation =
@@ -1963,7 +1968,7 @@ impl KnownState {
             .collect();
         let expression = self.expression_classes.borrow_mut().find(
             item::operation(op::SSTORE, debug_data_id),
-            vec![slot, value],
+            [slot, value],
             self.sequence_number,
         );
         let operation = StoreOperation {
@@ -1983,7 +1988,7 @@ impl KnownState {
         }
         let id = self.expression_classes.borrow_mut().find(
             item::operation(op::SLOAD, debug_data_id),
-            vec![slot],
+            [slot],
             self.sequence_number,
         );
         self.storage_content.insert(slot, id);
@@ -2011,7 +2016,7 @@ impl KnownState {
             .collect();
         let expression = self.expression_classes.borrow_mut().find(
             item::operation(op::MSTORE, debug_data_id),
-            vec![slot, value],
+            [slot, value],
             self.sequence_number,
         );
         let operation = StoreOperation {
@@ -2031,7 +2036,7 @@ impl KnownState {
         }
         let id = self.expression_classes.borrow_mut().find(
             item::operation(op::MLOAD, debug_data_id),
-            vec![slot],
+            [slot],
             self.sequence_number,
         );
         self.memory_content.insert(slot, id);
@@ -2043,14 +2048,14 @@ impl KnownState {
         let Some(length_value) = self.expression_classes.borrow().known_constant(length) else {
             return self.expression_classes.borrow_mut().find(
                 keccak_item,
-                vec![start, length],
+                [start, length],
                 self.sequence_number,
             );
         };
         if length_value > U256::from(128u16) {
             return self.expression_classes.borrow_mut().find(
                 keccak_item,
-                vec![start, length],
+                [start, length],
                 self.sequence_number,
             );
         }
@@ -2064,7 +2069,7 @@ impl KnownState {
                 .find_item(item::push_value(U256::from(offset), debug_data_id));
             let slot = self.expression_classes.borrow_mut().find(
                 item::operation(op::ADD, debug_data_id),
-                vec![start, offset_id],
+                [start, offset_id],
                 0,
             );
             arguments.push(self.load_from_memory(slot, debug_data_id));
@@ -2104,7 +2109,7 @@ impl KnownState {
         } else {
             self.expression_classes.borrow_mut().find(
                 keccak_item,
-                vec![start, length],
+                [start, length],
                 self.sequence_number,
             )
         };
@@ -2261,8 +2266,8 @@ impl CommonSubexpressionEliminator {
 struct CSECodeGenerator {
     generated_items: Vec<ffi::WireAssemblyItem>,
     stack_height: i32,
-    needed_by: HashMap<Id, Vec<Id>>,
-    dependencies_added: HashSet<Id>,
+    needed_by: FxHashMap<Id, Vec<Id>>,
+    dependencies_added: FxHashSet<Id>,
     stack: BTreeMap<i32, Id>,
     class_positions: BTreeMap<Id, BTreeSet<i32>>,
     expression_classes: Rc<RefCell<ExpressionClasses>>,
@@ -2288,8 +2293,8 @@ impl CSECodeGenerator {
         Self {
             generated_items: Vec::new(),
             stack_height: 0,
-            needed_by: HashMap::new(),
-            dependencies_added: HashSet::new(),
+            needed_by: FxHashMap::default(),
+            dependencies_added: FxHashSet::default(),
             stack: BTreeMap::new(),
             class_positions: BTreeMap::new(),
             expression_classes,
@@ -2453,7 +2458,7 @@ impl CSECodeGenerator {
                         let length = expression.arguments[1];
                         let offset_to_start = self.expression_classes.borrow_mut().find(
                             item::operation(op::SUB, expression.item.debug_data_id),
-                            vec![*slot, slot_to_load_from],
+                            [*slot, slot_to_load_from],
                             0,
                         );
                         let offset = self
@@ -2864,7 +2869,7 @@ fn expression_key(
 ) -> ExpressionKey {
     ExpressionKey {
         item: expression_item_key(item),
-        arguments: arguments.to_vec(),
+        arguments: arguments.iter().copied().collect(),
         sequence_number,
     }
 }
@@ -2944,10 +2949,10 @@ mod tests {
         let mut classes = ExpressionClasses::with_capacity(0);
         let shift = classes.new_class(0);
         let one = classes.find_item(item::push_value(U256::one(), 0));
-        let shifted_one = classes.find(item::operation(op::SHL, 0), vec![shift, one], 0);
+        let shifted_one = classes.find(item::operation(op::SHL, 0), [shift, one], 0);
         let minus_one = classes.find_item(item::push_value(u256::max_value(), 0));
 
-        let result = classes.find(item::operation(op::MUL, 0), vec![minus_one, shifted_one], 0);
+        let result = classes.find(item::operation(op::MUL, 0), [minus_one, shifted_one], 0);
         let expression = classes.representative(result);
 
         assert_eq!(expression.item.kind, wire::KIND_OPERATION);
@@ -2962,14 +2967,10 @@ mod tests {
         let shift = classes.new_class(0);
         let one = classes.find_item(item::push_value(U256::one(), 0));
         let three = classes.find_item(item::push_value(U256::from(3u8), 0));
-        let shifted_one = classes.find(item::operation(op::SHL, 0), vec![shift, one], 0);
-        let scaled_value = classes.find(item::operation(op::MUL, 0), vec![value, three], 0);
+        let shifted_one = classes.find(item::operation(op::SHL, 0), [shift, one], 0);
+        let scaled_value = classes.find(item::operation(op::MUL, 0), [value, three], 0);
 
-        let result = classes.find(
-            item::operation(op::MUL, 0),
-            vec![scaled_value, shifted_one],
-            0,
-        );
+        let result = classes.find(item::operation(op::MUL, 0), [scaled_value, shifted_one], 0);
         let expression = classes.representative(result);
 
         assert_eq!(expression.item.kind, wire::KIND_OPERATION);
@@ -2988,7 +2989,10 @@ mod tests {
         let shifted_value_expression = classes.representative(shifted_value);
         assert_eq!(shifted_value_expression.item.kind, wire::KIND_OPERATION);
         assert_eq!(shifted_value_expression.item.opcode, op::SHL);
-        assert_eq!(shifted_value_expression.arguments, vec![shift, value]);
+        assert_eq!(
+            shifted_value_expression.arguments.as_slice(),
+            [shift, value]
+        );
     }
 
     #[test]
@@ -2997,14 +3001,14 @@ mod tests {
         let mask = classes.find_item(item::push_value(U256::from(0xffu16), 0));
         let index = classes.new_class(0);
         let value = classes.new_class(0);
-        let byte = classes.find(item::operation(op::BYTE, 0), vec![index, value], 0);
+        let byte = classes.find(item::operation(op::BYTE, 0), [index, value], 0);
 
-        let result = classes.find(item::operation(op::AND, 0), vec![byte, mask], 0);
+        let result = classes.find(item::operation(op::AND, 0), [byte, mask], 0);
         let expression = classes.representative(result);
 
         assert_eq!(expression.item.kind, wire::KIND_OPERATION);
         assert_eq!(expression.item.opcode, op::AND);
-        assert_eq!(expression.arguments, vec![mask, byte]);
+        assert_eq!(expression.arguments.as_slice(), [mask, byte]);
     }
 
     #[test]
@@ -3013,13 +3017,9 @@ mod tests {
         let value = classes.new_class(0);
         let zero = classes.find_item(item::push_value(U256::zero(), 0));
         let thirty_one = classes.find_item(item::push_value(U256::from(31u8), 0));
-        let inner = classes.find(item::operation(op::SIGNEXTEND, 0), vec![zero, value], 0);
+        let inner = classes.find(item::operation(op::SIGNEXTEND, 0), [zero, value], 0);
 
-        let result = classes.find(
-            item::operation(op::SIGNEXTEND, 0),
-            vec![thirty_one, inner],
-            0,
-        );
+        let result = classes.find(item::operation(op::SIGNEXTEND, 0), [thirty_one, inner], 0);
 
         assert_eq!(result, inner);
     }

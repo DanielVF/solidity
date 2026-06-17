@@ -39,6 +39,7 @@ option(SOLC_STATIC_STDLIBS "Link solc against static versions of libgcc and libs
 option(STRICT_Z3_VERSION "Require the exact version of Z3 solver expected by our test suite." ON)
 option(PEDANTIC "Enable extra warnings and pedantic build flags. Treat all warnings as errors." ON)
 option(PROFILE_OPTIMIZER_STEPS "Output performance metrics for the optimiser steps." OFF)
+option(USE_RUST_EVMASM_OPTIMIZER "Use the Rust libevmasm optimizer bridge implementation." OFF)
 option(
 	IGNORE_VENDORED_DEPENDENCIES
 	"Ignore libraries provided as submodules of the repository and allow CMake to look for \
@@ -78,6 +79,37 @@ endif()
 
 if (PROFILE_OPTIMIZER_STEPS)
     add_definitions(-DPROFILE_OPTIMIZER_STEPS)
+endif()
+
+if (USE_RUST_EVMASM_OPTIMIZER)
+	if (POLICY CMP0118)
+		cmake_policy(SET CMP0118 NEW)
+	endif()
+	find_package(Corrosion QUIET)
+	if (NOT Corrosion_FOUND)
+		if (CMAKE_VERSION VERSION_LESS "3.19")
+			message(FATAL_ERROR "USE_RUST_EVMASM_OPTIMIZER requires an installed Corrosion package when using CMake before 3.19.")
+		endif()
+		include(FetchContent)
+		FetchContent_Declare(
+			Corrosion
+			GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
+			GIT_TAG v0.6.1
+		)
+		FetchContent_MakeAvailable(Corrosion)
+	endif()
+	corrosion_import_crate(
+		MANIFEST_PATH ${PROJECT_SOURCE_DIR}/rust/Cargo.toml
+		CRATES evmasm-optimizer
+		CRATE_TYPES staticlib
+		LOCKED
+	)
+	corrosion_add_cxxbridge(
+		evmasm_optimizer_bridge
+		CRATE evmasm_optimizer
+		REGEN_TARGET evmasm_optimizer_bridge_regen
+		FILES bridge.rs
+	)
 endif()
 
 # Figure out what compiler and system are we using
