@@ -36,6 +36,8 @@ add_library(yul
 	ObjectOptimizer.h
 	ObjectParser.cpp
 	ObjectParser.h
+	RustYulOptimizerBridge.cpp
+	RustYulOptimizerBridge.h
 	Scope.cpp
 	Scope.h
 	ScopeFiller.cpp
@@ -256,3 +258,8 @@ add_library(yul
 )
 
 target_link_libraries(yul PUBLIC evmasm solutil langutil smtutil fmt::fmt-header-only)
+
+if (USE_RUST_YUL_OPTIMIZER)
+	target_link_libraries(yul PUBLIC yul_optimizer_bridge PRIVATE yul_optimizer)
+	target_compile_definitions(yul PUBLIC SOLIDITY_USE_RUST_YUL_OPTIMIZER=1)
+endif()

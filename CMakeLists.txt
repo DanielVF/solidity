@@ -40,6 +40,7 @@ option(STRICT_Z3_VERSION "Require the exact version of Z3 solver expected by our
 option(PEDANTIC "Enable extra warnings and pedantic build flags. Treat all warnings as errors." ON)
 option(PROFILE_OPTIMIZER_STEPS "Output performance metrics for the optimiser steps." OFF)
 option(USE_RUST_EVMASM_OPTIMIZER "Use the Rust libevmasm optimizer bridge implementation." OFF)
+option(USE_RUST_YUL_OPTIMIZER "Use the Rust libyul optimizer bridge implementation." OFF)
 option(
 	IGNORE_VENDORED_DEPENDENCIES
 	"Ignore libraries provided as submodules of the repository and allow CMake to look for \
@@ -81,14 +82,14 @@ if (PROFILE_OPTIMIZER_STEPS)
     add_definitions(-DPROFILE_OPTIMIZER_STEPS)
 endif()
 
-if (USE_RUST_EVMASM_OPTIMIZER)
+if (USE_RUST_EVMASM_OPTIMIZER OR USE_RUST_YUL_OPTIMIZER)
 	if (POLICY CMP0118)
 		cmake_policy(SET CMP0118 NEW)
 	endif()
 	find_package(Corrosion QUIET)
 	if (NOT Corrosion_FOUND)
 		if (CMAKE_VERSION VERSION_LESS "3.19")
-			message(FATAL_ERROR "USE_RUST_EVMASM_OPTIMIZER requires an installed Corrosion package when using CMake before 3.19.")
+			message(FATAL_ERROR "Rust optimizer builds require an installed Corrosion package when using CMake before 3.19.")
 		endif()
 		include(FetchContent)
 		FetchContent_Declare(
@@ -98,18 +99,35 @@ if (USE_RUST_EVMASM_OPTIMIZER)
 		)
 		FetchContent_MakeAvailable(Corrosion)
 	endif()
+	set(SOLIDITY_RUST_CRATES)
+	if (USE_RUST_EVMASM_OPTIMIZER)
+		list(APPEND SOLIDITY_RUST_CRATES evmasm-optimizer)
+	endif()
+	if (USE_RUST_YUL_OPTIMIZER)
+		list(APPEND SOLIDITY_RUST_CRATES yul-optimizer)
+	endif()
 	corrosion_import_crate(
 		MANIFEST_PATH ${PROJECT_SOURCE_DIR}/rust/Cargo.toml
-		CRATES evmasm-optimizer
+		CRATES ${SOLIDITY_RUST_CRATES}
 		CRATE_TYPES staticlib
 		LOCKED
 	)
-	corrosion_add_cxxbridge(
-		evmasm_optimizer_bridge
-		CRATE evmasm_optimizer
-		REGEN_TARGET evmasm_optimizer_bridge_regen
-		FILES bridge.rs
-	)
+	if (USE_RUST_EVMASM_OPTIMIZER)
+		corrosion_add_cxxbridge(
+			evmasm_optimizer_bridge
+			CRATE evmasm_optimizer
+			REGEN_TARGET evmasm_optimizer_bridge_regen
+			FILES bridge.rs
+		)
+	endif()
+	if (USE_RUST_YUL_OPTIMIZER)
+		corrosion_add_cxxbridge(
+			yul_optimizer_bridge
+			CRATE yul_optimizer
+			REGEN_TARGET yul_optimizer_bridge_regen
+			FILES bridge.rs
+		)
+	endif()
 endif()
 
 # Figure out what compiler and system are we using

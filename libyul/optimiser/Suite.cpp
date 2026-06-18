@@ -21,6 +21,10 @@
 
 #include <libyul/optimiser/Suite.h>
 
+#if defined(SOLIDITY_USE_RUST_YUL_OPTIMIZER)
+#include <libyul/RustYulOptimizerBridge.h>
+#endif
+
 #include <libyul/optimiser/Disambiguator.h>
 #include <libyul/optimiser/VarDeclInitializer.h>
 #include <libyul/optimiser/BlockFlattener.h>
@@ -117,6 +121,76 @@ void OptimiserSuite::run(
 			reservedIdentifiers
 		)(_object.code()->root()));
 	}
+
+#if defined(SOLIDITY_USE_RUST_YUL_OPTIMIZER)
+	{
+		RustYulOptimizerResult rustBridgeResult = optimizeYulWithRust(
+			astRoot,
+			dialect,
+			_object,
+			_optimizeStackAllocation,
+			_optimisationSequence,
+			_optimisationCleanupSequence,
+			_expectedExecutionsPerDeployment,
+			reservedIdentifiers
+		);
+		assertThrow(rustBridgeResult.ok, OptimizerException, rustBridgeResult.errorMessage);
+
+		astRoot = std::move(rustBridgeResult.optimizedBlock);
+		NameDispenser dispenser{dialect, astRoot, reservedIdentifiers};
+		OptimiserStepContext context{dialect, dispenser, reservedIdentifiers, _expectedExecutionsPerDeployment};
+		OptimiserSuite suite(context, Debug::None);
+
+		size_t stackCompressorMaxIterations = 16;
+
+		if (evmDialect)
+		{
+			yulAssert(_meter, "");
+			{
+				PROFILER_PROBE("ConstantOptimiser", probe);
+				ConstantOptimiser{*evmDialect, *_meter}(astRoot);
+			}
+			if (usesOptimizedCodeGenerator)
+			{
+				{
+					PROFILER_PROBE("StackCompressor", probe);
+					_object.setCode(std::make_shared<AST>(dialect, std::move(astRoot)));
+					astRoot = std::get<1>(StackCompressor::run(
+						_object,
+						_optimizeStackAllocation,
+						stackCompressorMaxIterations
+					));
+				}
+				if (evmDialect->providesObjectAccess())
+				{
+					PROFILER_PROBE("StackLimitEvader", probe);
+					_object.setCode(std::make_shared<AST>(dialect, std::move(astRoot)));
+					astRoot = StackLimitEvader::run(suite.m_context, _object);
+				}
+			}
+			else if (evmDialect->providesObjectAccess() && _optimizeStackAllocation)
+			{
+				PROFILER_PROBE("StackLimitEvader", probe);
+				_object.setCode(std::make_shared<AST>(dialect, std::move(astRoot)));
+				astRoot = StackLimitEvader::run(suite.m_context, _object);
+			}
+		}
+
+		dispenser.reset(astRoot);
+		{
+			PROFILER_PROBE("NameSimplifier", probe);
+			NameSimplifier::run(suite.m_context, astRoot);
+		}
+		{
+			PROFILER_PROBE("VarNameCleaner", probe);
+			VarNameCleaner::run(suite.m_context, astRoot);
+		}
+
+		_object.setCode(std::make_shared<AST>(dialect, std::move(astRoot)));
+		_object.analysisInfo = std::make_shared<AsmAnalysisInfo>(AsmAnalyzer::analyzeStrictAssertCorrect(_object));
+		return;
+	}
+#endif
 
 	NameDispenser dispenser{dialect, astRoot, reservedIdentifiers};
 	OptimiserStepContext context{dialect, dispenser, reservedIdentifiers, _expectedExecutionsPerDeployment};

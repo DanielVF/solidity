@@ -1,5 +1,6 @@
 [workspace]
 members = [
 	"crates/evmasm-optimizer",
+	"crates/yul-optimizer",
 ]
 resolver = "2"
