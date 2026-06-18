@@ -10,16 +10,21 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub fn run(request: &mut ffi::WireYulOptimizerRequest) -> Result<(), OptimizerError> {
     let root = request.root_block_id;
+    let builtin_side_effects = builtin_side_effects(request);
+    let msize_builtin_handles = msize_builtin_handles(request);
     let call_graph = call_graph(request, root)?;
-    let function_side_effects = side_effects(request, &call_graph);
-    let allow_msize_optimization = !contains_msize(request)?;
+    let function_side_effects = side_effects(&call_graph, &builtin_side_effects);
+    let allow_msize_optimization = !contains_msize(request, &msize_builtin_handles)?;
 
     loop {
         let references = count_references(request)?;
+        let expression_side_effects_cache = vec![None; request.expressions.len()];
         let mut pruner = UnusedPruner {
             request,
             references,
             function_side_effects: &function_side_effects,
+            builtin_side_effects: &builtin_side_effects,
+            expression_side_effects_cache,
             allow_msize_optimization,
             should_run_again: false,
         };
@@ -122,15 +127,18 @@ impl SideEffects {
 
 struct UnusedPruner<'a, 'b> {
     request: &'a mut ffi::WireYulOptimizerRequest,
-    references: BTreeMap<FunctionHandle, usize>,
+    references: ReferenceCounts,
     function_side_effects: &'b BTreeMap<FunctionHandle, SideEffects>,
+    builtin_side_effects: &'b BTreeMap<u64, SideEffects>,
+    expression_side_effects_cache: Vec<Option<SideEffects>>,
     allow_msize_optimization: bool,
     should_run_again: bool,
 }
 
 impl UnusedPruner<'_, '_> {
     fn visit_block(&mut self, block_id: u64) -> Result<(), OptimizerError> {
-        let statement_ids = self.request.blocks[block_id as usize].statement_ids.clone();
+        let block_index = block_id as usize;
+        let statement_ids = std::mem::take(&mut self.request.blocks[block_index].statement_ids);
         let mut retained = Vec::with_capacity(statement_ids.len());
 
         for statement_id in statement_ids {
@@ -141,9 +149,11 @@ impl UnusedPruner<'_, '_> {
             }
         }
 
-        self.request.blocks[block_id as usize].statement_ids = retained.clone();
+        self.request.blocks[block_index].statement_ids = retained;
 
-        for statement_id in retained {
+        let retained_len = self.request.blocks[block_index].statement_ids.len();
+        for index in 0..retained_len {
+            let statement_id = self.request.blocks[block_index].statement_ids[index];
             self.visit_statement(statement_id)?;
         }
 
@@ -154,44 +164,54 @@ impl UnusedPruner<'_, '_> {
         &mut self,
         statement_id: u64,
     ) -> Result<StatementAction, OptimizerError> {
-        let statement = self.request.statements[statement_id as usize].clone();
-        match statement.kind {
+        let statement_index = statement_id as usize;
+        match self.request.statements[statement_index].kind {
             STATEMENT_FUNCTION_DEFINITION => {
-                if self.used(statement.name_id) {
+                let name_id = self.request.statements[statement_index].name_id;
+                if self.used(name_id) {
                     return Ok(StatementAction::Keep);
                 }
 
-                let removed_references =
-                    references_in_block(self.request, statement.body_block_id)?;
+                let body_block_id = self.request.statements[statement_index].body_block_id;
+                let removed_references = references_in_block(self.request, body_block_id)?;
                 self.subtract_references(&removed_references);
                 Ok(StatementAction::Remove)
             }
             STATEMENT_VARIABLE_DECLARATION => {
-                let all_unused = statement
-                    .variable_ids
-                    .iter()
-                    .all(|name_id| !self.used(self.request.names[*name_id as usize].name_id));
+                let variable_ids_len = self.request.statements[statement_index].variable_ids.len();
+                let mut all_unused = true;
+                for index in 0..variable_ids_len {
+                    let variable_id =
+                        self.request.statements[statement_index].variable_ids[index] as usize;
+                    let name_id = self.request.names[variable_id].name_id;
+                    if self.used(name_id) {
+                        all_unused = false;
+                        break;
+                    }
+                }
                 if !all_unused {
                     return Ok(StatementAction::Keep);
                 }
 
-                if !statement.has_value {
+                if !self.request.statements[statement_index].has_value {
                     return Ok(StatementAction::Remove);
                 }
 
-                if self.expression_can_be_removed(statement.value_expression_id)? {
+                let value_expression_id =
+                    self.request.statements[statement_index].value_expression_id;
+                if self.expression_can_be_removed(value_expression_id)? {
                     let removed_references =
-                        references_in_expression(self.request, statement.value_expression_id)?;
+                        references_in_expression(self.request, value_expression_id)?;
                     self.subtract_references(&removed_references);
                     return Ok(StatementAction::Remove);
                 }
 
-                if statement.variable_ids.len() == 1 {
+                if variable_ids_len == 1 {
                     if let Some(discard_handle) = self.discard_handle() {
                         let replacement = self.new_discard_statement(
-                            statement.debug_data_id,
+                            self.request.statements[statement_index].debug_data_id,
                             discard_handle,
-                            statement.value_expression_id,
+                            value_expression_id,
                         );
                         return Ok(StatementAction::Replace(replacement));
                     }
@@ -200,9 +220,9 @@ impl UnusedPruner<'_, '_> {
                 Ok(StatementAction::Keep)
             }
             STATEMENT_EXPRESSION => {
-                if self.expression_can_be_removed(statement.expression_id)? {
-                    let removed_references =
-                        references_in_expression(self.request, statement.expression_id)?;
+                let expression_id = self.request.statements[statement_index].expression_id;
+                if self.expression_can_be_removed(expression_id)? {
+                    let removed_references = references_in_expression(self.request, expression_id)?;
                     self.subtract_references(&removed_references);
                     Ok(StatementAction::Remove)
                 } else {
@@ -214,92 +234,107 @@ impl UnusedPruner<'_, '_> {
     }
 
     fn visit_statement(&mut self, statement_id: u64) -> Result<(), OptimizerError> {
-        let statement = self.request.statements[statement_id as usize].clone();
-        match statement.kind {
-            STATEMENT_FUNCTION_DEFINITION => self.visit_block(statement.body_block_id),
-            STATEMENT_IF => self.visit_block(statement.body_block_id),
+        let statement_index = statement_id as usize;
+        match self.request.statements[statement_index].kind {
+            STATEMENT_FUNCTION_DEFINITION | STATEMENT_IF => {
+                self.visit_block(self.request.statements[statement_index].body_block_id)
+            }
             STATEMENT_SWITCH => {
-                for case_id in statement.case_ids {
+                let case_ids_len = self.request.statements[statement_index].case_ids.len();
+                for index in 0..case_ids_len {
+                    let case_id = self.request.statements[statement_index].case_ids[index];
                     self.visit_block(self.request.cases[case_id as usize].body_block_id)?;
                 }
                 Ok(())
             }
             STATEMENT_FOR_LOOP => {
-                self.visit_block(statement.pre_block_id)?;
-                self.visit_block(statement.post_block_id)?;
-                self.visit_block(statement.body_block_id)
+                self.visit_block(self.request.statements[statement_index].pre_block_id)?;
+                self.visit_block(self.request.statements[statement_index].post_block_id)?;
+                self.visit_block(self.request.statements[statement_index].body_block_id)
             }
-            STATEMENT_BLOCK => self.visit_block(statement.block_id),
+            STATEMENT_BLOCK => self.visit_block(self.request.statements[statement_index].block_id),
             _ => Ok(()),
         }
     }
 
     fn used(&self, name_id: u64) -> bool {
-        self.references
-            .get(&FunctionHandle::Name(name_id))
-            .copied()
-            .unwrap_or(0)
-            > 0
+        self.references.name_count(name_id) > 0
     }
 
-    fn subtract_references(&mut self, subtrahend: &BTreeMap<FunctionHandle, usize>) {
+    fn subtract_references(&mut self, subtrahend: &ReferenceCounts) {
         if subtrahend.is_empty() {
             return;
         }
 
-        for (handle, count) in subtrahend {
-            let value = self.references.entry(*handle).or_default();
-            *value = value.saturating_sub(*count);
+        for (name_id, count) in subtrahend.name_counts() {
+            self.references.subtract_name(name_id, count);
         }
         self.should_run_again = true;
     }
 
-    fn expression_can_be_removed(&self, expression_id: u64) -> Result<bool, OptimizerError> {
+    fn expression_can_be_removed(&mut self, expression_id: u64) -> Result<bool, OptimizerError> {
         Ok(self
             .expression_side_effects(expression_id)?
             .can_be_removed(self.allow_msize_optimization))
     }
 
-    fn expression_side_effects(&self, expression_id: u64) -> Result<SideEffects, OptimizerError> {
-        let expression = &self.request.expressions[expression_id as usize];
-        match expression.kind {
+    fn expression_side_effects(
+        &mut self,
+        expression_id: u64,
+    ) -> Result<SideEffects, OptimizerError> {
+        let expression_index = expression_id as usize;
+        if let Some(cached) = self.expression_side_effects_cache[expression_index] {
+            return Ok(cached);
+        }
+
+        let effects = match self.request.expressions[expression_index].kind {
             EXPRESSION_IDENTIFIER | EXPRESSION_LITERAL => Ok(SideEffects::default()),
             EXPRESSION_FUNCTION_CALL => {
                 let mut effects = SideEffects::default();
-                for argument_id in expression.argument_expression_ids.iter().rev() {
-                    effects.add_assign(self.expression_side_effects(*argument_id)?);
+                let argument_ids_len = self.request.expressions[expression_index]
+                    .argument_expression_ids
+                    .len();
+                for index in (0..argument_ids_len).rev() {
+                    let argument_id =
+                        self.request.expressions[expression_index].argument_expression_ids[index];
+                    effects.add_assign(self.expression_side_effects(argument_id)?);
                 }
 
-                let callee_effects = match expression.function_name_kind {
-                    FUNCTION_NAME_BUILTIN => self
-                        .request
-                        .builtins
-                        .iter()
-                        .find(|builtin| {
-                            builtin.handle_id == expression.function_name_builtin_handle
-                        })
-                        .map(builtin_side_effect)
-                        .unwrap_or_else(SideEffects::worst),
-                    FUNCTION_NAME_IDENTIFIER => self
-                        .function_side_effects
-                        .get(&FunctionHandle::Name(expression.function_name_name_id))
-                        .copied()
-                        .unwrap_or_else(SideEffects::worst),
-                    _ => {
-                        return Err(OptimizerError::InvalidWire(format!(
-                            "invalid function name kind: {}",
-                            expression.function_name_kind
-                        )));
-                    }
-                };
+                let callee_effects =
+                    match self.request.expressions[expression_index].function_name_kind {
+                        FUNCTION_NAME_BUILTIN => self
+                            .builtin_side_effects
+                            .get(
+                                &self.request.expressions[expression_index]
+                                    .function_name_builtin_handle,
+                            )
+                            .copied()
+                            .unwrap_or_else(SideEffects::worst),
+                        FUNCTION_NAME_IDENTIFIER => self
+                            .function_side_effects
+                            .get(&FunctionHandle::Name(
+                                self.request.expressions[expression_index].function_name_name_id,
+                            ))
+                            .copied()
+                            .unwrap_or_else(SideEffects::worst),
+                        _ => {
+                            return Err(OptimizerError::InvalidWire(format!(
+                                "invalid function name kind: {}",
+                                self.request.expressions[expression_index].function_name_kind
+                            )));
+                        }
+                    };
                 effects.add_assign(callee_effects);
                 Ok(effects)
             }
             _ => Err(OptimizerError::InvalidWire(format!(
                 "invalid expression kind: {}",
-                expression.kind
+                self.request.expressions[expression_index].kind
             ))),
-        }
+        }?;
+
+        self.expression_side_effects_cache[expression_index] = Some(effects);
+        Ok(effects)
     }
 
     fn discard_handle(&self) -> Option<u64> {
@@ -349,17 +384,14 @@ enum StatementAction {
 
 fn count_references(
     request: &ffi::WireYulOptimizerRequest,
-) -> Result<BTreeMap<FunctionHandle, usize>, OptimizerError> {
+) -> Result<ReferenceCounts, OptimizerError> {
     let mut counter = ReferenceCounter {
         request,
-        references: BTreeMap::new(),
+        references: ReferenceCounts::with_name_count(request.strings.len()),
     };
     counter.visit_block(request.root_block_id)?;
     for reserved in &request.reserved_identifier_ids {
-        *counter
-            .references
-            .entry(FunctionHandle::Name(*reserved))
-            .or_default() += 1;
+        counter.references.increment_name(*reserved);
     }
     Ok(counter.references)
 }
@@ -367,10 +399,10 @@ fn count_references(
 fn references_in_block(
     request: &ffi::WireYulOptimizerRequest,
     block_id: u64,
-) -> Result<BTreeMap<FunctionHandle, usize>, OptimizerError> {
+) -> Result<ReferenceCounts, OptimizerError> {
     let mut counter = ReferenceCounter {
         request,
-        references: BTreeMap::new(),
+        references: ReferenceCounts::with_name_count(request.strings.len()),
     };
     counter.visit_block(block_id)?;
     Ok(counter.references)
@@ -379,95 +411,169 @@ fn references_in_block(
 fn references_in_expression(
     request: &ffi::WireYulOptimizerRequest,
     expression_id: u64,
-) -> Result<BTreeMap<FunctionHandle, usize>, OptimizerError> {
+) -> Result<ReferenceCounts, OptimizerError> {
     let mut counter = ReferenceCounter {
         request,
-        references: BTreeMap::new(),
+        references: ReferenceCounts::with_name_count(request.strings.len()),
     };
     counter.visit_expression(expression_id)?;
     Ok(counter.references)
 }
 
+#[derive(Clone, Debug, Default)]
+struct ReferenceCounts {
+    names: Vec<usize>,
+    nonzero_name_ids: Vec<u64>,
+}
+
+impl ReferenceCounts {
+    fn with_name_count(name_count: usize) -> Self {
+        Self {
+            names: vec![0; name_count],
+            nonzero_name_ids: Vec::new(),
+        }
+    }
+
+    fn increment_name(&mut self, name_id: u64) {
+        let index = name_id as usize;
+        if index >= self.names.len() {
+            self.names.resize(index + 1, 0);
+        }
+        if self.names[index] == 0 {
+            self.nonzero_name_ids.push(name_id);
+        }
+        self.names[index] += 1;
+    }
+
+    fn subtract_name(&mut self, name_id: u64, count: usize) {
+        let Some(value) = self.names.get_mut(name_id as usize) else {
+            return;
+        };
+        *value = value.saturating_sub(count);
+    }
+
+    fn name_count(&self, name_id: u64) -> usize {
+        self.names.get(name_id as usize).copied().unwrap_or(0)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.nonzero_name_ids.is_empty()
+    }
+
+    fn name_counts(&self) -> impl Iterator<Item = (u64, usize)> + '_ {
+        self.nonzero_name_ids.iter().filter_map(|name_id| {
+            let count = self.name_count(*name_id);
+            (count > 0).then_some((*name_id, count))
+        })
+    }
+}
+
 struct ReferenceCounter<'a> {
     request: &'a ffi::WireYulOptimizerRequest,
-    references: BTreeMap<FunctionHandle, usize>,
+    references: ReferenceCounts,
 }
 
 impl ReferenceCounter<'_> {
     fn visit_block(&mut self, block_id: u64) -> Result<(), OptimizerError> {
-        let statement_ids = self.request.blocks[block_id as usize].statement_ids.clone();
-        for statement_id in statement_ids {
+        let block_index = block_id as usize;
+        let statement_ids_len = self.request.blocks[block_index].statement_ids.len();
+        for index in 0..statement_ids_len {
+            let statement_id = self.request.blocks[block_index].statement_ids[index];
             self.visit_statement(statement_id)?;
         }
         Ok(())
     }
 
     fn visit_statement(&mut self, statement_id: u64) -> Result<(), OptimizerError> {
-        let statement = self.request.statements[statement_id as usize].clone();
-        match statement.kind {
-            STATEMENT_EXPRESSION => self.visit_expression(statement.expression_id),
+        let statement_index = statement_id as usize;
+        match self.request.statements[statement_index].kind {
+            STATEMENT_EXPRESSION => {
+                self.visit_expression(self.request.statements[statement_index].expression_id)
+            }
             STATEMENT_ASSIGNMENT => {
-                for variable_id in statement.variable_ids {
+                let variable_ids_len = self.request.statements[statement_index].variable_ids.len();
+                for index in 0..variable_ids_len {
+                    let variable_id = self.request.statements[statement_index].variable_ids[index];
                     let name_id = self.request.identifiers[variable_id as usize].name_id;
-                    *self
-                        .references
-                        .entry(FunctionHandle::Name(name_id))
-                        .or_default() += 1;
+                    self.references.increment_name(name_id);
                 }
-                self.visit_expression(statement.value_expression_id)
+                self.visit_expression(self.request.statements[statement_index].value_expression_id)
             }
             STATEMENT_VARIABLE_DECLARATION => {
-                if statement.has_value {
-                    self.visit_expression(statement.value_expression_id)?;
+                if self.request.statements[statement_index].has_value {
+                    self.visit_expression(
+                        self.request.statements[statement_index].value_expression_id,
+                    )?;
                 }
                 Ok(())
             }
-            STATEMENT_FUNCTION_DEFINITION => self.visit_block(statement.body_block_id),
+            STATEMENT_FUNCTION_DEFINITION => {
+                self.visit_block(self.request.statements[statement_index].body_block_id)
+            }
             STATEMENT_IF => {
-                self.visit_expression(statement.condition_expression_id)?;
-                self.visit_block(statement.body_block_id)
+                self.visit_expression(
+                    self.request.statements[statement_index].condition_expression_id,
+                )?;
+                self.visit_block(self.request.statements[statement_index].body_block_id)
             }
             STATEMENT_SWITCH => {
-                self.visit_expression(statement.switch_expression_id)?;
-                for case_id in statement.case_ids {
+                self.visit_expression(
+                    self.request.statements[statement_index].switch_expression_id,
+                )?;
+                let case_ids_len = self.request.statements[statement_index].case_ids.len();
+                for index in 0..case_ids_len {
+                    let case_id = self.request.statements[statement_index].case_ids[index];
                     self.visit_block(self.request.cases[case_id as usize].body_block_id)?;
                 }
                 Ok(())
             }
             STATEMENT_FOR_LOOP => {
-                self.visit_block(statement.pre_block_id)?;
-                self.visit_expression(statement.condition_expression_id)?;
-                self.visit_block(statement.body_block_id)?;
-                self.visit_block(statement.post_block_id)
+                self.visit_block(self.request.statements[statement_index].pre_block_id)?;
+                self.visit_expression(
+                    self.request.statements[statement_index].condition_expression_id,
+                )?;
+                self.visit_block(self.request.statements[statement_index].body_block_id)?;
+                self.visit_block(self.request.statements[statement_index].post_block_id)
             }
-            STATEMENT_BLOCK => self.visit_block(statement.block_id),
+            STATEMENT_BLOCK => self.visit_block(self.request.statements[statement_index].block_id),
             _ => Ok(()),
         }
     }
 
     fn visit_expression(&mut self, expression_id: u64) -> Result<(), OptimizerError> {
-        let expression = self.request.expressions[expression_id as usize].clone();
-        match expression.kind {
+        let expression_index = expression_id as usize;
+        match self.request.expressions[expression_index].kind {
             EXPRESSION_FUNCTION_CALL => {
-                *self
-                    .references
-                    .entry(function_handle(&expression)?)
-                    .or_default() += 1;
-                for argument_id in expression.argument_expression_ids.iter().rev() {
-                    self.visit_expression(*argument_id)?;
+                match self.request.expressions[expression_index].function_name_kind {
+                    FUNCTION_NAME_IDENTIFIER => self.references.increment_name(
+                        self.request.expressions[expression_index].function_name_name_id,
+                    ),
+                    FUNCTION_NAME_BUILTIN => {}
+                    _ => {
+                        return Err(OptimizerError::InvalidWire(format!(
+                            "invalid function name kind: {}",
+                            self.request.expressions[expression_index].function_name_kind
+                        )));
+                    }
+                }
+                let argument_ids_len = self.request.expressions[expression_index]
+                    .argument_expression_ids
+                    .len();
+                for index in (0..argument_ids_len).rev() {
+                    let argument_id =
+                        self.request.expressions[expression_index].argument_expression_ids[index];
+                    self.visit_expression(argument_id)?;
                 }
             }
             EXPRESSION_IDENTIFIER => {
-                *self
-                    .references
-                    .entry(FunctionHandle::Name(expression.name_id))
-                    .or_default() += 1;
+                self.references
+                    .increment_name(self.request.expressions[expression_index].name_id);
             }
             EXPRESSION_LITERAL => {}
             _ => {
                 return Err(OptimizerError::InvalidWire(format!(
                     "invalid expression kind: {}",
-                    expression.kind
+                    self.request.expressions[expression_index].kind
                 )));
             }
         }
@@ -475,9 +581,13 @@ impl ReferenceCounter<'_> {
     }
 }
 
-fn contains_msize(request: &ffi::WireYulOptimizerRequest) -> Result<bool, OptimizerError> {
+fn contains_msize(
+    request: &ffi::WireYulOptimizerRequest,
+    msize_builtin_handles: &BTreeSet<u64>,
+) -> Result<bool, OptimizerError> {
     let mut finder = MSizeFinder {
         request,
+        msize_builtin_handles,
         found: false,
     };
     finder.visit_block(request.root_block_id)?;
@@ -486,13 +596,16 @@ fn contains_msize(request: &ffi::WireYulOptimizerRequest) -> Result<bool, Optimi
 
 struct MSizeFinder<'a> {
     request: &'a ffi::WireYulOptimizerRequest,
+    msize_builtin_handles: &'a BTreeSet<u64>,
     found: bool,
 }
 
 impl MSizeFinder<'_> {
     fn visit_block(&mut self, block_id: u64) -> Result<(), OptimizerError> {
-        let statement_ids = self.request.blocks[block_id as usize].statement_ids.clone();
-        for statement_id in statement_ids {
+        let block_index = block_id as usize;
+        let statement_ids_len = self.request.blocks[block_index].statement_ids.len();
+        for index in 0..statement_ids_len {
+            let statement_id = self.request.blocks[block_index].statement_ids[index];
             self.visit_statement(statement_id)?;
             if self.found {
                 break;
@@ -502,56 +615,77 @@ impl MSizeFinder<'_> {
     }
 
     fn visit_statement(&mut self, statement_id: u64) -> Result<(), OptimizerError> {
-        let statement = self.request.statements[statement_id as usize].clone();
-        match statement.kind {
-            STATEMENT_EXPRESSION => self.visit_expression(statement.expression_id),
-            STATEMENT_ASSIGNMENT => self.visit_expression(statement.value_expression_id),
+        let statement_index = statement_id as usize;
+        match self.request.statements[statement_index].kind {
+            STATEMENT_EXPRESSION => {
+                self.visit_expression(self.request.statements[statement_index].expression_id)
+            }
+            STATEMENT_ASSIGNMENT => {
+                self.visit_expression(self.request.statements[statement_index].value_expression_id)
+            }
             STATEMENT_VARIABLE_DECLARATION => {
-                if statement.has_value {
-                    self.visit_expression(statement.value_expression_id)?;
+                if self.request.statements[statement_index].has_value {
+                    self.visit_expression(
+                        self.request.statements[statement_index].value_expression_id,
+                    )?;
                 }
                 Ok(())
             }
-            STATEMENT_FUNCTION_DEFINITION => self.visit_block(statement.body_block_id),
+            STATEMENT_FUNCTION_DEFINITION => {
+                self.visit_block(self.request.statements[statement_index].body_block_id)
+            }
             STATEMENT_IF => {
-                self.visit_expression(statement.condition_expression_id)?;
-                self.visit_block(statement.body_block_id)
+                self.visit_expression(
+                    self.request.statements[statement_index].condition_expression_id,
+                )?;
+                self.visit_block(self.request.statements[statement_index].body_block_id)
             }
             STATEMENT_SWITCH => {
-                self.visit_expression(statement.switch_expression_id)?;
-                for case_id in statement.case_ids {
+                self.visit_expression(
+                    self.request.statements[statement_index].switch_expression_id,
+                )?;
+                let case_ids_len = self.request.statements[statement_index].case_ids.len();
+                for index in 0..case_ids_len {
+                    let case_id = self.request.statements[statement_index].case_ids[index];
                     self.visit_block(self.request.cases[case_id as usize].body_block_id)?;
                 }
                 Ok(())
             }
             STATEMENT_FOR_LOOP => {
-                self.visit_block(statement.pre_block_id)?;
-                self.visit_expression(statement.condition_expression_id)?;
-                self.visit_block(statement.post_block_id)?;
-                self.visit_block(statement.body_block_id)
+                self.visit_block(self.request.statements[statement_index].pre_block_id)?;
+                self.visit_expression(
+                    self.request.statements[statement_index].condition_expression_id,
+                )?;
+                self.visit_block(self.request.statements[statement_index].post_block_id)?;
+                self.visit_block(self.request.statements[statement_index].body_block_id)
             }
-            STATEMENT_BLOCK => self.visit_block(statement.block_id),
+            STATEMENT_BLOCK => self.visit_block(self.request.statements[statement_index].block_id),
             _ => Ok(()),
         }
     }
 
     fn visit_expression(&mut self, expression_id: u64) -> Result<(), OptimizerError> {
-        let expression = self.request.expressions[expression_id as usize].clone();
-        if expression.kind != EXPRESSION_FUNCTION_CALL {
+        let expression_index = expression_id as usize;
+        if self.request.expressions[expression_index].kind != EXPRESSION_FUNCTION_CALL {
             return Ok(());
         }
 
-        if expression.function_name_kind == FUNCTION_NAME_BUILTIN
-            && self.request.builtins.iter().any(|builtin| {
-                builtin.handle_id == expression.function_name_builtin_handle && builtin.is_msize
-            })
+        if self.request.expressions[expression_index].function_name_kind == FUNCTION_NAME_BUILTIN
+            && self
+                .msize_builtin_handles
+                .contains(&self.request.expressions[expression_index].function_name_builtin_handle)
         {
             self.found = true;
             return Ok(());
         }
 
-        for argument_id in expression.argument_expression_ids.iter().rev() {
-            self.visit_expression(*argument_id)?;
+        let argument_ids_len = self.request.expressions[expression_index]
+            .argument_expression_ids
+            .len();
+        for index in (0..argument_ids_len).rev() {
+            let argument_id =
+                self.request.expressions[expression_index].argument_expression_ids[index];
+            self.visit_expression(argument_id)?;
             if self.found {
                 break;
             }
@@ -585,41 +719,56 @@ struct CallGraphGenerator<'a> {
 
 impl CallGraphGenerator<'_> {
     fn visit_block(&mut self, block_id: u64) -> Result<(), OptimizerError> {
-        let statement_ids = self.request.blocks[block_id as usize].statement_ids.clone();
-        for statement_id in statement_ids {
+        let block_index = block_id as usize;
+        let statement_ids_len = self.request.blocks[block_index].statement_ids.len();
+        for index in 0..statement_ids_len {
+            let statement_id = self.request.blocks[block_index].statement_ids[index];
             self.visit_statement(statement_id)?;
         }
         Ok(())
     }
 
     fn visit_statement(&mut self, statement_id: u64) -> Result<(), OptimizerError> {
-        let statement = self.request.statements[statement_id as usize].clone();
-        match statement.kind {
-            STATEMENT_EXPRESSION => self.visit_expression(statement.expression_id),
-            STATEMENT_ASSIGNMENT => self.visit_expression(statement.value_expression_id),
+        let statement_index = statement_id as usize;
+        match self.request.statements[statement_index].kind {
+            STATEMENT_EXPRESSION => {
+                self.visit_expression(self.request.statements[statement_index].expression_id)
+            }
+            STATEMENT_ASSIGNMENT => {
+                self.visit_expression(self.request.statements[statement_index].value_expression_id)
+            }
             STATEMENT_VARIABLE_DECLARATION => {
-                if statement.has_value {
-                    self.visit_expression(statement.value_expression_id)?;
+                if self.request.statements[statement_index].has_value {
+                    self.visit_expression(
+                        self.request.statements[statement_index].value_expression_id,
+                    )?;
                 }
                 Ok(())
             }
             STATEMENT_FUNCTION_DEFINITION => {
                 let previous_function = self.current_function;
-                self.current_function = FunctionHandle::Name(statement.name_id);
+                self.current_function =
+                    FunctionHandle::Name(self.request.statements[statement_index].name_id);
                 self.graph
                     .function_calls
                     .insert(self.current_function, Vec::new());
-                self.visit_block(statement.body_block_id)?;
+                self.visit_block(self.request.statements[statement_index].body_block_id)?;
                 self.current_function = previous_function;
                 Ok(())
             }
             STATEMENT_IF => {
-                self.visit_expression(statement.condition_expression_id)?;
-                self.visit_block(statement.body_block_id)
+                self.visit_expression(
+                    self.request.statements[statement_index].condition_expression_id,
+                )?;
+                self.visit_block(self.request.statements[statement_index].body_block_id)
             }
             STATEMENT_SWITCH => {
-                self.visit_expression(statement.switch_expression_id)?;
-                for case_id in statement.case_ids {
+                self.visit_expression(
+                    self.request.statements[statement_index].switch_expression_id,
+                )?;
+                let case_ids_len = self.request.statements[statement_index].case_ids.len();
+                for index in 0..case_ids_len {
+                    let case_id = self.request.statements[statement_index].case_ids[index];
                     self.visit_block(self.request.cases[case_id as usize].body_block_id)?;
                 }
                 Ok(())
@@ -628,31 +777,45 @@ impl CallGraphGenerator<'_> {
                 self.graph
                     .functions_with_loops
                     .insert(self.current_function);
-                self.visit_block(statement.pre_block_id)?;
-                self.visit_expression(statement.condition_expression_id)?;
-                self.visit_block(statement.body_block_id)?;
-                self.visit_block(statement.post_block_id)
+                self.visit_block(self.request.statements[statement_index].pre_block_id)?;
+                self.visit_expression(
+                    self.request.statements[statement_index].condition_expression_id,
+                )?;
+                self.visit_block(self.request.statements[statement_index].body_block_id)?;
+                self.visit_block(self.request.statements[statement_index].post_block_id)
             }
-            STATEMENT_BLOCK => self.visit_block(statement.block_id),
+            STATEMENT_BLOCK => self.visit_block(self.request.statements[statement_index].block_id),
             _ => Ok(()),
         }
     }
 
     fn visit_expression(&mut self, expression_id: u64) -> Result<(), OptimizerError> {
-        let expression = self.request.expressions[expression_id as usize].clone();
-        if expression.kind == EXPRESSION_FUNCTION_CALL {
-            let callee = function_handle(&expression)?;
-            let callees = self
-                .graph
-                .function_calls
-                .entry(self.current_function)
-                .or_default();
-            if !callees.contains(&callee) {
-                callees.push(callee);
+        let expression_index = expression_id as usize;
+        if self.request.expressions[expression_index].kind == EXPRESSION_FUNCTION_CALL {
+            let callee = function_handle_from_parts(
+                self.request.expressions[expression_index].function_name_kind,
+                self.request.expressions[expression_index].function_name_name_id,
+                self.request.expressions[expression_index].function_name_builtin_handle,
+            )?;
+
+            {
+                let callees = self
+                    .graph
+                    .function_calls
+                    .entry(self.current_function)
+                    .or_default();
+                if !callees.contains(&callee) {
+                    callees.push(callee);
+                }
             }
 
-            for argument_id in expression.argument_expression_ids.iter().rev() {
-                self.visit_expression(*argument_id)?;
+            let argument_ids_len = self.request.expressions[expression_index]
+                .argument_expression_ids
+                .len();
+            for index in (0..argument_ids_len).rev() {
+                let argument_id =
+                    self.request.expressions[expression_index].argument_expression_ids[index];
+                self.visit_expression(argument_id)?;
             }
         }
         Ok(())
@@ -660,10 +823,9 @@ impl CallGraphGenerator<'_> {
 }
 
 fn side_effects(
-    request: &ffi::WireYulOptimizerRequest,
     call_graph: &CallGraph,
+    builtin_effects: &BTreeMap<u64, SideEffects>,
 ) -> BTreeMap<FunctionHandle, SideEffects> {
-    let builtin_effects = builtin_side_effects(request);
     let mut output = BTreeMap::new();
 
     for function in &call_graph.functions_with_loops {
@@ -680,7 +842,7 @@ fn side_effects(
             collect_side_effects(
                 *callee,
                 call_graph,
-                &builtin_effects,
+                builtin_effects,
                 &output,
                 &mut BTreeSet::new(),
                 &mut combined,
@@ -791,6 +953,14 @@ fn builtin_side_effects(request: &ffi::WireYulOptimizerRequest) -> BTreeMap<u64,
         .collect()
 }
 
+fn msize_builtin_handles(request: &ffi::WireYulOptimizerRequest) -> BTreeSet<u64> {
+    request
+        .builtins
+        .iter()
+        .filter_map(|builtin| builtin.is_msize.then_some(builtin.handle_id))
+        .collect()
+}
+
 fn builtin_side_effect(builtin: &ffi::WireBuiltinFunction) -> SideEffects {
     SideEffects {
         movable: builtin.movable,
@@ -805,15 +975,17 @@ fn builtin_side_effect(builtin: &ffi::WireBuiltinFunction) -> SideEffects {
     }
 }
 
-fn function_handle(expression: &ffi::WireExpression) -> Result<FunctionHandle, OptimizerError> {
-    match expression.function_name_kind {
-        FUNCTION_NAME_IDENTIFIER => Ok(FunctionHandle::Name(expression.function_name_name_id)),
-        FUNCTION_NAME_BUILTIN => Ok(FunctionHandle::Builtin(
-            expression.function_name_builtin_handle,
-        )),
+fn function_handle_from_parts(
+    function_name_kind: u8,
+    function_name_name_id: u64,
+    function_name_builtin_handle: u64,
+) -> Result<FunctionHandle, OptimizerError> {
+    match function_name_kind {
+        FUNCTION_NAME_IDENTIFIER => Ok(FunctionHandle::Name(function_name_name_id)),
+        FUNCTION_NAME_BUILTIN => Ok(FunctionHandle::Builtin(function_name_builtin_handle)),
         _ => Err(OptimizerError::InvalidWire(format!(
             "invalid function name kind: {}",
-            expression.function_name_kind
+            function_name_kind
         ))),
     }
 }

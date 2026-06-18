@@ -118,12 +118,17 @@ mod tests {
     }
 
     #[test]
-    fn no_op_returns_original_arena() {
+    fn no_op_returns_grouped_empty_block() {
         let result = optimize_yul(empty_request());
 
         assert!(result.ok, "{}", result.error_message);
-        assert_eq!(result.blocks.len(), 1);
         assert_eq!(result.root_block_id, 0);
+        assert_eq!(result.blocks.len(), 2);
+        assert_eq!(result.statements.len(), 1);
+        assert_eq!(result.blocks[0].statement_ids, vec![0]);
+        assert_eq!(result.statements[0].kind, wire::STATEMENT_BLOCK);
+        assert_eq!(result.statements[0].block_id, 1);
+        assert!(result.blocks[1].statement_ids.is_empty());
     }
 
     #[test]
