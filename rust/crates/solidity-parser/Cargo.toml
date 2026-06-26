@@ -1,0 +1,12 @@
+[package]
+name = "solidity-parser"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "solidity_parser"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+cxx = "1"

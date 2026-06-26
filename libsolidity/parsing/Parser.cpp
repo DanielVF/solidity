@@ -25,6 +25,9 @@
 
 #include <libsolidity/ast/UserDefinableOperators.h>
 #include <libsolidity/interface/Version.h>
+#if defined(SOLIDITY_USE_RUST_SOLIDITY_PARSER)
+#include <libsolidity/parsing/RustParserBridge.h>
+#endif
 #include <libyul/AST.h>
 #include <libyul/AsmParser.h>
 #include <libyul/backends/evm/EVMDialect.h>
@@ -91,6 +94,18 @@ ASTPointer<SourceUnit> Parser::parse(CharStream& _charStream)
 	solAssert(!m_insideModifier, "");
 	try
 	{
+#if defined(SOLIDITY_USE_RUST_SOLIDITY_PARSER)
+		{
+			RustParserResult rustResult = parseSourceUnitWithRust(_charStream, m_evmVersion, m_currentNodeID);
+			if (ASTPointer<SourceUnit> rustSourceUnit = createSourceUnitAstFromRustIfSupported(rustResult))
+			{
+				reportRustParserDiagnostics(m_errorReporter, rustResult);
+				m_currentNodeID = rustResult.maxID;
+				m_experimentalSolidityEnabledInCurrentSourceUnit = rustResult.experimentalSolidity;
+				return rustSourceUnit;
+			}
+		}
+#endif
 		m_recursionDepth = 0;
 		m_scanner = std::make_shared<Scanner>(_charStream);
 		ASTNodeFactory nodeFactory(*this);

@@ -187,6 +187,8 @@ set(sources
 	parsing/DocStringParser.h
 	parsing/Parser.cpp
 	parsing/Parser.h
+	parsing/RustParserBridge.cpp
+	parsing/RustParserBridge.h
 	parsing/Token.h
 	experimental/analysis/Analysis.cpp
 	experimental/analysis/Analysis.h
@@ -225,4 +227,9 @@ if (EMSCRIPTEN)
             message(FATAL_ERROR "Z3 library must be present for EMSCRIPTEN build")
     endif()
     target_link_libraries(solidity PUBLIC z3::libz3)
+endif()
+
+if (USE_RUST_SOLIDITY_PARSER)
+	target_link_libraries(solidity PUBLIC solidity_parser_bridge PRIVATE solidity_parser)
+	target_compile_definitions(solidity PUBLIC SOLIDITY_USE_RUST_SOLIDITY_PARSER=1)
 endif()

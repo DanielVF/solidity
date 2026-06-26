@@ -41,6 +41,7 @@ option(PEDANTIC "Enable extra warnings and pedantic build flags. Treat all warni
 option(PROFILE_OPTIMIZER_STEPS "Output performance metrics for the optimiser steps." OFF)
 option(USE_RUST_EVMASM_OPTIMIZER "Use the Rust libevmasm optimizer bridge implementation." OFF)
 option(USE_RUST_YUL_OPTIMIZER "Use the Rust libyul optimizer bridge implementation." OFF)
+option(USE_RUST_SOLIDITY_PARSER "Use the Rust libsolidity parser bridge implementation." OFF)
 option(
 	IGNORE_VENDORED_DEPENDENCIES
 	"Ignore libraries provided as submodules of the repository and allow CMake to look for \
@@ -82,14 +83,14 @@ if (PROFILE_OPTIMIZER_STEPS)
     add_definitions(-DPROFILE_OPTIMIZER_STEPS)
 endif()
 
-if (USE_RUST_EVMASM_OPTIMIZER OR USE_RUST_YUL_OPTIMIZER)
+if (USE_RUST_EVMASM_OPTIMIZER OR USE_RUST_YUL_OPTIMIZER OR USE_RUST_SOLIDITY_PARSER)
 	if (POLICY CMP0118)
 		cmake_policy(SET CMP0118 NEW)
 	endif()
 	find_package(Corrosion QUIET)
 	if (NOT Corrosion_FOUND)
 		if (CMAKE_VERSION VERSION_LESS "3.19")
-			message(FATAL_ERROR "Rust optimizer builds require an installed Corrosion package when using CMake before 3.19.")
+			message(FATAL_ERROR "Rust builds require an installed Corrosion package when using CMake before 3.19.")
 		endif()
 		include(FetchContent)
 		FetchContent_Declare(
@@ -106,12 +107,20 @@ if (USE_RUST_EVMASM_OPTIMIZER OR USE_RUST_YUL_OPTIMIZER)
 	if (USE_RUST_YUL_OPTIMIZER)
 		list(APPEND SOLIDITY_RUST_CRATES yul-optimizer)
 	endif()
+	if (USE_RUST_SOLIDITY_PARSER)
+		list(APPEND SOLIDITY_RUST_CRATES solidity-parser)
+	endif()
 	corrosion_import_crate(
 		MANIFEST_PATH ${PROJECT_SOURCE_DIR}/rust/Cargo.toml
 		CRATES ${SOLIDITY_RUST_CRATES}
 		CRATE_TYPES staticlib
 		LOCKED
 	)
+	if (USE_RUST_SOLIDITY_PARSER)
+		# Cargo otherwise tries to reuse Make jobserver file descriptors that are
+		# not valid by the time Corrosion invokes it through CMake.
+		corrosion_set_env_vars(solidity_parser "MAKEFLAGS=")
+	endif()
 	if (USE_RUST_EVMASM_OPTIMIZER)
 		corrosion_add_cxxbridge(
 			evmasm_optimizer_bridge
@@ -125,6 +134,14 @@ if (USE_RUST_EVMASM_OPTIMIZER OR USE_RUST_YUL_OPTIMIZER)
 			yul_optimizer_bridge
 			CRATE yul_optimizer
 			REGEN_TARGET yul_optimizer_bridge_regen
+			FILES bridge.rs
+		)
+	endif()
+	if (USE_RUST_SOLIDITY_PARSER)
+		corrosion_add_cxxbridge(
+			solidity_parser_bridge
+			CRATE solidity_parser
+			REGEN_TARGET solidity_parser_bridge_regen
 			FILES bridge.rs
 		)
 	endif()

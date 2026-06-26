@@ -1,0 +1,21783 @@
+use crate::{bridge::ffi, token};
+use std::cell::{Cell, RefCell};
+use std::panic::{catch_unwind, panic_any, resume_unwind, AssertUnwindSafe};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Once,
+};
+
+pub const AST_NODE_KIND_NONE: u8 = 0;
+pub const AST_NODE_KIND_STRUCTURED_DOCUMENTATION: u8 = 1;
+pub const AST_NODE_KIND_IDENTIFIER: u8 = 2;
+pub const AST_NODE_KIND_IDENTIFIER_PATH: u8 = 3;
+pub const AST_NODE_KIND_USER_DEFINED_TYPE_NAME: u8 = 4;
+pub const AST_NODE_KIND_ENUM_VALUE: u8 = 5;
+pub const AST_NODE_KIND_PARAMETER_LIST: u8 = 6;
+pub const AST_NODE_KIND_OVERRIDE_SPECIFIER: u8 = 7;
+pub const AST_NODE_KIND_TYPE_CLASS_NAME: u8 = 8;
+pub const AST_NODE_KIND_INHERITANCE_SPECIFIER: u8 = 9;
+pub const AST_NODE_KIND_MODIFIER_INVOCATION: u8 = 10;
+pub const AST_NODE_KIND_ELEMENTARY_TYPE_NAME_EXPRESSION: u8 = 11;
+pub const AST_NODE_KIND_ELEMENTARY_TYPE_NAME: u8 = 12;
+pub const AST_NODE_KIND_ARRAY_TYPE_NAME: u8 = 13;
+pub const AST_NODE_KIND_MEMBER_ACCESS: u8 = 14;
+pub const AST_NODE_KIND_INDEX_ACCESS: u8 = 15;
+pub const AST_NODE_KIND_INDEX_RANGE_ACCESS: u8 = 16;
+pub const AST_NODE_KIND_PRAGMA_DIRECTIVE: u8 = 17;
+pub const AST_NODE_KIND_IMPORT_DIRECTIVE: u8 = 18;
+pub const AST_NODE_KIND_CONTRACT_DEFINITION: u8 = 19;
+pub const AST_NODE_KIND_FOR_ALL_QUANTIFIER: u8 = 20;
+pub const AST_NODE_KIND_FUNCTION_DEFINITION: u8 = 21;
+pub const AST_NODE_KIND_STRUCT_DEFINITION: u8 = 22;
+pub const AST_NODE_KIND_ENUM_DEFINITION: u8 = 23;
+pub const AST_NODE_KIND_VARIABLE_DECLARATION: u8 = 24;
+pub const AST_NODE_KIND_FUNCTION_TYPE_NAME: u8 = 25;
+pub const AST_NODE_KIND_MODIFIER_DEFINITION: u8 = 26;
+pub const AST_NODE_KIND_EVENT_DEFINITION: u8 = 27;
+pub const AST_NODE_KIND_ERROR_DEFINITION: u8 = 28;
+pub const AST_NODE_KIND_USING_FOR_DIRECTIVE: u8 = 29;
+pub const AST_NODE_KIND_USER_DEFINED_VALUE_TYPE_DEFINITION: u8 = 30;
+pub const AST_NODE_KIND_MAPPING: u8 = 31;
+pub const AST_NODE_KIND_BLOCK: u8 = 32;
+pub const AST_NODE_KIND_CONTINUE_STATEMENT: u8 = 33;
+pub const AST_NODE_KIND_BREAK_STATEMENT: u8 = 34;
+pub const AST_NODE_KIND_RETURN_STATEMENT: u8 = 35;
+pub const AST_NODE_KIND_THROW_STATEMENT: u8 = 36;
+pub const AST_NODE_KIND_PLACEHOLDER_STATEMENT: u8 = 37;
+pub const AST_NODE_KIND_INLINE_ASSEMBLY: u8 = 38;
+pub const AST_NODE_KIND_IF_STATEMENT: u8 = 39;
+pub const AST_NODE_KIND_TRY_STATEMENT: u8 = 40;
+pub const AST_NODE_KIND_TRY_CATCH_CLAUSE: u8 = 41;
+pub const AST_NODE_KIND_WHILE_STATEMENT: u8 = 42;
+pub const AST_NODE_KIND_FOR_STATEMENT: u8 = 43;
+pub const AST_NODE_KIND_EMIT_STATEMENT: u8 = 44;
+pub const AST_NODE_KIND_REVERT_STATEMENT: u8 = 45;
+pub const AST_NODE_KIND_FUNCTION_CALL: u8 = 46;
+pub const AST_NODE_KIND_VARIABLE_DECLARATION_STATEMENT: u8 = 47;
+pub const AST_NODE_KIND_TYPE_CLASS_DEFINITION: u8 = 48;
+pub const AST_NODE_KIND_TYPE_CLASS_INSTANTIATION: u8 = 49;
+pub const AST_NODE_KIND_TYPE_DEFINITION: u8 = 50;
+pub const AST_NODE_KIND_BUILTIN: u8 = 51;
+pub const AST_NODE_KIND_EXPRESSION_STATEMENT: u8 = 52;
+pub const AST_NODE_KIND_TUPLE_EXPRESSION: u8 = 53;
+pub const AST_NODE_KIND_ASSIGNMENT: u8 = 54;
+pub const AST_NODE_KIND_CONDITIONAL: u8 = 55;
+pub const AST_NODE_KIND_BINARY_OPERATION: u8 = 56;
+pub const AST_NODE_KIND_UNARY_OPERATION: u8 = 57;
+pub const AST_NODE_KIND_NEW_EXPRESSION: u8 = 58;
+pub const AST_NODE_KIND_FUNCTION_CALL_OPTIONS: u8 = 59;
+pub const AST_NODE_KIND_LITERAL: u8 = 60;
+pub const AST_NODE_KIND_STORAGE_LAYOUT_SPECIFIER: u8 = 61;
+pub const AST_NODE_KIND_SOURCE_UNIT: u8 = 62;
+pub const AST_NODE_KIND_DO_WHILE_STATEMENT: u8 = 63;
+pub const AST_NODE_KIND_INLINE_ARRAY_EXPRESSION: u8 = 64;
+pub const AST_NODE_KIND_UNCHECKED_BLOCK: u8 = 65;
+pub const CONTRACT_KIND_INTERFACE: u8 = 0;
+pub const CONTRACT_KIND_CONTRACT: u8 = 1;
+pub const CONTRACT_KIND_LIBRARY: u8 = 2;
+pub const VISIBILITY_DEFAULT: u8 = 0;
+pub const VISIBILITY_PRIVATE: u8 = 1;
+pub const VISIBILITY_INTERNAL: u8 = 2;
+pub const VISIBILITY_PUBLIC: u8 = 3;
+pub const VISIBILITY_EXTERNAL: u8 = 4;
+pub const STATE_MUTABILITY_PURE: u8 = 0;
+pub const STATE_MUTABILITY_VIEW: u8 = 1;
+pub const STATE_MUTABILITY_NON_PAYABLE: u8 = 2;
+pub const STATE_MUTABILITY_PAYABLE: u8 = 3;
+pub const LOOK_AHEAD_INDEX_ACCESS_STRUCTURE: u8 = 0;
+pub const LOOK_AHEAD_VARIABLE_DECLARATION: u8 = 1;
+pub const LOOK_AHEAD_EXPRESSION: u8 = 2;
+const VAR_DECL_KIND_FILE_LEVEL: u8 = 0;
+const VAR_DECL_KIND_STATE: u8 = 1;
+const VAR_DECL_KIND_OTHER: u8 = 2;
+const VARIABLE_DECLARATION_MUTABILITY_MUTABLE: u8 = 0;
+const VARIABLE_DECLARATION_MUTABILITY_IMMUTABLE: u8 = 1;
+const VARIABLE_DECLARATION_MUTABILITY_CONSTANT: u8 = 2;
+const VARIABLE_DECLARATION_LOCATION_UNSPECIFIED: u8 = 0;
+const VARIABLE_DECLARATION_LOCATION_STORAGE: u8 = 1;
+const VARIABLE_DECLARATION_LOCATION_TRANSIENT: u8 = 2;
+const VARIABLE_DECLARATION_LOCATION_MEMORY: u8 = 3;
+const VARIABLE_DECLARATION_LOCATION_CALLDATA: u8 = 4;
+const RECURSION_LIMIT: u32 = 1200;
+const MAX_BRIDGE_ARRAY_TYPE_DEPTH: usize = 256;
+const PARSE_THREAD_STACK_SIZE: usize = 256 * 1024 * 1024;
+
+static PANIC_HOOK_INIT: Once = Once::new();
+static SUPPRESSED_RECURSION_LIMIT_PANICS: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    static RECURSION_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static PARSER_STATE: RefCell<ParserState> = RefCell::new(ParserState::default());
+}
+
+#[derive(Clone)]
+struct ParserComment {
+    literal: ffi::WireString,
+    location: ffi::WireSourceLocation,
+}
+
+#[derive(Clone)]
+struct ParserState {
+    tokens: Vec<ffi::WireLocatedToken>,
+    comments: Vec<ParserComment>,
+    cursor: usize,
+    source: ffi::WireString,
+    current_error: String,
+    current_node_id: i64,
+    experimental_solidity_enabled: bool,
+    evm_version: EvmVersion,
+    current_compiler_version: String,
+    inside_modifier: bool,
+    reported_errors: Vec<ffi::WireParserError>,
+    reported_warnings: Vec<ffi::WireParserError>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EvmVersion {
+    Homestead,
+    TangerineWhistle,
+    SpuriousDragon,
+    Byzantium,
+    Constantinople,
+    Petersburg,
+    Istanbul,
+    Berlin,
+    London,
+    Paris,
+    Shanghai,
+    Cancun,
+    Prague,
+    Osaka,
+    Future,
+}
+
+impl EvmVersion {
+    fn current() -> Self {
+        Self::Osaka
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "homestead" => Some(Self::Homestead),
+            "tangerineWhistle" => Some(Self::TangerineWhistle),
+            "spuriousDragon" => Some(Self::SpuriousDragon),
+            "byzantium" => Some(Self::Byzantium),
+            "constantinople" => Some(Self::Constantinople),
+            "petersburg" => Some(Self::Petersburg),
+            "istanbul" => Some(Self::Istanbul),
+            "berlin" => Some(Self::Berlin),
+            "london" => Some(Self::London),
+            "paris" => Some(Self::Paris),
+            "shanghai" => Some(Self::Shanghai),
+            "cancun" => Some(Self::Cancun),
+            "prague" => Some(Self::Prague),
+            "osaka" => Some(Self::Osaka),
+            "@future" => Some(Self::Future),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ParserState {
+    fn default() -> Self {
+        Self {
+            tokens: Vec::new(),
+            comments: Vec::new(),
+            cursor: 0,
+            source: empty_string(),
+            current_error: "Invalid token.".to_string(),
+            current_node_id: 0,
+            experimental_solidity_enabled: false,
+            evm_version: EvmVersion::current(),
+            current_compiler_version: String::new(),
+            inside_modifier: false,
+            reported_errors: Vec::new(),
+            reported_warnings: Vec::new(),
+        }
+    }
+}
+
+struct RecursionGuard;
+struct RecursionLimitExceeded;
+
+impl RecursionGuard {
+    fn new() -> Self {
+        increase_recursion_depth();
+        Self
+    }
+}
+
+impl Drop for RecursionGuard {
+    fn drop(&mut self) {
+        decrease_recursion_depth();
+    }
+}
+
+struct ParserActionResult {
+    tokens_consumed: u64,
+    errors: Vec<ffi::WireParserError>,
+}
+
+#[derive(Clone, Copy)]
+struct VarDeclParserOptions {
+    kind: u8,
+    allow_indexed: bool,
+    allow_empty_name: bool,
+    allow_initial_value: bool,
+    allow_location_specifier: bool,
+}
+
+impl Default for VarDeclParserOptions {
+    fn default() -> Self {
+        Self {
+            kind: VAR_DECL_KIND_OTHER,
+            allow_indexed: false,
+            allow_empty_name: false,
+            allow_initial_value: false,
+            allow_location_specifier: false,
+        }
+    }
+}
+
+const SEMVER_WILDCARD: u32 = u32::MAX;
+const SEMVER_TOKEN_ILLEGAL: u32 = token::TOKEN_ILLEGAL;
+
+#[derive(Clone)]
+struct SemVerVersion {
+    numbers: [u32; 3],
+    prerelease: Vec<u8>,
+    _build: Vec<u8>,
+    original: String,
+}
+
+impl SemVerVersion {
+    fn parse(version: &str) -> Result<Self, String> {
+        let bytes = version.as_bytes();
+        let mut cursor = 0usize;
+        let mut numbers = [0u32; 3];
+
+        for (level, number) in numbers.iter_mut().enumerate() {
+            let mut value = 0u32;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                value = value
+                    .wrapping_mul(10)
+                    .wrapping_add(u32::from(bytes[cursor] - b'0'));
+                cursor += 1;
+            }
+            *number = value;
+
+            if level < 2 {
+                if cursor == bytes.len() || bytes[cursor] != b'.' {
+                    return Err(format!("Invalid versionString: {version}"));
+                }
+                cursor += 1;
+            }
+        }
+
+        let mut prerelease = Vec::new();
+        if cursor < bytes.len() && bytes[cursor] == b'-' {
+            cursor += 1;
+            let start = cursor;
+            while cursor < bytes.len() && bytes[cursor] != b'+' {
+                cursor += 1;
+            }
+            prerelease.extend_from_slice(&bytes[start..cursor]);
+        }
+
+        let mut build = Vec::new();
+        if cursor < bytes.len() && bytes[cursor] == b'+' {
+            cursor += 1;
+            let start = cursor;
+            while cursor < bytes.len() {
+                cursor += 1;
+            }
+            build.extend_from_slice(&bytes[start..cursor]);
+        }
+
+        if cursor != bytes.len() {
+            return Err(format!("Invalid versionString {version}"));
+        }
+
+        Ok(Self {
+            numbers,
+            prerelease,
+            _build: build,
+            original: version.to_string(),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct SemVerMatchComponent {
+    prefix: u32,
+    version: SemVerVersion,
+    levels_present: usize,
+}
+
+impl SemVerMatchComponent {
+    fn matches(&self, version: &SemVerVersion) -> bool {
+        if self.prefix == token::TOKEN_BIT_NOT {
+            let mut component = self.clone();
+            component.prefix = token::TOKEN_GREATER_THAN_OR_EQUAL;
+            if !component.matches(version) {
+                return false;
+            }
+
+            component.levels_present = if component.levels_present >= 2 { 2 } else { 1 };
+            component.prefix = token::TOKEN_LESS_THAN_OR_EQUAL;
+            return component.matches(version);
+        }
+
+        if self.prefix == token::TOKEN_BIT_XOR {
+            let mut component = self.clone();
+            component.prefix = token::TOKEN_GREATER_THAN_OR_EQUAL;
+            if !component.matches(version) {
+                return false;
+            }
+
+            component.levels_present =
+                if component.version.numbers[0] == 0 && component.levels_present != 1 {
+                    2
+                } else {
+                    1
+                };
+            component.prefix = token::TOKEN_LESS_THAN_OR_EQUAL;
+            return component.matches(version);
+        }
+
+        let mut cmp = 0i32;
+        let mut did_compare = false;
+        for i in 0..self.levels_present {
+            if cmp == 0 && self.version.numbers[i] != SEMVER_WILDCARD {
+                did_compare = true;
+                cmp = (version.numbers[i] as i32).wrapping_sub(self.version.numbers[i] as i32);
+            }
+        }
+
+        if cmp == 0 && !version.prerelease.is_empty() && did_compare {
+            cmp = -1;
+        }
+
+        match self.prefix {
+            token::TOKEN_ASSIGN => cmp == 0,
+            token::TOKEN_LESS_THAN => cmp < 0,
+            token::TOKEN_LESS_THAN_OR_EQUAL => cmp <= 0,
+            token::TOKEN_GREATER_THAN => cmp > 0,
+            token::TOKEN_GREATER_THAN_OR_EQUAL => cmp >= 0,
+            _ => panic!("Invalid SemVer expression"),
+        }
+    }
+}
+
+struct SemVerConjunction {
+    components: Vec<SemVerMatchComponent>,
+}
+
+impl SemVerConjunction {
+    fn matches(&self, version: &SemVerVersion) -> bool {
+        self.components
+            .iter()
+            .all(|component| component.matches(version))
+    }
+}
+
+struct SemVerMatchExpression {
+    disjunction: Vec<SemVerConjunction>,
+}
+
+impl SemVerMatchExpression {
+    fn matches(&self, version: &SemVerVersion) -> bool {
+        !self.disjunction.is_empty() && self.disjunction.iter().any(|range| range.matches(version))
+    }
+}
+
+struct SemVerMatchExpressionParser {
+    tokens: Vec<u32>,
+    literals: Vec<Vec<u8>>,
+    expression: SemVerMatchExpression,
+    pos: usize,
+    pos_inside: usize,
+}
+
+impl SemVerMatchExpressionParser {
+    fn new(tokens: Vec<u32>, literals: Vec<ffi::WireString>) -> Self {
+        assert_eq!(tokens.len(), literals.len());
+        Self {
+            tokens,
+            literals: literals.into_iter().map(|literal| literal.bytes).collect(),
+            expression: SemVerMatchExpression {
+                disjunction: Vec::new(),
+            },
+            pos: 0,
+            pos_inside: 0,
+        }
+    }
+
+    fn parse(&mut self) -> Result<SemVerMatchExpression, String> {
+        self.reset();
+
+        if self.tokens.is_empty() {
+            return Err("Empty version pragma.".to_string());
+        }
+
+        loop {
+            if let Err(error) = self.parse_match_expression() {
+                self.reset();
+                return Err(error);
+            }
+            if self.pos >= self.tokens.len() {
+                break;
+            }
+            if self.current_token() != token::TOKEN_OR {
+                self.reset();
+                return Err(
+                    "You can only combine version ranges using the || operator.".to_string()
+                );
+            }
+            self.next_token();
+        }
+
+        Ok(std::mem::replace(
+            &mut self.expression,
+            SemVerMatchExpression {
+                disjunction: Vec::new(),
+            },
+        ))
+    }
+
+    fn reset(&mut self) {
+        self.expression = SemVerMatchExpression {
+            disjunction: Vec::new(),
+        };
+        self.pos = 0;
+        self.pos_inside = 0;
+    }
+
+    fn parse_match_expression(&mut self) -> Result<(), String> {
+        let mut range = SemVerConjunction {
+            components: vec![self.parse_match_component()?],
+        };
+
+        if self.current_token() == token::TOKEN_SUB {
+            range.components[0].prefix = token::TOKEN_GREATER_THAN_OR_EQUAL;
+            self.next_token();
+            let mut component = self.parse_match_component()?;
+            component.prefix = token::TOKEN_LESS_THAN_OR_EQUAL;
+            range.components.push(component);
+        } else {
+            while self.current_token() != token::TOKEN_OR
+                && self.current_token() != SEMVER_TOKEN_ILLEGAL
+            {
+                range.components.push(self.parse_match_component()?);
+            }
+        }
+
+        self.expression.disjunction.push(range);
+        Ok(())
+    }
+
+    fn parse_match_component(&mut self) -> Result<SemVerMatchComponent, String> {
+        let token = self.current_token();
+        let prefix = match token {
+            token::TOKEN_BIT_XOR
+            | token::TOKEN_BIT_NOT
+            | token::TOKEN_LESS_THAN
+            | token::TOKEN_LESS_THAN_OR_EQUAL
+            | token::TOKEN_GREATER_THAN
+            | token::TOKEN_GREATER_THAN_OR_EQUAL
+            | token::TOKEN_ASSIGN => {
+                self.next_token();
+                token
+            }
+            _ => token::TOKEN_ASSIGN,
+        };
+
+        let mut version = SemVerVersion {
+            numbers: [0, 0, 0],
+            prerelease: Vec::new(),
+            _build: Vec::new(),
+            original: String::new(),
+        };
+        let mut levels_present = 0usize;
+        while levels_present < 3 {
+            version.numbers[levels_present] = self.parse_version_part()?;
+            levels_present += 1;
+            if self.current_char() == Some(b'.') {
+                self.next_char();
+            } else {
+                break;
+            }
+        }
+
+        Ok(SemVerMatchComponent {
+            prefix,
+            version,
+            levels_present,
+        })
+    }
+
+    fn parse_version_part(&mut self) -> Result<u32, String> {
+        let start_pos = self.pos;
+        let character = self.current_char();
+        self.next_char();
+
+        match character {
+            Some(b'x' | b'X' | b'*') => Ok(SEMVER_WILDCARD),
+            Some(b'0') => Ok(0),
+            Some(character @ b'1'..=b'9') => {
+                let mut value = u32::from(character - b'0');
+                while self.pos == start_pos {
+                    let Some(next @ b'0'..=b'9') = self.current_char() else {
+                        break;
+                    };
+                    value = value
+                        .checked_mul(10)
+                        .and_then(|value| value.checked_add(u32::from(next - b'0')))
+                        .ok_or_else(|| {
+                            "Integer too large to be used in a version number.".to_string()
+                        })?;
+                    self.next_char();
+                }
+                Ok(value)
+            }
+            None => Err("Expected version number but reached end of pragma.".to_string()),
+            Some(character) => Err(format!(
+                "Expected the start of a version number but instead found character '{}'. Version number is invalid or the pragma is not terminated with a semicolon.",
+                character as char
+            )),
+        }
+    }
+
+    fn current_char(&self) -> Option<u8> {
+        self.literals
+            .get(self.pos)
+            .and_then(|literal| literal.get(self.pos_inside).copied())
+    }
+
+    fn next_char(&mut self) -> Option<u8> {
+        if let Some(literal) = self.literals.get(self.pos) {
+            if self.pos_inside + 1 >= literal.len() {
+                self.next_token();
+            } else {
+                self.pos_inside += 1;
+            }
+        }
+        self.current_char()
+    }
+
+    fn current_token(&self) -> u32 {
+        self.tokens
+            .get(self.pos)
+            .copied()
+            .unwrap_or(SEMVER_TOKEN_ILLEGAL)
+    }
+
+    fn next_token(&mut self) {
+        self.pos += 1;
+        self.pos_inside = 0;
+    }
+}
+
+pub fn parse() -> ffi::WireParserResult {
+    install_recursion_limit_panic_hook();
+    let parser_state = PARSER_STATE.with(|state| state.borrow().clone());
+    let _suppress_recursion_limit_panic_hook = SuppressRecursionLimitPanicHook::new();
+    let parse_thread = std::thread::Builder::new()
+        .name("solidity-parser".to_string())
+        .stack_size(PARSE_THREAD_STACK_SIZE)
+        .spawn(move || {
+            PARSER_STATE.with(|state| {
+                *state.borrow_mut() = parser_state;
+            });
+            parse_with_recursion_limit_catch()
+        })
+        .expect("failed to spawn Solidity parser thread");
+
+    match parse_thread.join() {
+        Ok(result) => result,
+        Err(payload) => resume_unwind(payload),
+    }
+}
+
+fn parse_with_recursion_limit_catch() -> ffi::WireParserResult {
+    match catch_unwind(AssertUnwindSafe(parse_impl)) {
+        Ok(result) => result,
+        Err(payload) => {
+            if payload.is::<RecursionLimitExceeded>() {
+                reset_recursion_depth();
+                parser_result_from_errors(vec![fatal_parser_error(
+                    7319,
+                    "Maximum recursion depth reached during parsing.",
+                )])
+            } else {
+                resume_unwind(payload);
+            }
+        }
+    }
+}
+
+fn install_recursion_limit_panic_hook() {
+    PANIC_HOOK_INIT.call_once(|| {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            if SUPPRESSED_RECURSION_LIMIT_PANICS.load(Ordering::SeqCst) > 0
+                && panic_info.payload().is::<RecursionLimitExceeded>()
+            {
+                return;
+            }
+            previous_hook(panic_info);
+        }));
+    });
+}
+
+struct SuppressRecursionLimitPanicHook;
+
+impl SuppressRecursionLimitPanicHook {
+    fn new() -> Self {
+        SUPPRESSED_RECURSION_LIMIT_PANICS.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for SuppressRecursionLimitPanicHook {
+    fn drop(&mut self) {
+        SUPPRESSED_RECURSION_LIMIT_PANICS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn parse_impl() -> ffi::WireParserResult {
+    assert!(!inside_modifier());
+
+    reset_recursion_depth();
+    rewind_parser_input();
+    clear_reported_parser_diagnostics();
+    let mut location = current_location();
+    set_experimental_solidity_enabled_in_current_source_unit(false);
+
+    let mut nodes = Vec::new();
+    let mut source_unit_pragmas = Vec::new();
+    let mut source_unit_imports = Vec::new();
+    let mut source_unit_user_defined_value_types = Vec::new();
+    let mut source_unit_enums = Vec::new();
+    let mut source_unit_structs = Vec::new();
+    let mut source_unit_events = Vec::new();
+    let mut source_unit_errors = Vec::new();
+    let mut source_unit_contracts = Vec::new();
+    let mut source_unit_functions = Vec::new();
+    let mut source_unit_for_all_quantifiers = Vec::new();
+    let mut source_unit_type_definitions = Vec::new();
+    let mut source_unit_type_class_definitions = Vec::new();
+    let mut source_unit_type_class_instantiations = Vec::new();
+    let mut source_unit_using_directives = Vec::new();
+    let mut source_unit_variable_declarations = Vec::new();
+    let mut experimental_solidity_enabled = false;
+
+    while current_token() == token::TOKEN_PRAGMA {
+        let pragma = parse_pragma_directive(false);
+        if parser_errors_have_fatal(&pragma.errors) {
+            return parser_result_from_errors(pragma.errors);
+        }
+        report_nonfatal_parser_errors(&pragma.errors);
+        if !pragma.pragma_directive.present {
+            return parser_result_error("Failed to parse pragma directive.");
+        }
+        experimental_solidity_enabled |= pragma.experimental_solidity_enabled;
+        source_unit_pragmas.push(pragma.clone());
+        nodes.push(pragma.pragma_directive);
+    }
+
+    if experimental_solidity_enabled {
+        set_scanner_mode_experimental_solidity();
+    }
+
+    while current_token() != token::TOKEN_EOS {
+        match current_token() {
+            token::TOKEN_PRAGMA => {
+                let pragma = parse_pragma_directive(true);
+                if parser_errors_have_fatal(&pragma.errors) {
+                    return parser_result_from_errors(pragma.errors);
+                }
+                report_nonfatal_parser_errors(&pragma.errors);
+                if !pragma.pragma_directive.present {
+                    return parser_result_error("Failed to parse pragma directive.");
+                }
+                experimental_solidity_enabled |= pragma.experimental_solidity_enabled;
+                source_unit_pragmas.push(pragma.clone());
+                nodes.push(pragma.pragma_directive);
+            }
+            token::TOKEN_IMPORT => {
+                let import = parse_import_directive();
+                if parser_errors_have_fatal(&import.errors) {
+                    return parser_result_from_errors(import.errors);
+                }
+                report_nonfatal_parser_errors(&import.errors);
+                if !import.import_directive.present {
+                    return parser_result_error("Failed to parse import directive.");
+                }
+                source_unit_imports.push(import.clone());
+                nodes.push(import.import_directive);
+            }
+            token::TOKEN_ABSTRACT
+            | token::TOKEN_INTERFACE
+            | token::TOKEN_CONTRACT
+            | token::TOKEN_LIBRARY => {
+                let contract = parse_contract_definition();
+                if parser_errors_have_fatal(&contract.errors) {
+                    return parser_result_from_errors(contract.errors);
+                }
+                report_nonfatal_parser_errors(&contract.errors);
+                if !contract.contract_definition.present {
+                    return parser_result_error("Failed to parse contract definition.");
+                }
+                source_unit_contracts.push(contract.clone());
+                nodes.push(contract.contract_definition);
+            }
+            token::TOKEN_STRUCT => {
+                let struct_definition = parse_struct_definition();
+                if parser_errors_have_fatal(&struct_definition.errors) {
+                    return parser_result_from_errors(struct_definition.errors);
+                }
+                report_nonfatal_parser_errors(&struct_definition.errors);
+                if !struct_definition.struct_definition.present {
+                    return parser_result_error("Failed to parse struct definition.");
+                }
+                source_unit_structs.push(struct_definition.clone());
+                nodes.push(struct_definition.struct_definition);
+            }
+            token::TOKEN_ENUM => {
+                let enum_definition = parse_enum_definition();
+                if parser_errors_have_fatal(&enum_definition.errors) {
+                    return parser_result_from_errors(enum_definition.errors);
+                }
+                report_nonfatal_parser_errors(&enum_definition.errors);
+                if !enum_definition.enum_definition.present {
+                    return parser_result_error("Failed to parse enum definition.");
+                }
+                source_unit_enums.push(enum_definition.clone());
+                nodes.push(enum_definition.enum_definition);
+            }
+            token::TOKEN_TYPE => {
+                if experimental_solidity_enabled {
+                    let type_definition = parse_type_definition();
+                    if parser_errors_have_fatal(&type_definition.errors) {
+                        return parser_result_from_errors(type_definition.errors);
+                    }
+                    report_nonfatal_parser_errors(&type_definition.errors);
+                    if !type_definition.type_definition.present {
+                        return parser_result_error("Failed to parse type definition.");
+                    }
+                    source_unit_type_definitions.push(type_definition.clone());
+                    nodes.push(type_definition.type_definition);
+                } else {
+                    let type_definition = parse_user_defined_value_type_definition();
+                    if parser_errors_have_fatal(&type_definition.errors) {
+                        return parser_result_from_errors(type_definition.errors);
+                    }
+                    report_nonfatal_parser_errors(&type_definition.errors);
+                    if !type_definition.user_defined_value_type_definition.present {
+                        return parser_result_error("Failed to parse type definition.");
+                    }
+                    source_unit_user_defined_value_types.push(type_definition.clone());
+                    nodes.push(type_definition.user_defined_value_type_definition);
+                }
+            }
+            token::TOKEN_USING => {
+                let using_directive = parse_using_directive();
+                if parser_errors_have_fatal(&using_directive.errors) {
+                    return parser_result_from_errors(using_directive.errors);
+                }
+                report_nonfatal_parser_errors(&using_directive.errors);
+                if !using_directive.using_directive.present {
+                    return parser_result_error("Failed to parse using directive.");
+                }
+                source_unit_using_directives.push(using_directive.clone());
+                nodes.push(using_directive.using_directive);
+            }
+            token::TOKEN_FUNCTION => {
+                let function = parse_function_definition(true, true);
+                if parser_errors_have_fatal(&function.errors) {
+                    report_parser_warnings(&function.warnings);
+                    return parser_result_from_errors(function.errors);
+                }
+                report_nonfatal_parser_errors(&function.errors);
+                report_parser_warnings(&function.warnings);
+                if !function.function_definition.present {
+                    return parser_result_error("Failed to parse function definition.");
+                }
+                source_unit_functions.push(function.clone());
+                nodes.push(function.function_definition);
+            }
+            token::TOKEN_FORALL => {
+                let quantified_function = parse_quantified_function_definition();
+                if parser_errors_have_fatal(&quantified_function.errors) {
+                    return parser_result_from_errors(quantified_function.errors);
+                }
+                report_nonfatal_parser_errors(&quantified_function.errors);
+                if !quantified_function.for_all_quantifier.present {
+                    return parser_result_error("Failed to parse quantified function definition.");
+                }
+                source_unit_for_all_quantifiers.push(quantified_function.clone());
+                nodes.push(quantified_function.for_all_quantifier);
+            }
+            token::TOKEN_EVENT => {
+                let event_definition = parse_event_definition();
+                if parser_errors_have_fatal(&event_definition.errors) {
+                    return parser_result_from_errors(event_definition.errors);
+                }
+                report_nonfatal_parser_errors(&event_definition.errors);
+                if !event_definition.event_definition.present {
+                    return parser_result_error("Failed to parse event definition.");
+                }
+                source_unit_events.push(event_definition.clone());
+                nodes.push(event_definition.event_definition);
+            }
+            token::TOKEN_CLASS => {
+                assert!(experimental_solidity_enabled);
+                let type_class_definition = parse_type_class_definition();
+                if parser_errors_have_fatal(&type_class_definition.errors) {
+                    return parser_result_from_errors(type_class_definition.errors);
+                }
+                report_nonfatal_parser_errors(&type_class_definition.errors);
+                if !type_class_definition.type_class_definition.present {
+                    return parser_result_error("Failed to parse type class definition.");
+                }
+                source_unit_type_class_definitions.push(type_class_definition.clone());
+                nodes.push(type_class_definition.type_class_definition);
+            }
+            token::TOKEN_INSTANTIATION => {
+                assert!(experimental_solidity_enabled);
+                let type_class_instantiation = parse_type_class_instantiation();
+                if parser_errors_have_fatal(&type_class_instantiation.errors) {
+                    return parser_result_from_errors(type_class_instantiation.errors);
+                }
+                report_nonfatal_parser_errors(&type_class_instantiation.errors);
+                if !type_class_instantiation.type_class_instantiation.present {
+                    return parser_result_error("Failed to parse type class instantiation.");
+                }
+                source_unit_type_class_instantiations.push(type_class_instantiation.clone());
+                nodes.push(type_class_instantiation.type_class_instantiation);
+            }
+            _ => {
+                if current_token() == token::TOKEN_IDENTIFIER
+                    && current_literal().bytes == b"error"
+                    && peek_next_token() == token::TOKEN_IDENTIFIER
+                    && peek_next_next_token() == token::TOKEN_LPAREN
+                {
+                    let error_definition = parse_error_definition();
+                    if parser_errors_have_fatal(&error_definition.errors) {
+                        return parser_result_from_errors(error_definition.errors);
+                    }
+                    report_nonfatal_parser_errors(&error_definition.errors);
+                    if !error_definition.error_definition.present {
+                        return parser_result_error("Failed to parse error definition.");
+                    }
+                    source_unit_errors.push(error_definition.clone());
+                    nodes.push(error_definition.error_definition);
+                } else if variable_declaration_start(current_token(), peek_next_token())
+                    && peek_next_token() != token::TOKEN_EOS
+                {
+                    let options = VarDeclParserOptions {
+                        kind: VAR_DECL_KIND_FILE_LEVEL,
+                        allow_initial_value: true,
+                        ..VarDeclParserOptions::default()
+                    };
+                    let variable_declaration = parse_variable_declaration_with_options(
+                        options,
+                        empty_ast_node(),
+                        max_node_id(current_node_id(), &nodes),
+                    );
+                    if parser_errors_have_fatal(&variable_declaration.errors) {
+                        return parser_result_from_errors(variable_declaration.errors);
+                    }
+                    report_nonfatal_parser_errors(&variable_declaration.errors);
+                    if !variable_declaration.variable_declaration.present {
+                        return parser_result_error("Failed to parse variable declaration.");
+                    }
+                    source_unit_variable_declarations.push(variable_declaration.clone());
+                    nodes.push(variable_declaration.variable_declaration);
+
+                    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+                    if !semicolon.errors.is_empty() {
+                        return parser_result_from_errors(semicolon.errors);
+                    }
+                } else {
+                    return parser_result_from_errors(vec![fatal_parser_error(
+                        7858,
+                        "Expected pragma, import directive or contract/interface/library/user-defined type/constant/function/error/event definition.",
+                    )]);
+                }
+            }
+        }
+    }
+
+    location.end = current_location().end;
+    let max_node_id = max_node_id(current_node_id(), &nodes);
+    let license_result = find_license_string(current_source(), nodes.clone(), location.source_id);
+    report_parser_diagnostics(&license_result.diagnostics);
+    let license = license_result.license;
+    let has_license = license.has_value;
+    let license_value = if license.has_value {
+        license.value
+    } else {
+        empty_string()
+    };
+    let source_unit_id = allocate_node_id_after(max_node_id);
+    let source_unit = ffi::WireAstNode {
+        present: true,
+        node_id: source_unit_id,
+        kind: AST_NODE_KIND_SOURCE_UNIT,
+        location,
+        text: license_value.clone(),
+    };
+
+    ffi::WireParserResult {
+        ok: true,
+        error_code: 0,
+        error_message: String::new(),
+        source_unit,
+        source_unit_nodes: nodes,
+        source_unit_pragmas,
+        source_unit_imports,
+        source_unit_user_defined_value_types,
+        source_unit_enums,
+        source_unit_structs,
+        source_unit_events,
+        source_unit_errors,
+        source_unit_contracts,
+        source_unit_functions,
+        source_unit_for_all_quantifiers,
+        source_unit_type_definitions,
+        source_unit_type_class_definitions,
+        source_unit_type_class_instantiations,
+        source_unit_using_directives,
+        source_unit_variable_declarations,
+        errors: reported_parser_errors(),
+        warnings: reported_parser_warnings(),
+        has_license,
+        license: license_value,
+        experimental_solidity: experimental_solidity_enabled,
+        max_id: source_unit_id,
+    }
+}
+
+pub fn max_id(current_node_id: i64) -> i64 {
+    current_node_id
+}
+
+pub fn next_id(current_node_id: i64) -> i64 {
+    current_node_id + 1
+}
+
+pub fn reset_parser_input() {
+    PARSER_STATE.with(|state| {
+        *state.borrow_mut() = ParserState::default();
+    });
+}
+
+pub fn set_parser_input(
+    tokens: Vec<ffi::WireLocatedToken>,
+    source: ffi::WireString,
+    comment_literals: Vec<ffi::WireString>,
+    comment_locations: Vec<ffi::WireSourceLocation>,
+    current_node_id: i64,
+    current_compiler_version: String,
+    evm_version_at_least_constantinople: bool,
+) {
+    let evm_version = if evm_version_at_least_constantinople {
+        EvmVersion::Constantinople
+    } else {
+        EvmVersion::Homestead
+    };
+    set_parser_input_for_evm_version(
+        tokens,
+        source,
+        comment_literals,
+        comment_locations,
+        current_node_id,
+        current_compiler_version,
+        evm_version,
+    );
+}
+
+pub fn set_parser_input_with_evm_version(
+    tokens: Vec<ffi::WireLocatedToken>,
+    source: ffi::WireString,
+    comment_literals: Vec<ffi::WireString>,
+    comment_locations: Vec<ffi::WireSourceLocation>,
+    current_node_id: i64,
+    current_compiler_version: String,
+    evm_version_name: String,
+) {
+    let evm_version = EvmVersion::from_name(&evm_version_name).unwrap_or_else(EvmVersion::current);
+    set_parser_input_for_evm_version(
+        tokens,
+        source,
+        comment_literals,
+        comment_locations,
+        current_node_id,
+        current_compiler_version,
+        evm_version,
+    );
+}
+
+fn set_parser_input_for_evm_version(
+    tokens: Vec<ffi::WireLocatedToken>,
+    source: ffi::WireString,
+    comment_literals: Vec<ffi::WireString>,
+    comment_locations: Vec<ffi::WireSourceLocation>,
+    current_node_id: i64,
+    current_compiler_version: String,
+    evm_version: EvmVersion,
+) {
+    let mut tokens = tokens;
+    normalize_tokens_for_solidity_scanner_mode(&mut tokens, &source.bytes);
+    let comments = comment_literals
+        .into_iter()
+        .zip(comment_locations)
+        .map(|(literal, location)| ParserComment { literal, location })
+        .collect();
+
+    PARSER_STATE.with(|state| {
+        *state.borrow_mut() = ParserState {
+            tokens,
+            comments,
+            cursor: 0,
+            source,
+            current_error: "Invalid token.".to_string(),
+            current_node_id,
+            experimental_solidity_enabled: false,
+            evm_version,
+            current_compiler_version,
+            inside_modifier: false,
+            reported_errors: Vec::new(),
+            reported_warnings: Vec::new(),
+        };
+    });
+}
+
+pub fn parse_pragma_version(
+    location: ffi::WireSourceLocation,
+    tokens: Vec<u32>,
+    literals: Vec<ffi::WireString>,
+    current_version: String,
+) -> ffi::WirePragmaVersionResult {
+    let mut parser = SemVerMatchExpressionParser::new(tokens, literals);
+    match parser.parse() {
+        Ok(match_expression) => match SemVerVersion::parse(&current_version) {
+            Ok(current_version) => {
+                if !match_expression.matches(&current_version) {
+                    ffi::WirePragmaVersionResult {
+                        errors: vec![fatal_parser_error_at(
+                            5333,
+                            &format!(
+                                "Source file requires different compiler version (current compiler is {}) - note that nightly builds are considered to be strictly less than the released version",
+                                current_version.original
+                            ),
+                            location,
+                        )],
+                    }
+                } else {
+                    ffi::WirePragmaVersionResult { errors: Vec::new() }
+                }
+            }
+            Err(error) => ffi::WirePragmaVersionResult {
+                errors: vec![fatal_parser_error_at(
+                    1684,
+                    &format!("Invalid version pragma. {error}"),
+                    location,
+                )],
+            },
+        },
+        Err(error) => ffi::WirePragmaVersionResult {
+            errors: vec![fatal_parser_error_at(
+                1684,
+                &format!("Invalid version pragma. {error}"),
+                location,
+            )],
+        },
+    }
+}
+
+pub fn parse_structured_documentation(
+    comment_literal: ffi::WireString,
+    comment_location: ffi::WireSourceLocation,
+    current_node_id: i64,
+) -> ffi::WireStructuredDocumentationResult {
+    if comment_literal.bytes.is_empty() {
+        return ffi::WireStructuredDocumentationResult {
+            documentation: empty_ast_node(),
+            current_node_id,
+        };
+    }
+
+    let next_node_id = current_node_id + 1;
+    ffi::WireStructuredDocumentationResult {
+        documentation: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_STRUCTURED_DOCUMENTATION,
+            location: comment_location,
+            text: comment_literal,
+        },
+        current_node_id: next_node_id,
+    }
+}
+
+fn parse_current_structured_documentation() -> ffi::WireStructuredDocumentationResult {
+    parse_current_structured_documentation_with_node_id(current_node_id())
+}
+
+fn parse_current_structured_documentation_with_node_id(
+    current_node_id: i64,
+) -> ffi::WireStructuredDocumentationResult {
+    let comment_literal = current_comment_literal();
+    if comment_literal.bytes.is_empty() {
+        return ffi::WireStructuredDocumentationResult {
+            documentation: empty_ast_node(),
+            current_node_id,
+        };
+    }
+
+    let next_node_id = allocate_node_id_after(current_node_id);
+    ffi::WireStructuredDocumentationResult {
+        documentation: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_STRUCTURED_DOCUMENTATION,
+            location: current_comment_location(),
+            text: comment_literal,
+        },
+        current_node_id: next_node_id,
+    }
+}
+
+pub fn parse_pragma_directive(
+    finished_parsing_top_level_pragmas: bool,
+) -> ffi::WirePragmaDirectiveResult {
+    let _recursion_guard = RecursionGuard::new();
+    let mut location = current_location();
+    let mut tokens_consumed = 0;
+    let mut errors = Vec::new();
+    let mut literals = Vec::new();
+    let mut tokens = Vec::new();
+    let mut experimental_solidity_enabled = false;
+
+    let pragma = expect_token(token::TOKEN_PRAGMA);
+    tokens_consumed += pragma.tokens_consumed;
+    if !pragma.errors.is_empty() {
+        return pragma_directive_result(
+            empty_ast_node(),
+            tokens,
+            literals,
+            false,
+            tokens_consumed,
+            pragma.errors,
+        );
+    }
+
+    loop {
+        let current = current_token();
+        if current == token::TOKEN_ILLEGAL {
+            errors.push(parser_error(
+                6281,
+                "Token incompatible with Solidity parser as part of pragma directive.",
+            ));
+        } else {
+            let mut literal = current_literal();
+            if literal.bytes.is_empty() {
+                if let Some(token_text) = token_to_string(current) {
+                    literal = ffi::WireString {
+                        bytes: token_text.as_bytes().to_vec(),
+                    };
+                }
+            }
+            literals.push(literal);
+            tokens.push(current);
+        }
+
+        tokens_consumed += advance();
+        if current_token() == token::TOKEN_SEMICOLON || current_token() == token::TOKEN_EOS {
+            break;
+        }
+    }
+
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    tokens_consumed += semicolon.tokens_consumed;
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return pragma_directive_result(
+            empty_ast_node(),
+            tokens,
+            literals,
+            false,
+            tokens_consumed,
+            errors,
+        );
+    }
+
+    if !literals.is_empty() && literals[0].bytes == b"solidity" {
+        let version = parse_pragma_version(
+            location.clone(),
+            tokens[1..].to_vec(),
+            literals[1..].to_vec(),
+            current_compiler_version(),
+        );
+        if !version.errors.is_empty() {
+            errors.extend(version.errors);
+            return pragma_directive_result(
+                empty_ast_node(),
+                tokens,
+                literals,
+                false,
+                tokens_consumed,
+                errors,
+            );
+        }
+    }
+
+    if literals.len() >= 2
+        && literals[0].bytes == b"experimental"
+        && literals[1].bytes == b"solidity"
+    {
+        if !evm_version_at_least_constantinople() {
+            errors.push(fatal_parser_error(
+                7637,
+                "Experimental solidity requires Constantinople EVM version at the minimum.",
+            ));
+            return pragma_directive_result(
+                empty_ast_node(),
+                tokens,
+                literals,
+                false,
+                tokens_consumed,
+                errors,
+            );
+        }
+
+        if finished_parsing_top_level_pragmas {
+            errors.push(fatal_parser_error(
+                8185,
+                "Experimental pragma \"solidity\" can only be set at the beginning of the source unit.",
+            ));
+            return pragma_directive_result(
+                empty_ast_node(),
+                tokens,
+                literals,
+                false,
+                tokens_consumed,
+                errors,
+            );
+        }
+
+        set_experimental_solidity_enabled_in_current_source_unit(true);
+        experimental_solidity_enabled = true;
+    }
+
+    let pragma_directive = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(current_node_id()),
+        kind: AST_NODE_KIND_PRAGMA_DIRECTIVE,
+        location,
+        text: join_wire_strings(&literals),
+    };
+
+    pragma_directive_result(
+        pragma_directive,
+        tokens,
+        literals,
+        experimental_solidity_enabled,
+        tokens_consumed,
+        errors,
+    )
+}
+
+pub fn parse_import_directive() -> ffi::WireImportDirectiveResult {
+    let _recursion_guard = RecursionGuard::new();
+    let mut location = current_location();
+    let mut tokens_consumed = 0;
+    let mut errors = Vec::new();
+    let mut path = empty_string();
+    let mut unit_alias = empty_string();
+    let mut unit_alias_location = empty_source_location();
+    let mut symbol_aliases = Vec::new();
+    let mut node_id = current_node_id();
+
+    let import = expect_token(token::TOKEN_IMPORT);
+    tokens_consumed += import.tokens_consumed;
+    if !import.errors.is_empty() {
+        return import_directive_result(
+            empty_ast_node(),
+            path,
+            unit_alias,
+            unit_alias_location,
+            symbol_aliases,
+            tokens_consumed,
+            import.errors,
+        );
+    }
+
+    if is_quoted_path(current_token()) || is_current_stdlib_path() {
+        path = if is_quoted_path(current_token()) {
+            let literal = get_literal_and_advance(current_literal());
+            advance_by(literal.tokens_consumed);
+            tokens_consumed += literal.tokens_consumed;
+            literal.value
+        } else {
+            let stdlib = get_current_stdlib_import_path_and_advance();
+            tokens_consumed += stdlib.tokens_consumed;
+            if !stdlib.errors.is_empty() {
+                errors.extend(stdlib.errors);
+                return import_directive_result(
+                    empty_ast_node(),
+                    path,
+                    unit_alias,
+                    unit_alias_location,
+                    symbol_aliases,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            stdlib.value
+        };
+
+        if current_token() == token::TOKEN_AS {
+            tokens_consumed += advance();
+            let alias = expect_identifier_with_location(
+                current_token(),
+                current_literal(),
+                current_token_name(),
+                current_location(),
+            );
+            advance_by(alias.tokens_consumed);
+            tokens_consumed += alias.tokens_consumed;
+            if !alias.errors.is_empty() {
+                errors.extend(alias.errors);
+                return import_directive_result(
+                    empty_ast_node(),
+                    path,
+                    unit_alias,
+                    unit_alias_location,
+                    symbol_aliases,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            unit_alias = alias.identifier;
+            unit_alias_location = alias.location;
+        }
+    } else {
+        if current_token() == token::TOKEN_LBRACE {
+            tokens_consumed += advance();
+            loop {
+                let mut has_alias = false;
+                let mut alias = empty_string();
+                let mut alias_location = current_location();
+                let parsed_identifier = parse_identifier(
+                    current_token(),
+                    current_literal(),
+                    current_token_name(),
+                    current_location(),
+                    node_id,
+                );
+                advance_by(parsed_identifier.tokens_consumed);
+                tokens_consumed += parsed_identifier.tokens_consumed;
+                if !parsed_identifier.errors.is_empty() {
+                    errors.extend(parsed_identifier.errors);
+                    return import_directive_result(
+                        empty_ast_node(),
+                        path,
+                        unit_alias,
+                        unit_alias_location,
+                        symbol_aliases,
+                        tokens_consumed,
+                        errors,
+                    );
+                }
+                node_id = parsed_identifier.current_node_id;
+                let identifier = parsed_identifier.identifier;
+
+                if current_token() == token::TOKEN_AS {
+                    let as_token = expect_token(token::TOKEN_AS);
+                    tokens_consumed += as_token.tokens_consumed;
+                    if !as_token.errors.is_empty() {
+                        errors.extend(as_token.errors);
+                        return import_directive_result(
+                            empty_ast_node(),
+                            path,
+                            unit_alias,
+                            unit_alias_location,
+                            symbol_aliases,
+                            tokens_consumed,
+                            errors,
+                        );
+                    }
+
+                    let parsed_alias = expect_identifier_with_location(
+                        current_token(),
+                        current_literal(),
+                        current_token_name(),
+                        current_location(),
+                    );
+                    advance_by(parsed_alias.tokens_consumed);
+                    tokens_consumed += parsed_alias.tokens_consumed;
+                    if !parsed_alias.errors.is_empty() {
+                        errors.extend(parsed_alias.errors);
+                        return import_directive_result(
+                            empty_ast_node(),
+                            path,
+                            unit_alias,
+                            unit_alias_location,
+                            symbol_aliases,
+                            tokens_consumed,
+                            errors,
+                        );
+                    }
+                    has_alias = true;
+                    alias = parsed_alias.identifier;
+                    alias_location = parsed_alias.location;
+                }
+
+                symbol_aliases.push(ffi::WireImportSymbolAlias {
+                    symbol: identifier,
+                    has_alias,
+                    alias,
+                    location: alias_location,
+                });
+
+                if current_token() != token::TOKEN_COMMA {
+                    break;
+                }
+                tokens_consumed += advance();
+            }
+
+            let rbrace = expect_token(token::TOKEN_RBRACE);
+            tokens_consumed += rbrace.tokens_consumed;
+            if !rbrace.errors.is_empty() {
+                errors.extend(rbrace.errors);
+                return import_directive_result(
+                    empty_ast_node(),
+                    path,
+                    unit_alias,
+                    unit_alias_location,
+                    symbol_aliases,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+        } else if current_token() == token::TOKEN_MUL {
+            tokens_consumed += advance();
+            let as_token = expect_token(token::TOKEN_AS);
+            tokens_consumed += as_token.tokens_consumed;
+            if !as_token.errors.is_empty() {
+                errors.extend(as_token.errors);
+                return import_directive_result(
+                    empty_ast_node(),
+                    path,
+                    unit_alias,
+                    unit_alias_location,
+                    symbol_aliases,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+
+            let alias = expect_identifier_with_location(
+                current_token(),
+                current_literal(),
+                current_token_name(),
+                current_location(),
+            );
+            advance_by(alias.tokens_consumed);
+            tokens_consumed += alias.tokens_consumed;
+            if !alias.errors.is_empty() {
+                errors.extend(alias.errors);
+                return import_directive_result(
+                    empty_ast_node(),
+                    path,
+                    unit_alias,
+                    unit_alias_location,
+                    symbol_aliases,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            unit_alias = alias.identifier;
+            unit_alias_location = alias.location;
+        } else {
+            errors.push(fatal_parser_error(
+                9478,
+                "Expected string literal (path), \"*\" or alias list.",
+            ));
+            return import_directive_result(
+                empty_ast_node(),
+                path,
+                unit_alias,
+                unit_alias_location,
+                symbol_aliases,
+                tokens_consumed,
+                errors,
+            );
+        }
+
+        if current_token() != token::TOKEN_IDENTIFIER || current_literal().bytes != b"from" {
+            errors.push(fatal_parser_error(8208, "Expected \"from\"."));
+            return import_directive_result(
+                empty_ast_node(),
+                path,
+                unit_alias,
+                unit_alias_location,
+                symbol_aliases,
+                tokens_consumed,
+                errors,
+            );
+        }
+        tokens_consumed += advance();
+
+        if !is_quoted_path(current_token()) && !is_current_stdlib_path() {
+            errors.push(fatal_parser_error(6845, "Expected import path."));
+            return import_directive_result(
+                empty_ast_node(),
+                path,
+                unit_alias,
+                unit_alias_location,
+                symbol_aliases,
+                tokens_consumed,
+                errors,
+            );
+        }
+
+        path = if is_quoted_path(current_token()) {
+            let literal = get_literal_and_advance(current_literal());
+            advance_by(literal.tokens_consumed);
+            tokens_consumed += literal.tokens_consumed;
+            literal.value
+        } else {
+            let stdlib = get_current_stdlib_import_path_and_advance();
+            tokens_consumed += stdlib.tokens_consumed;
+            if !stdlib.errors.is_empty() {
+                errors.extend(stdlib.errors);
+                return import_directive_result(
+                    empty_ast_node(),
+                    path,
+                    unit_alias,
+                    unit_alias_location,
+                    symbol_aliases,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            stdlib.value
+        };
+    }
+
+    if path.bytes.is_empty() {
+        errors.push(fatal_parser_error(6326, "Import path cannot be empty."));
+        return import_directive_result(
+            empty_ast_node(),
+            path,
+            unit_alias,
+            unit_alias_location,
+            symbol_aliases,
+            tokens_consumed,
+            errors,
+        );
+    }
+
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    tokens_consumed += semicolon.tokens_consumed;
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return import_directive_result(
+            empty_ast_node(),
+            path,
+            unit_alias,
+            unit_alias_location,
+            symbol_aliases,
+            tokens_consumed,
+            errors,
+        );
+    }
+
+    let import_directive = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(node_id),
+        kind: AST_NODE_KIND_IMPORT_DIRECTIVE,
+        location,
+        text: path.clone(),
+    };
+
+    import_directive_result(
+        import_directive,
+        path,
+        unit_alias,
+        unit_alias_location,
+        symbol_aliases,
+        tokens_consumed,
+        errors,
+    )
+}
+
+pub fn parse_contract_kind(current_token: u32, next_token: u32) -> ffi::WireContractKindResult {
+    let is_abstract = current_token == token::TOKEN_ABSTRACT;
+    let contract_token = if is_abstract {
+        next_token
+    } else {
+        current_token
+    };
+    let abstract_tokens_consumed = u64::from(is_abstract);
+
+    let contract_kind = match contract_token {
+        token::TOKEN_INTERFACE => CONTRACT_KIND_INTERFACE,
+        token::TOKEN_CONTRACT => CONTRACT_KIND_CONTRACT,
+        token::TOKEN_LIBRARY => CONTRACT_KIND_LIBRARY,
+        _ => {
+            let location = if is_abstract {
+                peek_next_location()
+            } else {
+                current_location()
+            };
+            return ffi::WireContractKindResult {
+                contract_kind: CONTRACT_KIND_CONTRACT,
+                is_abstract,
+                tokens_consumed: abstract_tokens_consumed,
+                errors: vec![parser_error_at(
+                    3515,
+                    "Expected keyword \"contract\", \"interface\" or \"library\".",
+                    location,
+                )],
+            };
+        }
+    };
+
+    ffi::WireContractKindResult {
+        contract_kind,
+        is_abstract,
+        tokens_consumed: abstract_tokens_consumed + 1,
+        errors: Vec::new(),
+    }
+}
+
+pub fn parse_storage_layout_specifier() -> ffi::WireStorageLayoutSpecifierResult {
+    let _recursion_guard = RecursionGuard::new();
+    let start_cursor = parser_cursor();
+    let mut location = current_location();
+    let mut errors = Vec::new();
+
+    let layout_identifier =
+        expect_identifier_token(current_token(), current_literal(), current_token_name());
+    if !layout_identifier.errors.is_empty() {
+        return empty_storage_layout_specifier_result(
+            tokens_consumed_since(start_cursor),
+            layout_identifier.errors,
+        );
+    }
+    assert!(layout_identifier.value.bytes == b"layout");
+    advance_by(layout_identifier.tokens_consumed);
+
+    if current_token() != token::TOKEN_IDENTIFIER || current_literal().bytes != b"at" {
+        errors.push(parser_error(
+            1994,
+            &format!("Expected 'at' but got {}", current_token_name()),
+        ));
+    }
+
+    advance();
+    let base_slot_expression_detail = parse_expression();
+    if parser_errors_have_fatal(&base_slot_expression_detail.errors) {
+        errors.extend(base_slot_expression_detail.errors);
+        return empty_storage_layout_specifier_result(tokens_consumed_since(start_cursor), errors);
+    }
+    errors.extend(base_slot_expression_detail.errors.clone());
+    let base_slot_expression = base_slot_expression_detail.expression.clone();
+    if !base_slot_expression.present {
+        return empty_storage_layout_specifier_result(tokens_consumed_since(start_cursor), errors);
+    }
+    location.end = base_slot_expression.location.end;
+
+    let storage_layout_specifier = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(base_slot_expression.node_id.max(current_node_id())),
+        kind: AST_NODE_KIND_STORAGE_LAYOUT_SPECIFIER,
+        location,
+        text: empty_string(),
+    };
+
+    ffi::WireStorageLayoutSpecifierResult {
+        storage_layout_specifier,
+        base_slot_expression,
+        base_slot_expression_detail,
+        tokens_consumed: tokens_consumed_since(start_cursor),
+        errors,
+    }
+}
+
+fn empty_storage_layout_specifier_result(
+    tokens_consumed: u64,
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireStorageLayoutSpecifierResult {
+    ffi::WireStorageLayoutSpecifierResult {
+        storage_layout_specifier: empty_ast_node(),
+        base_slot_expression: empty_ast_node(),
+        base_slot_expression_detail: empty_expression_result(Vec::new()),
+        tokens_consumed,
+        errors,
+    }
+}
+
+pub fn parse_contract_definition() -> ffi::WireContractDefinitionResult {
+    let _recursion_guard = RecursionGuard::new();
+    let mut location = current_location();
+    let mut tokens_consumed = 0;
+    let mut errors = Vec::new();
+    let mut base_contracts = Vec::new();
+    let mut base_contract_details = Vec::new();
+    let mut sub_nodes = Vec::new();
+    let mut sub_node_structs = Vec::new();
+    let mut sub_node_enums = Vec::new();
+    let mut sub_node_user_defined_value_types = Vec::new();
+    let mut sub_node_events = Vec::new();
+    let mut sub_node_errors = Vec::new();
+    let mut sub_node_functions = Vec::new();
+    let mut sub_node_modifiers = Vec::new();
+    let mut sub_node_using_directives = Vec::new();
+    let mut sub_node_variable_declarations = Vec::new();
+    let mut storage_layout_specifier = empty_ast_node();
+    let mut storage_layout_base_slot_expression = empty_ast_node();
+    let mut storage_layout_base_slot_expression_detail = empty_expression_result(Vec::new());
+
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let contract_kind = parse_contract_kind(current_token(), peek_next_token());
+    tokens_consumed += contract_kind.tokens_consumed;
+    advance_by(contract_kind.tokens_consumed);
+    errors.extend(contract_kind.errors);
+
+    let name_with_location = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(name_with_location.tokens_consumed);
+    tokens_consumed += name_with_location.tokens_consumed;
+    if !name_with_location.errors.is_empty() {
+        errors.extend(name_with_location.errors);
+        return contract_definition_result(
+            empty_ast_node(),
+            empty_string(),
+            name_with_location.location,
+            documentation,
+            base_contracts,
+            sub_nodes,
+            contract_kind.contract_kind,
+            contract_kind.is_abstract,
+            storage_layout_specifier,
+            tokens_consumed,
+            errors,
+        );
+    }
+
+    let name = name_with_location.identifier;
+    let name_location = name_with_location.location;
+
+    loop {
+        if current_token() == token::TOKEN_IS {
+            if !base_contracts.is_empty() {
+                errors.push(parser_error_at_with_secondary(
+                    6668,
+                    "More than one inheritance list.",
+                    current_location(),
+                    "Previous list:",
+                    base_contracts[0].location.clone(),
+                ));
+            }
+
+            loop {
+                tokens_consumed += advance();
+                let base_contract = parse_current_inheritance_specifier_with_node_id(
+                    max_node_id(current_node_id(), &base_contracts)
+                        .max(documentation.node_id)
+                        .max(storage_layout_specifier.node_id),
+                );
+                tokens_consumed += base_contract.tokens_consumed;
+                if parser_errors_have_fatal(&base_contract.errors) {
+                    errors.extend(base_contract.errors);
+                    return contract_definition_result(
+                        empty_ast_node(),
+                        name,
+                        name_location,
+                        documentation,
+                        base_contracts,
+                        sub_nodes,
+                        contract_kind.contract_kind,
+                        contract_kind.is_abstract,
+                        storage_layout_specifier,
+                        tokens_consumed,
+                        errors,
+                    );
+                }
+                errors.extend(base_contract.errors.clone());
+                if !base_contract.inheritance_specifier.present {
+                    return contract_definition_result(
+                        empty_ast_node(),
+                        name,
+                        name_location,
+                        documentation,
+                        base_contracts,
+                        sub_nodes,
+                        contract_kind.contract_kind,
+                        contract_kind.is_abstract,
+                        storage_layout_specifier,
+                        tokens_consumed,
+                        errors,
+                    );
+                }
+                base_contracts.push(base_contract.inheritance_specifier.clone());
+                base_contract_details.push(base_contract);
+
+                if current_token() != token::TOKEN_COMMA {
+                    break;
+                }
+            }
+        } else if current_token() == token::TOKEN_IDENTIFIER
+            && current_literal().bytes == b"layout"
+            && contract_kind.contract_kind == CONTRACT_KIND_CONTRACT
+        {
+            if storage_layout_specifier.present {
+                errors.push(parser_error_at_with_secondary(
+                    8714,
+                    "More than one storage layout definition.",
+                    current_location(),
+                    "Previous definition:",
+                    storage_layout_specifier.location.clone(),
+                ));
+            }
+
+            let storage_layout = parse_storage_layout_specifier();
+            tokens_consumed += storage_layout.tokens_consumed;
+            errors.extend(storage_layout.errors);
+            storage_layout_specifier = storage_layout.storage_layout_specifier;
+            storage_layout_base_slot_expression = storage_layout.base_slot_expression;
+            storage_layout_base_slot_expression_detail = storage_layout.base_slot_expression_detail;
+            if !storage_layout_specifier.present {
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+        } else {
+            break;
+        }
+    }
+
+    if storage_layout_specifier.present && !base_contracts.is_empty() {
+        assert!(!source_locations_intersect(
+            &storage_layout_specifier.location,
+            &base_contracts[0].location,
+        ));
+        assert!(!source_locations_intersect(
+            &base_contracts[0].location,
+            &storage_layout_specifier.location,
+        ));
+    }
+
+    let lbrace = expect_token(token::TOKEN_LBRACE);
+    tokens_consumed += lbrace.tokens_consumed;
+    if !lbrace.errors.is_empty() {
+        errors.extend(lbrace.errors);
+        return contract_definition_result(
+            empty_ast_node(),
+            name,
+            name_location,
+            documentation,
+            base_contracts,
+            sub_nodes,
+            contract_kind.contract_kind,
+            contract_kind.is_abstract,
+            storage_layout_specifier,
+            tokens_consumed,
+            errors,
+        );
+    }
+
+    loop {
+        let current_token_value = current_token();
+        if current_token_value == token::TOKEN_RBRACE {
+            break;
+        } else if (current_token_value == token::TOKEN_FUNCTION
+            && peek_next_token() != token::TOKEN_LPAREN)
+            || current_token_value == token::TOKEN_CONSTRUCTOR
+            || current_token_value == token::TOKEN_RECEIVE
+            || current_token_value == token::TOKEN_FALLBACK
+        {
+            let function_definition = parse_function_definition(false, true);
+            tokens_consumed += function_definition.tokens_consumed;
+            if parser_errors_have_fatal(&function_definition.errors) {
+                report_parser_warnings(&function_definition.warnings);
+                errors.extend(function_definition.errors);
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            errors.extend(function_definition.errors.clone());
+            report_parser_warnings(&function_definition.warnings);
+            if !function_definition.function_definition.present {
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            sub_nodes.push(function_definition.function_definition.clone());
+            sub_node_functions.push(function_definition);
+        } else if current_token_value == token::TOKEN_STRUCT {
+            let member_start_cursor = parser_cursor();
+            let struct_definition = parse_struct_definition();
+            tokens_consumed += tokens_consumed_since(member_start_cursor);
+            if parser_errors_have_fatal(&struct_definition.errors) {
+                errors.extend(struct_definition.errors);
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            errors.extend(struct_definition.errors.clone());
+            if !struct_definition.struct_definition.present {
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            sub_nodes.push(struct_definition.struct_definition.clone());
+            sub_node_structs.push(struct_definition);
+        } else if current_token_value == token::TOKEN_ENUM {
+            let member_start_cursor = parser_cursor();
+            let enum_definition = parse_enum_definition();
+            tokens_consumed += tokens_consumed_since(member_start_cursor);
+            if parser_errors_have_fatal(&enum_definition.errors) {
+                errors.extend(enum_definition.errors);
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            errors.extend(enum_definition.errors.clone());
+            if !enum_definition.enum_definition.present {
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            sub_nodes.push(enum_definition.enum_definition.clone());
+            sub_node_enums.push(enum_definition);
+        } else if current_token_value == token::TOKEN_TYPE {
+            let member_start_cursor = parser_cursor();
+            let type_definition = parse_user_defined_value_type_definition();
+            tokens_consumed += tokens_consumed_since(member_start_cursor);
+            if parser_errors_have_fatal(&type_definition.errors) {
+                errors.extend(type_definition.errors);
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            errors.extend(type_definition.errors.clone());
+            if !type_definition.user_defined_value_type_definition.present {
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            sub_nodes.push(type_definition.user_defined_value_type_definition.clone());
+            sub_node_user_defined_value_types.push(type_definition);
+        } else if current_token_value == token::TOKEN_IDENTIFIER
+            && current_literal().bytes == b"error"
+            && peek_next_token() == token::TOKEN_IDENTIFIER
+            && peek_next_next_token() == token::TOKEN_LPAREN
+        {
+            let member_start_cursor = parser_cursor();
+            let error_definition = parse_error_definition();
+            tokens_consumed += tokens_consumed_since(member_start_cursor);
+            if parser_errors_have_fatal(&error_definition.errors) {
+                errors.extend(error_definition.errors);
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            errors.extend(error_definition.errors.clone());
+            if !error_definition.error_definition.present {
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            sub_nodes.push(error_definition.error_definition.clone());
+            sub_node_errors.push(error_definition);
+        } else if variable_declaration_start(current_token(), peek_next_token()) {
+            let member_start_cursor = parser_cursor();
+            let options = VarDeclParserOptions {
+                kind: VAR_DECL_KIND_STATE,
+                allow_initial_value: true,
+                ..VarDeclParserOptions::default()
+            };
+            let variable_declaration = parse_variable_declaration_with_options(
+                options,
+                empty_ast_node(),
+                max_node_id(max_node_id(current_node_id(), &base_contracts), &sub_nodes)
+                    .max(documentation.node_id)
+                    .max(storage_layout_specifier.node_id),
+            );
+            tokens_consumed += tokens_consumed_since(member_start_cursor);
+            if parser_errors_have_fatal(&variable_declaration.errors) {
+                errors.extend(variable_declaration.errors);
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            errors.extend(variable_declaration.errors.clone());
+            if !variable_declaration.variable_declaration.present {
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            sub_nodes.push(variable_declaration.variable_declaration.clone());
+            sub_node_variable_declarations.push(variable_declaration);
+            let semicolon = expect_token(token::TOKEN_SEMICOLON);
+            tokens_consumed += semicolon.tokens_consumed;
+            if !semicolon.errors.is_empty() {
+                errors.extend(semicolon.errors);
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+        } else if current_token_value == token::TOKEN_MODIFIER {
+            let member_start_cursor = parser_cursor();
+            let modifier_definition = parse_modifier_definition();
+            tokens_consumed += tokens_consumed_since(member_start_cursor);
+            if parser_errors_have_fatal(&modifier_definition.errors) {
+                errors.extend(modifier_definition.errors);
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            errors.extend(modifier_definition.errors.clone());
+            if !modifier_definition.modifier_definition.present {
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            sub_nodes.push(modifier_definition.modifier_definition.clone());
+            sub_node_modifiers.push(modifier_definition);
+        } else if current_token_value == token::TOKEN_EVENT {
+            let member_start_cursor = parser_cursor();
+            let event_definition = parse_event_definition();
+            tokens_consumed += tokens_consumed_since(member_start_cursor);
+            if parser_errors_have_fatal(&event_definition.errors) {
+                errors.extend(event_definition.errors);
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            errors.extend(event_definition.errors.clone());
+            if !event_definition.event_definition.present {
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            sub_nodes.push(event_definition.event_definition.clone());
+            sub_node_events.push(event_definition);
+        } else if current_token_value == token::TOKEN_USING {
+            let member_start_cursor = parser_cursor();
+            let using_directive = parse_using_directive();
+            tokens_consumed += tokens_consumed_since(member_start_cursor);
+            if parser_errors_have_fatal(&using_directive.errors) {
+                errors.extend(using_directive.errors);
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            errors.extend(using_directive.errors.clone());
+            if !using_directive.using_directive.present {
+                return contract_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    documentation,
+                    base_contracts,
+                    sub_nodes,
+                    contract_kind.contract_kind,
+                    contract_kind.is_abstract,
+                    storage_layout_specifier,
+                    tokens_consumed,
+                    errors,
+                );
+            }
+            sub_nodes.push(using_directive.using_directive.clone());
+            sub_node_using_directives.push(using_directive);
+        } else {
+            errors.push(fatal_parser_error(
+                9182,
+                "Function, variable, struct or modifier declaration expected.",
+            ));
+            return contract_definition_result(
+                empty_ast_node(),
+                name,
+                name_location,
+                documentation,
+                base_contracts,
+                sub_nodes,
+                contract_kind.contract_kind,
+                contract_kind.is_abstract,
+                storage_layout_specifier,
+                tokens_consumed,
+                errors,
+            );
+        }
+    }
+
+    location.end = current_location().end;
+    let rbrace = expect_token(token::TOKEN_RBRACE);
+    tokens_consumed += rbrace.tokens_consumed;
+    if !rbrace.errors.is_empty() {
+        errors.extend(rbrace.errors);
+        return contract_definition_result(
+            empty_ast_node(),
+            name,
+            name_location,
+            documentation,
+            base_contracts,
+            sub_nodes,
+            contract_kind.contract_kind,
+            contract_kind.is_abstract,
+            storage_layout_specifier,
+            tokens_consumed,
+            errors,
+        );
+    }
+
+    let node_id = max_node_id(max_node_id(current_node_id(), &base_contracts), &sub_nodes)
+        .max(documentation.node_id)
+        .max(storage_layout_specifier.node_id);
+    let contract_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(node_id),
+        kind: AST_NODE_KIND_CONTRACT_DEFINITION,
+        location,
+        text: name.clone(),
+    };
+
+    contract_definition_result_with_details(
+        contract_definition,
+        name,
+        name_location,
+        documentation,
+        base_contracts,
+        base_contract_details,
+        sub_nodes,
+        sub_node_structs,
+        sub_node_enums,
+        sub_node_user_defined_value_types,
+        sub_node_events,
+        sub_node_errors,
+        sub_node_functions,
+        sub_node_modifiers,
+        sub_node_using_directives,
+        sub_node_variable_declarations,
+        contract_kind.contract_kind,
+        contract_kind.is_abstract,
+        storage_layout_specifier,
+        storage_layout_base_slot_expression,
+        storage_layout_base_slot_expression_detail,
+        tokens_consumed,
+        errors,
+    )
+}
+
+pub fn parse_visibility_specifier(token: u32) -> ffi::WireVisibilitySpecifierResult {
+    let visibility = match token {
+        token::TOKEN_PUBLIC => VISIBILITY_PUBLIC,
+        token::TOKEN_INTERNAL => VISIBILITY_INTERNAL,
+        token::TOKEN_PRIVATE => VISIBILITY_PRIVATE,
+        token::TOKEN_EXTERNAL => VISIBILITY_EXTERNAL,
+        _ => panic!("Invalid visibility specifier."),
+    };
+
+    ffi::WireVisibilitySpecifierResult {
+        visibility,
+        tokens_consumed: 1,
+    }
+}
+
+pub fn parse_state_mutability(token: u32) -> ffi::WireStateMutabilitySpecifierResult {
+    let state_mutability = match token {
+        token::TOKEN_PAYABLE => STATE_MUTABILITY_PAYABLE,
+        token::TOKEN_VIEW => STATE_MUTABILITY_VIEW,
+        token::TOKEN_PURE => STATE_MUTABILITY_PURE,
+        _ => panic!("Invalid state mutability specifier."),
+    };
+
+    ffi::WireStateMutabilitySpecifierResult {
+        state_mutability,
+        tokens_consumed: 1,
+    }
+}
+
+pub fn parse_override_specifier(
+    tokens: Vec<ffi::WireLocatedToken>,
+    current_node_id: i64,
+) -> ffi::WireOverrideSpecifierResult {
+    if tokens.is_empty() || tokens[0].token != token::TOKEN_OVERRIDE {
+        panic!("parseOverrideSpecifier requires current token to be override.");
+    }
+
+    let mut cursor = 0usize;
+    let mut node_location = tokens[cursor].location.clone();
+    let mut node_id = current_node_id;
+    let mut overrides = Vec::new();
+    let mut override_details = Vec::new();
+
+    cursor += 1;
+
+    if cursor < tokens.len() && tokens[cursor].token == token::TOKEN_LPAREN {
+        cursor += 1;
+
+        loop {
+            let parsed_path = parse_identifier_path(tokens[cursor..].to_vec(), node_id);
+            if !parsed_path.errors.is_empty() {
+                return override_specifier_error(
+                    overrides,
+                    cursor as u64 + parsed_path.tokens_consumed,
+                    parsed_path.current_node_id,
+                    parsed_path.errors[0].clone(),
+                );
+            }
+
+            cursor += parsed_path.tokens_consumed as usize;
+            node_id = parsed_path.current_node_id;
+            overrides.push(parsed_path.identifier_path.clone());
+            override_details.push(parsed_path);
+
+            if cursor < tokens.len() && tokens[cursor].token == token::TOKEN_RPAREN {
+                break;
+            }
+
+            if cursor >= tokens.len() {
+                return override_specifier_error(
+                    overrides,
+                    cursor as u64,
+                    node_id,
+                    expected_token_error_for_token_slice("','", &tokens, cursor),
+                );
+            }
+
+            if tokens[cursor].token != token::TOKEN_COMMA {
+                return override_specifier_error(
+                    overrides,
+                    cursor as u64,
+                    node_id,
+                    expected_token_error_for_token_slice("','", &tokens, cursor),
+                );
+            }
+            cursor += 1;
+        }
+
+        node_location.end = tokens[cursor].location.end;
+        cursor += 1;
+    }
+
+    let next_node_id = node_id + 1;
+    ffi::WireOverrideSpecifierResult {
+        override_specifier: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_OVERRIDE_SPECIFIER,
+            location: node_location,
+            text: empty_string(),
+        },
+        overrides,
+        override_details,
+        tokens_consumed: cursor as u64,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+pub fn parse_inheritance_specifier(
+    tokens: Vec<ffi::WireLocatedToken>,
+    current_node_id: i64,
+    arguments: Vec<ffi::WireAstNode>,
+    argument_tokens_consumed: u64,
+) -> ffi::WireInheritanceSpecifierResult {
+    let name = parse_identifier_path(tokens.clone(), current_node_id);
+    if !name.errors.is_empty() {
+        return ffi::WireInheritanceSpecifierResult {
+            inheritance_specifier: empty_ast_node(),
+            base_name: empty_ast_node(),
+            base_name_path: Vec::new(),
+            base_name_path_locations: Vec::new(),
+            has_arguments: false,
+            arguments: Vec::new(),
+            argument_details: Vec::new(),
+            tokens_consumed: name.tokens_consumed,
+            current_node_id,
+            errors: name.errors,
+        };
+    }
+
+    let mut cursor = name.tokens_consumed as usize;
+    let base_name_path = name.path;
+    let base_name_path_locations = name.path_locations;
+    let base_name = name.identifier_path;
+    let mut node_location = base_name.location.clone();
+    let mut has_arguments = false;
+    let mut node_id = max_node_id(name.current_node_id, &arguments);
+
+    if cursor < tokens.len() && tokens[cursor].token == token::TOKEN_LPAREN {
+        has_arguments = true;
+        cursor += 1;
+        cursor += argument_tokens_consumed as usize;
+
+        if cursor >= tokens.len() {
+            return inheritance_specifier_error(
+                base_name,
+                base_name_path,
+                base_name_path_locations,
+                true,
+                arguments,
+                Vec::new(),
+                cursor as u64,
+                node_id,
+                expected_token_error_for_token_slice("')'", &tokens, cursor),
+            );
+        }
+
+        if tokens[cursor].token != token::TOKEN_RPAREN {
+            return inheritance_specifier_error(
+                base_name,
+                base_name_path,
+                base_name_path_locations,
+                true,
+                arguments,
+                Vec::new(),
+                cursor as u64,
+                node_id,
+                expected_token_error_for_token_slice("')'", &tokens, cursor),
+            );
+        }
+
+        node_location.end = tokens[cursor].location.end;
+        cursor += 1;
+    }
+
+    node_id = allocate_node_id_after(node_id);
+    ffi::WireInheritanceSpecifierResult {
+        inheritance_specifier: ffi::WireAstNode {
+            present: true,
+            node_id,
+            kind: AST_NODE_KIND_INHERITANCE_SPECIFIER,
+            location: node_location,
+            text: base_name.text.clone(),
+        },
+        base_name,
+        base_name_path,
+        base_name_path_locations,
+        has_arguments,
+        arguments,
+        argument_details: Vec::new(),
+        tokens_consumed: cursor as u64,
+        current_node_id: node_id,
+        errors: Vec::new(),
+    }
+}
+
+pub fn parse_modifier_invocation(
+    tokens: Vec<ffi::WireLocatedToken>,
+    current_node_id: i64,
+    arguments: Vec<ffi::WireAstNode>,
+    argument_tokens_consumed: u64,
+) -> ffi::WireModifierInvocationResult {
+    let name = parse_identifier_path(tokens.clone(), current_node_id);
+    if !name.errors.is_empty() {
+        return empty_modifier_invocation_result(
+            name.tokens_consumed,
+            current_node_id,
+            name.errors,
+        );
+    }
+
+    let mut cursor = name.tokens_consumed as usize;
+    let modifier_name_detail = name;
+    let modifier_name = modifier_name_detail.identifier_path.clone();
+    let mut node_location = modifier_name.location.clone();
+    let mut has_arguments = false;
+    let mut node_id = max_node_id(modifier_name_detail.current_node_id, &arguments);
+
+    if cursor < tokens.len() && tokens[cursor].token == token::TOKEN_LPAREN {
+        has_arguments = true;
+        cursor += 1;
+        cursor += argument_tokens_consumed as usize;
+
+        if cursor >= tokens.len() {
+            return modifier_invocation_error(
+                modifier_name_detail,
+                true,
+                arguments,
+                Vec::new(),
+                cursor as u64,
+                node_id,
+                expected_token_error_for_token_slice("')'", &tokens, cursor),
+            );
+        }
+
+        if tokens[cursor].token != token::TOKEN_RPAREN {
+            return modifier_invocation_error(
+                modifier_name_detail,
+                true,
+                arguments,
+                Vec::new(),
+                cursor as u64,
+                node_id,
+                expected_token_error_for_token_slice("')'", &tokens, cursor),
+            );
+        }
+
+        node_location.end = tokens[cursor].location.end;
+        cursor += 1;
+    }
+
+    node_id += 1;
+    modifier_invocation_result(
+        ffi::WireAstNode {
+            present: true,
+            node_id,
+            kind: AST_NODE_KIND_MODIFIER_INVOCATION,
+            location: node_location,
+            text: modifier_name.text.clone(),
+        },
+        modifier_name_detail,
+        has_arguments,
+        arguments,
+        Vec::new(),
+        cursor as u64,
+        node_id,
+        Vec::new(),
+    )
+}
+
+pub fn parse_enum_value(
+    comment_literal: ffi::WireString,
+    comment_location: ffi::WireSourceLocation,
+    token: u32,
+    literal: ffi::WireString,
+    token_name: String,
+    token_location: ffi::WireSourceLocation,
+    current_node_id: i64,
+) -> ffi::WireEnumValueResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let documentation =
+        parse_structured_documentation(comment_literal, comment_location, current_node_id);
+
+    let name = expect_identifier_token_at(token, literal, token_name, token_location.clone());
+    if !name.errors.is_empty() {
+        return ffi::WireEnumValueResult {
+            enum_value: empty_ast_node(),
+            name: empty_string(),
+            name_location: token_location,
+            documentation: documentation.documentation,
+            tokens_consumed: name.tokens_consumed,
+            current_node_id: documentation.current_node_id,
+            errors: name.errors,
+        };
+    }
+
+    let next_node_id = documentation.current_node_id + 1;
+    ffi::WireEnumValueResult {
+        enum_value: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_ENUM_VALUE,
+            location: token_location.clone(),
+            text: name.value.clone(),
+        },
+        name: name.value,
+        name_location: token_location,
+        documentation: documentation.documentation,
+        tokens_consumed: name.tokens_consumed,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+pub fn parse_function_header(is_state_variable: bool) -> ffi::WireFunctionHeaderParserResult {
+    parse_function_header_with_node_id(is_state_variable, current_node_id())
+}
+
+fn parse_function_header_with_node_id(
+    is_state_variable: bool,
+    current_node_id: i64,
+) -> ffi::WireFunctionHeaderParserResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let start_cursor = parser_cursor();
+    let parameter_options = VarDeclParserOptions {
+        allow_location_specifier: true,
+        ..VarDeclParserOptions::default()
+    };
+    let parameters =
+        parse_parameter_list_with_options_and_node_id(parameter_options, true, current_node_id);
+    let mut result = ffi::WireFunctionHeaderParserResult {
+        is_virtual: false,
+        overrides: empty_ast_node(),
+        override_paths: Vec::new(),
+        override_path_details: Vec::new(),
+        parameters: parameters.parameter_list,
+        parameter_declarations: parameters.parameters,
+        parameter_details: parameters.parameter_details,
+        return_parameters: empty_ast_node(),
+        return_parameter_declarations: Vec::new(),
+        return_parameter_details: Vec::new(),
+        visibility: VISIBILITY_DEFAULT,
+        state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        modifiers: Vec::new(),
+        modifier_details: Vec::new(),
+        experimental_return_expression: empty_ast_node(),
+        experimental_return_expression_detail: empty_expression_result(Vec::new()),
+        tokens_consumed: 0,
+        errors: Vec::new(),
+    };
+    result.errors.extend(parameters.errors);
+    if !result.parameters.present {
+        return function_header_with_consumed(result, start_cursor);
+    }
+
+    let mut node_id = result.parameters.node_id.max(current_node_id);
+    loop {
+        let token = current_token();
+        if !is_state_variable && token == token::TOKEN_IDENTIFIER {
+            let modifier_invocation = parse_current_modifier_invocation_with_node_id(node_id);
+            result.tokens_consumed += modifier_invocation.tokens_consumed;
+            if parser_errors_have_fatal(&modifier_invocation.errors) {
+                result.errors.extend(modifier_invocation.errors.clone());
+                return function_header_with_consumed(result, start_cursor);
+            }
+            result.errors.extend(modifier_invocation.errors.clone());
+            if !modifier_invocation.modifier_invocation.present {
+                return function_header_with_consumed(result, start_cursor);
+            }
+            node_id = modifier_invocation.current_node_id;
+            result
+                .modifiers
+                .push(modifier_invocation.modifier_invocation.clone());
+            result.modifier_details.push(modifier_invocation);
+        } else if is_visibility_specifier(token) {
+            if result.visibility != VISIBILITY_DEFAULT {
+                if is_state_variable
+                    && (result.visibility == VISIBILITY_EXTERNAL
+                        || result.visibility == VISIBILITY_INTERNAL)
+                {
+                    break;
+                }
+
+                result.errors.push(parser_error(
+                    9439,
+                    &format!(
+                        "Visibility already specified as \"{}\".",
+                        visibility_to_string(result.visibility)
+                    ),
+                ));
+                result.tokens_consumed += advance();
+            } else {
+                let visibility = parse_visibility_specifier(token);
+                result.tokens_consumed += visibility.tokens_consumed;
+                advance_by(visibility.tokens_consumed);
+                result.visibility = visibility.visibility;
+            }
+        } else if token::is_state_mutability_specifier(token) {
+            if result.state_mutability != STATE_MUTABILITY_NON_PAYABLE {
+                result.errors.push(parser_error(
+                    9680,
+                    &format!(
+                        "State mutability already specified as \"{}\".",
+                        state_mutability_to_string(result.state_mutability)
+                    ),
+                ));
+                result.tokens_consumed += advance();
+            } else {
+                let state_mutability = parse_state_mutability(token);
+                result.tokens_consumed += state_mutability.tokens_consumed;
+                advance_by(state_mutability.tokens_consumed);
+                result.state_mutability = state_mutability.state_mutability;
+            }
+        } else if !is_state_variable && token == token::TOKEN_OVERRIDE {
+            if result.overrides.present {
+                result
+                    .errors
+                    .push(parser_error(1827, "Override already specified."));
+            }
+
+            let override_specifier = parse_current_override_specifier_with_node_id(node_id);
+            result.tokens_consumed += override_specifier.tokens_consumed;
+            if !override_specifier.errors.is_empty() {
+                result.errors.extend(override_specifier.errors);
+                return function_header_with_consumed(result, start_cursor);
+            }
+            node_id = override_specifier.current_node_id;
+            result.overrides = override_specifier.override_specifier;
+            result.override_paths = override_specifier.overrides;
+            result.override_path_details = override_specifier.override_details;
+        } else if !is_state_variable && token == token::TOKEN_VIRTUAL {
+            if result.is_virtual {
+                result
+                    .errors
+                    .push(parser_error(6879, "Virtual already specified."));
+            }
+
+            result.is_virtual = true;
+            result.tokens_consumed += advance();
+        } else {
+            break;
+        }
+    }
+
+    if experimental_solidity_enabled_in_current_source_unit() {
+        if current_token() == token::TOKEN_RIGHT_ARROW {
+            result.tokens_consumed += advance();
+            let experimental_return_expression_detail = parse_binary_expression();
+            if parser_errors_have_fatal(&experimental_return_expression_detail.errors) {
+                result
+                    .errors
+                    .extend(experimental_return_expression_detail.errors.clone());
+                return function_header_with_consumed(result, start_cursor);
+            }
+            result
+                .errors
+                .extend(experimental_return_expression_detail.errors.clone());
+            if !experimental_return_expression_detail.expression.present {
+                return function_header_with_consumed(result, start_cursor);
+            }
+            result.experimental_return_expression =
+                experimental_return_expression_detail.expression.clone();
+            result.experimental_return_expression_detail = experimental_return_expression_detail;
+        }
+    } else if current_token() == token::TOKEN_RETURNS {
+        let permit_empty_parameter_list = experimental_solidity_enabled_in_current_source_unit();
+        result.tokens_consumed += advance();
+        let return_parameters = parse_parameter_list_with_options_and_node_id(
+            parameter_options,
+            permit_empty_parameter_list,
+            node_id,
+        );
+        result.errors.extend(return_parameters.errors);
+        if !return_parameters.parameter_list.present {
+            return function_header_with_consumed(result, start_cursor);
+        }
+        result.return_parameter_declarations = return_parameters.parameters;
+        result.return_parameter_details = return_parameters.parameter_details;
+        result.return_parameters = return_parameters.parameter_list;
+    } else {
+        let return_parameters =
+            create_current_empty_parameter_list_with_node_id(current_location(), node_id);
+        result.return_parameters = return_parameters.parameter_list;
+        result.return_parameter_declarations = return_parameters.parameters;
+    }
+
+    function_header_with_consumed(result, start_cursor)
+}
+
+pub fn parse_quantified_function_definition() -> ffi::WireForAllQuantifierResult {
+    assert!(experimental_solidity_enabled_in_current_source_unit());
+
+    let _recursion_guard = RecursionGuard::new();
+
+    let start_cursor = parser_cursor();
+    let mut location = current_location();
+    let mut errors = Vec::new();
+
+    let forall = expect_token(token::TOKEN_FORALL);
+    if !forall.errors.is_empty() {
+        return for_all_quantifier_result(
+            empty_ast_node(),
+            empty_ast_node(),
+            Vec::new(),
+            Vec::new(),
+            empty_ast_node(),
+            empty_function_definition_result(Vec::new(), Vec::new()),
+            tokens_consumed_since(start_cursor),
+            forall.errors,
+        );
+    }
+
+    let type_variable_declarations = parse_parameter_list();
+    if parser_errors_have_fatal(&type_variable_declarations.errors) {
+        errors.extend(type_variable_declarations.errors);
+        return for_all_quantifier_result(
+            empty_ast_node(),
+            type_variable_declarations.parameter_list,
+            type_variable_declarations.parameters,
+            type_variable_declarations.parameter_details,
+            empty_ast_node(),
+            empty_function_definition_result(Vec::new(), Vec::new()),
+            tokens_consumed_since(start_cursor),
+            errors,
+        );
+    }
+    errors.extend(type_variable_declarations.errors);
+    if !type_variable_declarations.parameter_list.present {
+        return for_all_quantifier_result(
+            empty_ast_node(),
+            type_variable_declarations.parameter_list,
+            type_variable_declarations.parameters,
+            type_variable_declarations.parameter_details,
+            empty_ast_node(),
+            empty_function_definition_result(Vec::new(), Vec::new()),
+            tokens_consumed_since(start_cursor),
+            errors,
+        );
+    }
+    location.end = current_location().end;
+
+    if current_token() != token::TOKEN_FUNCTION {
+        errors.push(fatal_parser_error(5709, "Expected a function definition."));
+        return for_all_quantifier_result(
+            empty_ast_node(),
+            type_variable_declarations.parameter_list,
+            type_variable_declarations.parameters,
+            type_variable_declarations.parameter_details,
+            empty_ast_node(),
+            empty_function_definition_result(Vec::new(), Vec::new()),
+            tokens_consumed_since(start_cursor),
+            errors,
+        );
+    }
+
+    let quantified_function_result = parse_function_definition(true, true);
+    if parser_errors_have_fatal(&quantified_function_result.errors) {
+        report_parser_warnings(&quantified_function_result.warnings);
+        errors.extend(quantified_function_result.errors.clone());
+        return for_all_quantifier_result(
+            empty_ast_node(),
+            type_variable_declarations.parameter_list.clone(),
+            type_variable_declarations.parameters.clone(),
+            type_variable_declarations.parameter_details.clone(),
+            quantified_function_result.function_definition.clone(),
+            quantified_function_result,
+            tokens_consumed_since(start_cursor),
+            errors,
+        );
+    }
+    errors.extend(quantified_function_result.errors.clone());
+    report_parser_warnings(&quantified_function_result.warnings);
+    let quantified_function = quantified_function_result.function_definition.clone();
+    if !quantified_function.present {
+        return for_all_quantifier_result(
+            empty_ast_node(),
+            type_variable_declarations.parameter_list.clone(),
+            type_variable_declarations.parameters.clone(),
+            type_variable_declarations.parameter_details.clone(),
+            quantified_function,
+            quantified_function_result,
+            tokens_consumed_since(start_cursor),
+            errors,
+        );
+    }
+    let for_all_quantifier = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(
+            type_variable_declarations
+                .parameter_list
+                .node_id
+                .max(quantified_function.node_id)
+                .max(current_node_id()),
+        ),
+        kind: AST_NODE_KIND_FOR_ALL_QUANTIFIER,
+        location,
+        text: empty_string(),
+    };
+
+    for_all_quantifier_result(
+        for_all_quantifier,
+        type_variable_declarations.parameter_list,
+        type_variable_declarations.parameters,
+        type_variable_declarations.parameter_details,
+        quantified_function,
+        quantified_function_result,
+        tokens_consumed_since(start_cursor),
+        errors,
+    )
+}
+
+pub fn parse_function_definition(
+    free_function: bool,
+    allow_body: bool,
+) -> ffi::WireFunctionDefinitionResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let start_cursor = parser_cursor();
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let kind = current_token();
+    let mut name = empty_string();
+    let mut name_location = empty_source_location();
+
+    if kind == token::TOKEN_FUNCTION {
+        advance();
+        if matches!(
+            current_token(),
+            token::TOKEN_CONSTRUCTOR | token::TOKEN_FALLBACK | token::TOKEN_RECEIVE
+        ) {
+            let expected = expected_function_kind_name(current_token());
+            name_location = current_location();
+            name = ffi::WireString {
+                bytes: token_to_string(current_token())
+                    .unwrap_or_default()
+                    .as_bytes()
+                    .to_vec(),
+            };
+            let name_text = String::from_utf8_lossy(&name.bytes);
+            let message = format!(
+                "This function is named \"{}\" but is not the {} of the contract. If you intend this to be a {}, use \"{}(...) {{ ... }}\" without the \"function\" keyword to define it.",
+                name_text, expected, expected, name_text
+            );
+            if current_token() == token::TOKEN_CONSTRUCTOR {
+                errors.push(parser_error(3323, &message));
+            } else {
+                warnings.push(parser_warning(3445, &message));
+            }
+            advance();
+        } else {
+            let parsed_name = expect_identifier_with_location(
+                current_token(),
+                current_literal(),
+                current_token_name(),
+                current_location(),
+            );
+            advance_by(parsed_name.tokens_consumed);
+            if !parsed_name.errors.is_empty() {
+                errors.extend(parsed_name.errors);
+                return function_definition_result(
+                    empty_ast_node(),
+                    name,
+                    name_location,
+                    VISIBILITY_DEFAULT,
+                    STATE_MUTABILITY_NON_PAYABLE,
+                    free_function,
+                    kind,
+                    false,
+                    empty_ast_node(),
+                    Vec::new(),
+                    Vec::new(),
+                    documentation,
+                    empty_ast_node(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    empty_ast_node(),
+                    Vec::new(),
+                    Vec::new(),
+                    empty_ast_node(),
+                    false,
+                    Vec::new(),
+                    Vec::new(),
+                    empty_ast_node(),
+                    empty_expression_result(Vec::new()),
+                    tokens_consumed_since(start_cursor),
+                    errors,
+                    warnings,
+                );
+            }
+            name = parsed_name.identifier;
+            name_location = parsed_name.location;
+        }
+    } else {
+        assert!(matches!(
+            kind,
+            token::TOKEN_CONSTRUCTOR | token::TOKEN_FALLBACK | token::TOKEN_RECEIVE
+        ));
+        advance();
+    }
+
+    let header =
+        parse_function_header_with_node_id(false, documentation.node_id.max(current_node_id()));
+    let header_has_fatal_error = header.errors.iter().any(|error| error.fatal);
+    errors.extend(header.errors.clone());
+    if header_has_fatal_error {
+        return function_definition_result(
+            empty_ast_node(),
+            name,
+            name_location,
+            header.visibility,
+            header.state_mutability,
+            free_function,
+            kind,
+            header.is_virtual,
+            header.overrides,
+            header.override_paths,
+            header.override_path_details,
+            documentation,
+            header.parameters,
+            header.parameter_declarations,
+            header.parameter_details,
+            header.modifiers,
+            header.modifier_details,
+            header.return_parameters,
+            header.return_parameter_declarations,
+            header.return_parameter_details,
+            empty_ast_node(),
+            false,
+            Vec::new(),
+            Vec::new(),
+            header.experimental_return_expression,
+            header.experimental_return_expression_detail,
+            tokens_consumed_since(start_cursor),
+            errors,
+            warnings,
+        );
+    }
+
+    if experimental_solidity_enabled_in_current_source_unit() {
+        assert!(!header.return_parameters.present);
+    } else {
+        assert!(!header.experimental_return_expression.present);
+    }
+
+    let mut block = empty_ast_node();
+    let mut block_unchecked = false;
+    let mut block_statements = Vec::new();
+    let mut block_statement_details = Vec::new();
+    if !allow_body {
+        location.end = current_location().end;
+        let semicolon = expect_token(token::TOKEN_SEMICOLON);
+        if !semicolon.errors.is_empty() {
+            errors.extend(semicolon.errors);
+            return function_definition_result(
+                empty_ast_node(),
+                name,
+                name_location,
+                header.visibility,
+                header.state_mutability,
+                free_function,
+                kind,
+                header.is_virtual,
+                header.overrides,
+                header.override_paths,
+                header.override_path_details,
+                documentation,
+                header.parameters,
+                header.parameter_declarations,
+                header.parameter_details,
+                header.modifiers,
+                header.modifier_details,
+                header.return_parameters,
+                header.return_parameter_declarations,
+                header.return_parameter_details,
+                block,
+                false,
+                Vec::new(),
+                Vec::new(),
+                header.experimental_return_expression,
+                header.experimental_return_expression_detail,
+                tokens_consumed_since(start_cursor),
+                errors,
+                warnings,
+            );
+        }
+    } else if current_token() == token::TOKEN_SEMICOLON {
+        location.end = current_location().end;
+        advance();
+    } else {
+        let parsed_block = parse_block();
+        errors.extend(parsed_block.errors);
+        block = parsed_block.block;
+        block_unchecked = parsed_block.unchecked;
+        block_statements = parsed_block.statements;
+        block_statement_details = parsed_block.statement_details;
+        if !block.present {
+            return function_definition_result(
+                empty_ast_node(),
+                name,
+                name_location,
+                header.visibility,
+                header.state_mutability,
+                free_function,
+                kind,
+                header.is_virtual,
+                header.overrides,
+                header.override_paths,
+                header.override_path_details,
+                documentation,
+                header.parameters,
+                header.parameter_declarations,
+                header.parameter_details,
+                header.modifiers,
+                header.modifier_details,
+                header.return_parameters,
+                header.return_parameter_declarations,
+                header.return_parameter_details,
+                block,
+                block_unchecked,
+                block_statements,
+                block_statement_details,
+                header.experimental_return_expression,
+                header.experimental_return_expression_detail,
+                tokens_consumed_since(start_cursor),
+                errors,
+                warnings,
+            );
+        }
+        location.end = block.location.end;
+    }
+
+    let function_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(
+            max_node_id(current_node_id(), &header.modifiers)
+                .max(documentation.node_id)
+                .max(header.overrides.node_id)
+                .max(header.parameters.node_id)
+                .max(header.return_parameters.node_id)
+                .max(block.node_id)
+                .max(header.experimental_return_expression.node_id),
+        ),
+        kind: AST_NODE_KIND_FUNCTION_DEFINITION,
+        location,
+        text: name.clone(),
+    };
+
+    function_definition_result(
+        function_definition,
+        name,
+        name_location,
+        header.visibility,
+        header.state_mutability,
+        free_function,
+        kind,
+        header.is_virtual,
+        header.overrides,
+        header.override_paths,
+        header.override_path_details,
+        documentation,
+        header.parameters,
+        header.parameter_declarations,
+        header.parameter_details,
+        header.modifiers,
+        header.modifier_details,
+        header.return_parameters,
+        header.return_parameter_declarations,
+        header.return_parameter_details,
+        block,
+        block_unchecked,
+        block_statements,
+        block_statement_details,
+        header.experimental_return_expression,
+        header.experimental_return_expression_detail,
+        tokens_consumed_since(start_cursor),
+        errors,
+        warnings,
+    )
+}
+
+pub fn parse_struct_definition() -> ffi::WireStructDefinitionResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let struct_token = expect_token(token::TOKEN_STRUCT);
+    if !struct_token.errors.is_empty() {
+        return empty_struct_definition_result(struct_token.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return empty_struct_definition_result(parsed_name.errors);
+    }
+
+    let lbrace = expect_token(token::TOKEN_LBRACE);
+    if !lbrace.errors.is_empty() {
+        return empty_struct_definition_result(lbrace.errors);
+    }
+
+    let mut node_id = documentation.node_id.max(current_node_id());
+    let mut members = Vec::new();
+    let mut member_details = Vec::new();
+    while current_token() != token::TOKEN_RBRACE {
+        let member = parse_variable_declaration_with_options(
+            VarDeclParserOptions::default(),
+            empty_ast_node(),
+            node_id,
+        );
+        if parser_errors_have_fatal(&member.errors) {
+            errors.extend(member.errors);
+            return empty_struct_definition_result(errors);
+        }
+        errors.extend(member.errors.clone());
+        if !member.variable_declaration.present {
+            return empty_struct_definition_result(errors);
+        }
+        node_id = member.variable_declaration.node_id.max(node_id);
+        members.push(member.variable_declaration.clone());
+        member_details.push(member);
+        let semicolon = expect_token(token::TOKEN_SEMICOLON);
+        if !semicolon.errors.is_empty() {
+            errors.extend(semicolon.errors);
+            return empty_struct_definition_result(errors);
+        }
+    }
+
+    location.end = current_location().end;
+    let rbrace = expect_token(token::TOKEN_RBRACE);
+    if !rbrace.errors.is_empty() {
+        errors.extend(rbrace.errors);
+        return empty_struct_definition_result(errors);
+    }
+
+    let struct_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(node_id, &members).max(documentation.node_id)),
+        kind: AST_NODE_KIND_STRUCT_DEFINITION,
+        location,
+        text: parsed_name.identifier.clone(),
+    };
+
+    ffi::WireStructDefinitionResult {
+        struct_definition,
+        name: parsed_name.identifier,
+        name_location: parsed_name.location,
+        members,
+        member_details,
+        documentation,
+        errors,
+    }
+}
+
+pub fn parse_enum_definition() -> ffi::WireEnumDefinitionResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let enum_token = expect_token(token::TOKEN_ENUM);
+    if !enum_token.errors.is_empty() {
+        return empty_enum_definition_result(enum_token.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return empty_enum_definition_result(parsed_name.errors);
+    }
+
+    let lbrace = expect_token(token::TOKEN_LBRACE);
+    if !lbrace.errors.is_empty() {
+        return empty_enum_definition_result(lbrace.errors);
+    }
+
+    let mut node_id = documentation.node_id.max(current_node_id());
+    let mut members = Vec::new();
+    let mut member_details = Vec::new();
+    while current_token() != token::TOKEN_RBRACE {
+        let member = parse_enum_value(
+            current_comment_literal(),
+            current_comment_location(),
+            current_token(),
+            current_literal(),
+            current_token_name(),
+            current_location(),
+            node_id,
+        );
+        advance_by(member.tokens_consumed);
+        if !member.errors.is_empty() {
+            return empty_enum_definition_result(member.errors);
+        }
+        node_id = member.current_node_id;
+        members.push(member.enum_value.clone());
+        member_details.push(member);
+
+        if current_token() == token::TOKEN_RBRACE {
+            break;
+        }
+
+        let comma = expect_token(token::TOKEN_COMMA);
+        if !comma.errors.is_empty() {
+            return empty_enum_definition_result(comma.errors);
+        }
+        if current_token() != token::TOKEN_IDENTIFIER {
+            return empty_enum_definition_result(vec![fatal_parser_error(
+                1612,
+                "Expected identifier after ','",
+            )]);
+        }
+    }
+
+    if members.is_empty() {
+        errors.push(parser_error(3147, "Enum with no members is not allowed."));
+    }
+
+    location.end = current_location().end;
+    let rbrace = expect_token(token::TOKEN_RBRACE);
+    if !rbrace.errors.is_empty() {
+        errors.extend(rbrace.errors);
+        return empty_enum_definition_result(errors);
+    }
+
+    let enum_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(node_id, &members).max(documentation.node_id)),
+        kind: AST_NODE_KIND_ENUM_DEFINITION,
+        location,
+        text: parsed_name.identifier.clone(),
+    };
+
+    ffi::WireEnumDefinitionResult {
+        enum_definition,
+        name: parsed_name.identifier,
+        name_location: parsed_name.location,
+        members,
+        member_details,
+        documentation,
+        errors,
+    }
+}
+
+pub fn parse_variable_declaration() -> ffi::WireVariableDeclarationResult {
+    parse_variable_declaration_with_options(
+        VarDeclParserOptions::default(),
+        empty_ast_node(),
+        current_node_id(),
+    )
+}
+
+fn parse_variable_declaration_with_options(
+    options: VarDeclParserOptions,
+    look_ahead_array_type: ffi::WireAstNode,
+    current_node_id: i64,
+) -> ffi::WireVariableDeclarationResult {
+    parse_variable_declaration_with_type_name_result(
+        options,
+        type_name_from_look_ahead_array_type_node(look_ahead_array_type),
+        current_node_id,
+    )
+}
+
+fn parse_variable_declaration_with_type_name_result(
+    options: VarDeclParserOptions,
+    look_ahead_type_name: ffi::WireTypeNameFromIndexAccessStructureResult,
+    current_node_id: i64,
+) -> ffi::WireVariableDeclarationResult {
+    let _recursion_guard = RecursionGuard::new();
+    let look_ahead_array_type = look_ahead_type_name.type_name.clone();
+
+    let mut location = if look_ahead_array_type.present {
+        look_ahead_array_type.location.clone()
+    } else {
+        current_location()
+    };
+    let mut errors = Vec::new();
+    let documentation_result = parse_current_structured_documentation_with_node_id(current_node_id);
+    let documentation = documentation_result.documentation;
+    let mut node_id = documentation_result.current_node_id;
+    let type_name_elementary_token;
+    let type_name_elementary_first_number;
+    let type_name_elementary_second_number;
+    let type_name_has_state_mutability;
+    let type_name_state_mutability;
+    let type_name_user_defined_path_node;
+    let type_name_user_defined_path;
+    let type_name_user_defined_path_locations;
+    let type_name_array_base_types;
+    let type_name_array_lengths;
+    let type_name_array_length_details;
+    let mut type_name_function_parameters = empty_ast_node();
+    let mut type_name_function_parameter_declarations = Vec::new();
+    let mut type_name_function_parameter_details = Vec::new();
+    let mut type_name_function_return_parameters = empty_ast_node();
+    let mut type_name_function_return_parameter_declarations = Vec::new();
+    let mut type_name_function_return_parameter_details = Vec::new();
+    let mut type_name_function_visibility = VISIBILITY_DEFAULT;
+    let mut type_name_function_state_mutability = STATE_MUTABILITY_NON_PAYABLE;
+    let mut type_name_mapping_key_type = empty_ast_node();
+    let mut type_name_mapping_key_elementary_token = token::TOKEN_ILLEGAL;
+    let mut type_name_mapping_key_elementary_first_number = 0;
+    let mut type_name_mapping_key_elementary_second_number = 0;
+    let mut type_name_mapping_key_user_defined_path_node = empty_ast_node();
+    let mut type_name_mapping_key_user_defined_path = Vec::new();
+    let mut type_name_mapping_key_user_defined_path_locations = Vec::new();
+    let mut type_name_mapping_key_name = empty_string();
+    let mut type_name_mapping_key_name_location = empty_source_location();
+    let mut type_name_mapping_value_type = empty_ast_node();
+    let mut type_name_mapping_value_elementary_token = token::TOKEN_ILLEGAL;
+    let mut type_name_mapping_value_elementary_first_number = 0;
+    let mut type_name_mapping_value_elementary_second_number = 0;
+    let mut type_name_mapping_value_has_state_mutability = false;
+    let mut type_name_mapping_value_state_mutability = STATE_MUTABILITY_NON_PAYABLE;
+    let mut type_name_mapping_value_user_defined_path_node = empty_ast_node();
+    let mut type_name_mapping_value_user_defined_path = Vec::new();
+    let mut type_name_mapping_value_user_defined_path_locations = Vec::new();
+    let mut type_name_mapping_value_array_base_types = Vec::new();
+    let mut type_name_mapping_value_array_lengths = Vec::new();
+    let mut type_name_mapping_value_array_length_details = Vec::new();
+    let mut type_name_mapping_value_function_parameters = empty_ast_node();
+    let mut type_name_mapping_value_function_parameter_declarations = Vec::new();
+    let mut type_name_mapping_value_function_parameter_details = Vec::new();
+    let mut type_name_mapping_value_function_return_parameters = empty_ast_node();
+    let mut type_name_mapping_value_function_return_parameter_declarations = Vec::new();
+    let mut type_name_mapping_value_function_return_parameter_details = Vec::new();
+    let mut type_name_mapping_value_function_visibility = VISIBILITY_DEFAULT;
+    let mut type_name_mapping_value_function_state_mutability = STATE_MUTABILITY_NON_PAYABLE;
+    let mut type_name_mapping_value_name = empty_string();
+    let mut type_name_mapping_value_name_location = empty_source_location();
+    let mut type_name_mapping_details = Vec::new();
+    let type_name = if look_ahead_array_type.present {
+        type_name_elementary_token = look_ahead_type_name.elementary_type_token;
+        type_name_elementary_first_number = look_ahead_type_name.elementary_type_first_number;
+        type_name_elementary_second_number = look_ahead_type_name.elementary_type_second_number;
+        type_name_has_state_mutability = look_ahead_type_name.has_state_mutability;
+        type_name_state_mutability = look_ahead_type_name.state_mutability;
+        type_name_user_defined_path_node = look_ahead_type_name.user_defined_path_node;
+        type_name_user_defined_path = look_ahead_type_name.user_defined_path;
+        type_name_user_defined_path_locations = look_ahead_type_name.user_defined_path_locations;
+        type_name_array_base_types = look_ahead_type_name.array_base_types;
+        type_name_array_lengths = look_ahead_type_name.array_lengths;
+        type_name_array_length_details = look_ahead_type_name.array_length_details;
+        look_ahead_array_type
+    } else {
+        let parsed_type_name = parse_type_name_with_node_id(node_id);
+        if parser_errors_have_fatal(&parsed_type_name.errors) {
+            return empty_variable_declaration_result(parsed_type_name.errors);
+        }
+        errors.extend(parsed_type_name.errors);
+        type_name_elementary_token = parsed_type_name.elementary_type_token;
+        type_name_elementary_first_number = parsed_type_name.elementary_type_first_number;
+        type_name_elementary_second_number = parsed_type_name.elementary_type_second_number;
+        type_name_has_state_mutability = parsed_type_name.has_state_mutability;
+        type_name_state_mutability = parsed_type_name.state_mutability;
+        type_name_user_defined_path_node = parsed_type_name.user_defined_path_node;
+        type_name_user_defined_path = parsed_type_name.user_defined_path;
+        type_name_user_defined_path_locations = parsed_type_name.user_defined_path_locations;
+        type_name_array_base_types = parsed_type_name.array_base_types;
+        type_name_array_lengths = parsed_type_name.array_lengths;
+        type_name_array_length_details = parsed_type_name.array_length_details;
+        type_name_function_parameters = parsed_type_name.function_parameters;
+        type_name_function_parameter_declarations =
+            parsed_type_name.function_parameter_declarations;
+        type_name_function_parameter_details = parsed_type_name.function_parameter_details;
+        type_name_function_return_parameters = parsed_type_name.function_return_parameters;
+        type_name_function_return_parameter_declarations =
+            parsed_type_name.function_return_parameter_declarations;
+        type_name_function_return_parameter_details =
+            parsed_type_name.function_return_parameter_details;
+        type_name_function_visibility = parsed_type_name.function_visibility;
+        type_name_function_state_mutability = parsed_type_name.function_state_mutability;
+        type_name_mapping_key_type = parsed_type_name.mapping_key_type;
+        type_name_mapping_key_elementary_token = parsed_type_name.mapping_key_elementary_token;
+        type_name_mapping_key_elementary_first_number =
+            parsed_type_name.mapping_key_elementary_first_number;
+        type_name_mapping_key_elementary_second_number =
+            parsed_type_name.mapping_key_elementary_second_number;
+        type_name_mapping_key_user_defined_path_node =
+            parsed_type_name.mapping_key_user_defined_path_node;
+        type_name_mapping_key_user_defined_path = parsed_type_name.mapping_key_user_defined_path;
+        type_name_mapping_key_user_defined_path_locations =
+            parsed_type_name.mapping_key_user_defined_path_locations;
+        type_name_mapping_key_name = parsed_type_name.mapping_key_name;
+        type_name_mapping_key_name_location = parsed_type_name.mapping_key_name_location;
+        type_name_mapping_value_type = parsed_type_name.mapping_value_type;
+        type_name_mapping_value_elementary_token = parsed_type_name.mapping_value_elementary_token;
+        type_name_mapping_value_elementary_first_number =
+            parsed_type_name.mapping_value_elementary_first_number;
+        type_name_mapping_value_elementary_second_number =
+            parsed_type_name.mapping_value_elementary_second_number;
+        type_name_mapping_value_has_state_mutability =
+            parsed_type_name.mapping_value_has_state_mutability;
+        type_name_mapping_value_state_mutability = parsed_type_name.mapping_value_state_mutability;
+        type_name_mapping_value_user_defined_path_node =
+            parsed_type_name.mapping_value_user_defined_path_node;
+        type_name_mapping_value_user_defined_path =
+            parsed_type_name.mapping_value_user_defined_path;
+        type_name_mapping_value_user_defined_path_locations =
+            parsed_type_name.mapping_value_user_defined_path_locations;
+        type_name_mapping_value_array_base_types = parsed_type_name.mapping_value_array_base_types;
+        type_name_mapping_value_array_lengths = parsed_type_name.mapping_value_array_lengths;
+        type_name_mapping_value_array_length_details =
+            parsed_type_name.mapping_value_array_length_details;
+        type_name_mapping_value_function_parameters =
+            parsed_type_name.mapping_value_function_parameters;
+        type_name_mapping_value_function_parameter_declarations =
+            parsed_type_name.mapping_value_function_parameter_declarations;
+        type_name_mapping_value_function_parameter_details =
+            parsed_type_name.mapping_value_function_parameter_details;
+        type_name_mapping_value_function_return_parameters =
+            parsed_type_name.mapping_value_function_return_parameters;
+        type_name_mapping_value_function_return_parameter_declarations =
+            parsed_type_name.mapping_value_function_return_parameter_declarations;
+        type_name_mapping_value_function_return_parameter_details =
+            parsed_type_name.mapping_value_function_return_parameter_details;
+        type_name_mapping_value_function_visibility =
+            parsed_type_name.mapping_value_function_visibility;
+        type_name_mapping_value_function_state_mutability =
+            parsed_type_name.mapping_value_function_state_mutability;
+        type_name_mapping_value_name = parsed_type_name.mapping_value_name;
+        type_name_mapping_value_name_location = parsed_type_name.mapping_value_name_location;
+        type_name_mapping_details = parsed_type_name.mapping_details;
+        parsed_type_name.type_name
+    };
+    if !type_name.present {
+        return empty_variable_declaration_result(errors);
+    }
+    location.end = type_name.location.end;
+    node_id = max_node_id(node_id, &[documentation.clone(), type_name.clone()]);
+
+    if is_function_type_name(&type_name)
+        && options.kind == VAR_DECL_KIND_STATE
+        && current_token() == token::TOKEN_LBRACE
+    {
+        errors.push(fatal_parser_error(
+            2915,
+            "Expected a state variable declaration. If you intended this as a fallback function \
+or a function to handle plain ether transactions, use the \"fallback\" keyword \
+or the \"receive\" keyword instead.",
+        ));
+        return empty_variable_declaration_result(errors);
+    }
+
+    let mut is_indexed = false;
+    let mut mutability = VARIABLE_DECLARATION_MUTABILITY_MUTABLE;
+    let mut overrides = empty_ast_node();
+    let mut override_paths = Vec::new();
+    let mut override_path_details = Vec::new();
+    let mut visibility = VISIBILITY_DEFAULT;
+    let mut variable_location = VARIABLE_DECLARATION_LOCATION_UNSPECIFIED;
+
+    loop {
+        let token = current_token();
+        if options.kind == VAR_DECL_KIND_STATE && is_variable_visibility_specifier(token) {
+            location.end = current_location().end;
+            if visibility != VISIBILITY_DEFAULT {
+                errors.push(parser_error(
+                    4110,
+                    &format!(
+                        "Visibility already specified as \"{}\".",
+                        visibility_to_string(visibility)
+                    ),
+                ));
+                advance();
+            } else {
+                let parsed_visibility = parse_visibility_specifier(token);
+                advance_by(parsed_visibility.tokens_consumed);
+                visibility = parsed_visibility.visibility;
+            }
+        } else if options.kind == VAR_DECL_KIND_STATE && token == token::TOKEN_OVERRIDE {
+            if overrides.present {
+                errors.push(parser_error(9125, "Override already specified."));
+            }
+
+            let parsed_overrides = parse_current_override_specifier_with_node_id(node_id);
+            if !parsed_overrides.errors.is_empty() {
+                errors.extend(parsed_overrides.errors);
+                return empty_variable_declaration_result(errors);
+            }
+            node_id = parsed_overrides.current_node_id;
+            overrides = parsed_overrides.override_specifier;
+            override_paths = parsed_overrides.overrides;
+            override_path_details = parsed_overrides.override_details;
+        } else {
+            if options.allow_indexed && token == token::TOKEN_INDEXED {
+                if is_indexed {
+                    errors.push(parser_error(5399, "Indexed already specified."));
+                }
+
+                is_indexed = true;
+            } else if token == token::TOKEN_CONSTANT || token == token::TOKEN_IMMUTABLE {
+                if mutability != VARIABLE_DECLARATION_MUTABILITY_MUTABLE {
+                    errors.push(parser_error(
+                        3109,
+                        &format!(
+                            "Mutability already set to \"{}\"",
+                            variable_declaration_mutability_to_string(mutability)
+                        ),
+                    ));
+                } else if token == token::TOKEN_CONSTANT {
+                    mutability = VARIABLE_DECLARATION_MUTABILITY_CONSTANT;
+                } else if token == token::TOKEN_IMMUTABLE {
+                    mutability = VARIABLE_DECLARATION_MUTABILITY_IMMUTABLE;
+                }
+            } else if options.allow_location_specifier && token::is_location_specifier(token) {
+                if variable_location != VARIABLE_DECLARATION_LOCATION_UNSPECIFIED {
+                    errors.push(parser_error(3548, "Location already specified."));
+                } else {
+                    variable_location = match token {
+                        token::TOKEN_STORAGE => VARIABLE_DECLARATION_LOCATION_STORAGE,
+                        token::TOKEN_MEMORY => VARIABLE_DECLARATION_LOCATION_MEMORY,
+                        token::TOKEN_CALLDATA => VARIABLE_DECLARATION_LOCATION_CALLDATA,
+                        _ => panic!("Unknown data location."),
+                    };
+                }
+            } else if options.kind == VAR_DECL_KIND_STATE
+                && token == token::TOKEN_IDENTIFIER
+                && current_literal().bytes == b"transient"
+                && peek_next_token() != token::TOKEN_ASSIGN
+                && peek_next_token() != token::TOKEN_SEMICOLON
+            {
+                if variable_location != VARIABLE_DECLARATION_LOCATION_UNSPECIFIED {
+                    errors.push(parser_error(3548, "Location already specified."));
+                } else {
+                    variable_location = VARIABLE_DECLARATION_LOCATION_TRANSIENT;
+                }
+            } else {
+                break;
+            }
+
+            location.end = current_location().end;
+            advance();
+        }
+    }
+
+    let mut name_location = empty_source_location();
+    let identifier = if options.allow_empty_name && current_token() != token::TOKEN_IDENTIFIER {
+        empty_string()
+    } else {
+        location.end = current_location().end;
+        let parsed_identifier = expect_identifier_with_location(
+            current_token(),
+            current_literal(),
+            current_token_name(),
+            current_location(),
+        );
+        advance_by(parsed_identifier.tokens_consumed);
+        if !parsed_identifier.errors.is_empty() {
+            errors.extend(parsed_identifier.errors);
+            return empty_variable_declaration_result(errors);
+        }
+        name_location = parsed_identifier.location.clone();
+        let identifier = parsed_identifier.identifier;
+        location.end = parsed_identifier.location.end;
+        identifier
+    };
+
+    let mut value = empty_ast_node();
+    let mut value_detail = empty_expression_result(Vec::new());
+    if options.allow_initial_value && current_token() == token::TOKEN_ASSIGN {
+        advance();
+        let parsed_value = parse_expression();
+        if parser_errors_have_fatal(&parsed_value.errors) {
+            errors.extend(parsed_value.errors);
+            return empty_variable_declaration_result(errors);
+        }
+        errors.extend(parsed_value.errors.clone());
+        value = parsed_value.expression.clone();
+        value_detail = parsed_value;
+        if !value.present {
+            return empty_variable_declaration_result(errors);
+        }
+        location.end = value.location.end;
+    }
+
+    let nodes = [
+        type_name.clone(),
+        documentation.clone(),
+        overrides.clone(),
+        value.clone(),
+    ];
+
+    let variable_declaration = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(node_id, &nodes)),
+        kind: AST_NODE_KIND_VARIABLE_DECLARATION,
+        location,
+        text: identifier.clone(),
+    };
+
+    ffi::WireVariableDeclarationResult {
+        variable_declaration,
+        type_name,
+        type_expression: empty_ast_node(),
+        type_expression_detail: empty_expression_result(Vec::new()),
+        documentation,
+        overrides,
+        override_paths,
+        override_path_details,
+        value,
+        value_detail,
+        type_name_elementary_token,
+        type_name_elementary_first_number,
+        type_name_elementary_second_number,
+        type_name_has_state_mutability,
+        type_name_state_mutability,
+        type_name_user_defined_path_node,
+        type_name_user_defined_path,
+        type_name_user_defined_path_locations,
+        type_name_array_base_types,
+        type_name_array_lengths,
+        type_name_array_length_details,
+        type_name_function_parameters,
+        type_name_function_parameter_declarations,
+        type_name_function_parameter_details,
+        type_name_function_return_parameters,
+        type_name_function_return_parameter_declarations,
+        type_name_function_return_parameter_details,
+        type_name_function_visibility,
+        type_name_function_state_mutability,
+        type_name_mapping_key_type,
+        type_name_mapping_key_elementary_token,
+        type_name_mapping_key_elementary_first_number,
+        type_name_mapping_key_elementary_second_number,
+        type_name_mapping_key_user_defined_path_node,
+        type_name_mapping_key_user_defined_path,
+        type_name_mapping_key_user_defined_path_locations,
+        type_name_mapping_key_name,
+        type_name_mapping_key_name_location,
+        type_name_mapping_value_type,
+        type_name_mapping_value_elementary_token,
+        type_name_mapping_value_elementary_first_number,
+        type_name_mapping_value_elementary_second_number,
+        type_name_mapping_value_has_state_mutability,
+        type_name_mapping_value_state_mutability,
+        type_name_mapping_value_user_defined_path_node,
+        type_name_mapping_value_user_defined_path,
+        type_name_mapping_value_user_defined_path_locations,
+        type_name_mapping_value_array_base_types,
+        type_name_mapping_value_array_lengths,
+        type_name_mapping_value_array_length_details,
+        type_name_mapping_value_function_parameters,
+        type_name_mapping_value_function_parameter_declarations,
+        type_name_mapping_value_function_parameter_details,
+        type_name_mapping_value_function_return_parameters,
+        type_name_mapping_value_function_return_parameter_declarations,
+        type_name_mapping_value_function_return_parameter_details,
+        type_name_mapping_value_function_visibility,
+        type_name_mapping_value_function_state_mutability,
+        type_name_mapping_value_name,
+        type_name_mapping_value_name_location,
+        type_name_mapping_details,
+        name: identifier,
+        name_location,
+        visibility,
+        mutability,
+        variable_location,
+        indexed: is_indexed,
+        errors,
+    }
+}
+
+fn type_name_from_look_ahead_array_type_node(
+    type_name: ffi::WireAstNode,
+) -> ffi::WireTypeNameFromIndexAccessStructureResult {
+    ffi::WireTypeNameFromIndexAccessStructureResult {
+        type_name,
+        array_base_type: empty_ast_node(),
+        array_length: empty_ast_node(),
+        array_base_types: Vec::new(),
+        array_lengths: Vec::new(),
+        array_length_details: Vec::new(),
+        elementary_type_token: token::TOKEN_ILLEGAL,
+        elementary_type_first_number: 0,
+        elementary_type_second_number: 0,
+        has_state_mutability: false,
+        state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        user_defined_path_node: empty_ast_node(),
+        user_defined_path: Vec::new(),
+        user_defined_path_locations: Vec::new(),
+        errors: Vec::new(),
+    }
+}
+
+fn empty_variable_declaration_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireVariableDeclarationResult {
+    ffi::WireVariableDeclarationResult {
+        variable_declaration: empty_ast_node(),
+        type_name: empty_ast_node(),
+        type_expression: empty_ast_node(),
+        type_expression_detail: empty_expression_result(Vec::new()),
+        documentation: empty_ast_node(),
+        overrides: empty_ast_node(),
+        override_paths: Vec::new(),
+        override_path_details: Vec::new(),
+        value: empty_ast_node(),
+        value_detail: empty_expression_result(Vec::new()),
+        type_name_elementary_token: token::TOKEN_ILLEGAL,
+        type_name_elementary_first_number: 0,
+        type_name_elementary_second_number: 0,
+        type_name_has_state_mutability: false,
+        type_name_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        type_name_user_defined_path_node: empty_ast_node(),
+        type_name_user_defined_path: Vec::new(),
+        type_name_user_defined_path_locations: Vec::new(),
+        type_name_array_base_types: Vec::new(),
+        type_name_array_lengths: Vec::new(),
+        type_name_array_length_details: Vec::new(),
+        type_name_function_parameters: empty_ast_node(),
+        type_name_function_parameter_declarations: Vec::new(),
+        type_name_function_parameter_details: Vec::new(),
+        type_name_function_return_parameters: empty_ast_node(),
+        type_name_function_return_parameter_declarations: Vec::new(),
+        type_name_function_return_parameter_details: Vec::new(),
+        type_name_function_visibility: VISIBILITY_DEFAULT,
+        type_name_function_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        type_name_mapping_key_type: empty_ast_node(),
+        type_name_mapping_key_elementary_token: token::TOKEN_ILLEGAL,
+        type_name_mapping_key_elementary_first_number: 0,
+        type_name_mapping_key_elementary_second_number: 0,
+        type_name_mapping_key_user_defined_path_node: empty_ast_node(),
+        type_name_mapping_key_user_defined_path: Vec::new(),
+        type_name_mapping_key_user_defined_path_locations: Vec::new(),
+        type_name_mapping_key_name: empty_string(),
+        type_name_mapping_key_name_location: empty_source_location(),
+        type_name_mapping_value_type: empty_ast_node(),
+        type_name_mapping_value_elementary_token: token::TOKEN_ILLEGAL,
+        type_name_mapping_value_elementary_first_number: 0,
+        type_name_mapping_value_elementary_second_number: 0,
+        type_name_mapping_value_has_state_mutability: false,
+        type_name_mapping_value_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        type_name_mapping_value_user_defined_path_node: empty_ast_node(),
+        type_name_mapping_value_user_defined_path: Vec::new(),
+        type_name_mapping_value_user_defined_path_locations: Vec::new(),
+        type_name_mapping_value_array_base_types: Vec::new(),
+        type_name_mapping_value_array_lengths: Vec::new(),
+        type_name_mapping_value_array_length_details: Vec::new(),
+        type_name_mapping_value_function_parameters: empty_ast_node(),
+        type_name_mapping_value_function_parameter_declarations: Vec::new(),
+        type_name_mapping_value_function_parameter_details: Vec::new(),
+        type_name_mapping_value_function_return_parameters: empty_ast_node(),
+        type_name_mapping_value_function_return_parameter_declarations: Vec::new(),
+        type_name_mapping_value_function_return_parameter_details: Vec::new(),
+        type_name_mapping_value_function_visibility: VISIBILITY_DEFAULT,
+        type_name_mapping_value_function_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        type_name_mapping_value_name: empty_string(),
+        type_name_mapping_value_name_location: empty_source_location(),
+        type_name_mapping_details: Vec::new(),
+        name: empty_string(),
+        name_location: empty_source_location(),
+        visibility: VISIBILITY_DEFAULT,
+        mutability: VARIABLE_DECLARATION_MUTABILITY_MUTABLE,
+        variable_location: VARIABLE_DECLARATION_LOCATION_UNSPECIFIED,
+        indexed: false,
+        errors,
+    }
+}
+
+fn empty_struct_definition_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireStructDefinitionResult {
+    ffi::WireStructDefinitionResult {
+        struct_definition: empty_ast_node(),
+        name: empty_string(),
+        name_location: empty_source_location(),
+        members: Vec::new(),
+        member_details: Vec::new(),
+        documentation: empty_ast_node(),
+        errors,
+    }
+}
+
+fn empty_enum_definition_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireEnumDefinitionResult {
+    ffi::WireEnumDefinitionResult {
+        enum_definition: empty_ast_node(),
+        name: empty_string(),
+        name_location: empty_source_location(),
+        members: Vec::new(),
+        member_details: Vec::new(),
+        documentation: empty_ast_node(),
+        errors,
+    }
+}
+
+fn empty_modifier_definition_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireModifierDefinitionResult {
+    ffi::WireModifierDefinitionResult {
+        modifier_definition: empty_ast_node(),
+        name: empty_string(),
+        name_location: empty_source_location(),
+        documentation: empty_ast_node(),
+        parameters: empty_ast_node(),
+        parameter_declarations: Vec::new(),
+        parameter_details: Vec::new(),
+        is_virtual: false,
+        overrides: empty_ast_node(),
+        override_paths: Vec::new(),
+        override_path_details: Vec::new(),
+        block: empty_ast_node(),
+        block_unchecked: false,
+        block_statements: Vec::new(),
+        block_statement_details: Vec::new(),
+        errors,
+    }
+}
+
+fn empty_event_definition_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireEventDefinitionResult {
+    ffi::WireEventDefinitionResult {
+        event_definition: empty_ast_node(),
+        name: empty_string(),
+        name_location: empty_source_location(),
+        documentation: empty_ast_node(),
+        parameters: empty_ast_node(),
+        parameter_declarations: Vec::new(),
+        parameter_details: Vec::new(),
+        anonymous: false,
+        errors,
+    }
+}
+
+fn empty_error_definition_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireErrorDefinitionResult {
+    ffi::WireErrorDefinitionResult {
+        error_definition: empty_ast_node(),
+        name: empty_string(),
+        name_location: empty_source_location(),
+        documentation: empty_ast_node(),
+        parameters: empty_ast_node(),
+        parameter_declarations: Vec::new(),
+        parameter_details: Vec::new(),
+        errors,
+    }
+}
+
+pub fn parse_modifier_definition() -> ffi::WireModifierDefinitionResult {
+    let _recursion_guard = RecursionGuard::new();
+    let _inside_modifier_guard = InsideModifierGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let modifier = expect_token(token::TOKEN_MODIFIER);
+    if !modifier.errors.is_empty() {
+        return empty_modifier_definition_result(modifier.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return empty_modifier_definition_result(parsed_name.errors);
+    }
+
+    let (parameters, parameter_declarations, parameter_details) =
+        if current_token() == token::TOKEN_LPAREN {
+            let options = VarDeclParserOptions {
+                allow_location_specifier: true,
+                ..VarDeclParserOptions::default()
+            };
+            let parameters = parse_parameter_list_with_options_and_node_id(
+                options,
+                true,
+                documentation.node_id.max(current_node_id()),
+            );
+            if parser_errors_have_fatal(&parameters.errors) {
+                errors.extend(parameters.errors);
+                return empty_modifier_definition_result(errors);
+            }
+            errors.extend(parameters.errors);
+            if !parameters.parameter_list.present {
+                return empty_modifier_definition_result(errors);
+            }
+            (
+                parameters.parameter_list,
+                parameters.parameters,
+                parameters.parameter_details,
+            )
+        } else {
+            let parameters = create_current_empty_parameter_list_with_node_id(
+                current_location(),
+                documentation.node_id.max(current_node_id()),
+            );
+            (parameters.parameter_list, parameters.parameters, Vec::new())
+        };
+
+    let mut overrides = empty_ast_node();
+    let mut override_paths = Vec::new();
+    let mut override_path_details = Vec::new();
+    let mut is_virtual = false;
+    let mut node_id = max_node_id(
+        current_node_id(),
+        &[documentation.clone(), parameters.clone()],
+    );
+
+    loop {
+        if current_token() == token::TOKEN_OVERRIDE {
+            if overrides.present {
+                errors.push(parser_error(9102, "Override already specified."));
+            }
+
+            let parsed_overrides = parse_current_override_specifier_with_node_id(node_id);
+            if !parsed_overrides.errors.is_empty() {
+                errors.extend(parsed_overrides.errors);
+                return empty_modifier_definition_result(errors);
+            }
+            node_id = parsed_overrides.current_node_id;
+            overrides = parsed_overrides.override_specifier;
+            override_paths = parsed_overrides.overrides;
+            override_path_details = parsed_overrides.override_details;
+        } else if current_token() == token::TOKEN_VIRTUAL {
+            if is_virtual {
+                errors.push(parser_error(2662, "Virtual already specified."));
+            }
+
+            is_virtual = true;
+            advance();
+        } else {
+            break;
+        }
+    }
+
+    let mut block = empty_ast_node();
+    let mut block_unchecked = false;
+    let mut block_statements = Vec::new();
+    let mut block_statement_details = Vec::new();
+    location.end = current_location().end;
+    if current_token() != token::TOKEN_SEMICOLON {
+        let parsed_block = parse_block();
+        errors.extend(parsed_block.errors);
+        block = parsed_block.block;
+        block_unchecked = parsed_block.unchecked;
+        block_statements = parsed_block.statements;
+        block_statement_details = parsed_block.statement_details;
+        if !block.present {
+            return empty_modifier_definition_result(errors);
+        }
+        location.end = block.location.end;
+    } else {
+        advance();
+    }
+
+    let nodes = [
+        documentation.clone(),
+        parameters.clone(),
+        overrides.clone(),
+        block.clone(),
+    ];
+    let modifier_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(node_id, &nodes)),
+        kind: AST_NODE_KIND_MODIFIER_DEFINITION,
+        location,
+        text: parsed_name.identifier.clone(),
+    };
+
+    ffi::WireModifierDefinitionResult {
+        modifier_definition,
+        name: parsed_name.identifier,
+        name_location: parsed_name.location,
+        documentation,
+        parameters,
+        parameter_declarations,
+        parameter_details,
+        is_virtual,
+        overrides,
+        override_paths,
+        override_path_details,
+        block,
+        block_unchecked,
+        block_statements,
+        block_statement_details,
+        errors,
+    }
+}
+
+pub fn parse_event_definition() -> ffi::WireEventDefinitionResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let event = expect_token(token::TOKEN_EVENT);
+    if !event.errors.is_empty() {
+        return empty_event_definition_result(event.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return empty_event_definition_result(parsed_name.errors);
+    }
+
+    let options = VarDeclParserOptions {
+        allow_indexed: true,
+        ..VarDeclParserOptions::default()
+    };
+    let parsed_parameters = parse_parameter_list_with_options_and_node_id(
+        options,
+        true,
+        documentation.node_id.max(current_node_id()),
+    );
+    if parser_errors_have_fatal(&parsed_parameters.errors) {
+        return empty_event_definition_result(parsed_parameters.errors);
+    }
+    errors.extend(parsed_parameters.errors);
+    let parameter_declarations = parsed_parameters.parameters;
+    let parameter_details = parsed_parameters.parameter_details;
+    let parameters = parsed_parameters.parameter_list;
+    if !parameters.present {
+        return empty_event_definition_result(errors);
+    }
+
+    let mut anonymous = false;
+    if current_token() == token::TOKEN_ANONYMOUS {
+        anonymous = true;
+        advance();
+    }
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return empty_event_definition_result(errors);
+    }
+
+    let nodes = [documentation.clone(), parameters.clone()];
+    ffi::WireEventDefinitionResult {
+        event_definition: ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+            kind: AST_NODE_KIND_EVENT_DEFINITION,
+            location,
+            text: parsed_name.identifier.clone(),
+        },
+        name: parsed_name.identifier,
+        name_location: parsed_name.location,
+        documentation,
+        parameters,
+        parameter_declarations,
+        parameter_details,
+        anonymous,
+        errors,
+    }
+}
+
+pub fn parse_error_definition() -> ffi::WireErrorDefinitionResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let error_marker =
+        expect_identifier_token(current_token(), current_literal(), current_token_name());
+    advance_by(error_marker.tokens_consumed);
+    if !error_marker.errors.is_empty() {
+        return empty_error_definition_result(error_marker.errors);
+    }
+    assert_eq!(error_marker.value.bytes, b"error");
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return empty_error_definition_result(parsed_name.errors);
+    }
+
+    let parsed_parameters = parse_parameter_list_with_options_and_node_id(
+        VarDeclParserOptions::default(),
+        true,
+        documentation.node_id.max(current_node_id()),
+    );
+    if parser_errors_have_fatal(&parsed_parameters.errors) {
+        return empty_error_definition_result(parsed_parameters.errors);
+    }
+    errors.extend(parsed_parameters.errors);
+    let parameter_declarations = parsed_parameters.parameters;
+    let parameter_details = parsed_parameters.parameter_details;
+    let parameters = parsed_parameters.parameter_list;
+    if !parameters.present {
+        return empty_error_definition_result(errors);
+    }
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return empty_error_definition_result(errors);
+    }
+
+    let nodes = [documentation.clone(), parameters.clone()];
+    ffi::WireErrorDefinitionResult {
+        error_definition: ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+            kind: AST_NODE_KIND_ERROR_DEFINITION,
+            location,
+            text: parsed_name.identifier.clone(),
+        },
+        name: parsed_name.identifier,
+        name_location: parsed_name.location,
+        documentation,
+        parameters,
+        parameter_declarations,
+        parameter_details,
+        errors,
+    }
+}
+
+pub fn parse_using_directive() -> ffi::WireUsingDirectiveResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut node_id = current_node_id();
+    let mut errors = Vec::new();
+    let using = expect_token(token::TOKEN_USING);
+    if !using.errors.is_empty() {
+        return empty_using_directive_result(using.errors);
+    }
+
+    let mut functions = Vec::new();
+    let mut function_details = Vec::new();
+    let mut operators = Vec::new();
+    let uses_braces = current_token() == token::TOKEN_LBRACE;
+    if uses_braces {
+        loop {
+            advance();
+            let function = parse_current_identifier_path_with_node_id(node_id);
+            if !function.errors.is_empty() {
+                errors.extend(function.errors);
+                return empty_using_directive_result(errors);
+            }
+            node_id = function.current_node_id;
+            functions.push(function.identifier_path.clone());
+            function_details.push(function);
+
+            if current_token() == token::TOKEN_AS {
+                advance();
+                let operator = current_token();
+                if !is_user_definable_operator(operator) {
+                    let operator_name = if !current_literal().bytes.is_empty() {
+                        String::from_utf8_lossy(&current_literal().bytes).into_owned()
+                    } else {
+                        token_to_string(operator).unwrap_or_default().to_string()
+                    };
+                    errors.push(parser_error(
+                        4403,
+                        &format!(
+                            "Not a user-definable operator: {}. Only the following operators can be user-defined: {}",
+                            operator_name,
+                            user_definable_operator_list()
+                        ),
+                    ));
+                }
+                operators.push(Some(operator));
+                advance();
+            } else {
+                operators.push(None);
+            }
+
+            if current_token() != token::TOKEN_COMMA {
+                break;
+            }
+        }
+
+        let rbrace = expect_token(token::TOKEN_RBRACE);
+        if !rbrace.errors.is_empty() {
+            errors.extend(rbrace.errors);
+            return empty_using_directive_result(errors);
+        }
+    } else {
+        let function = parse_current_identifier_path_with_node_id(node_id);
+        if !function.errors.is_empty() {
+            errors.extend(function.errors);
+            return empty_using_directive_result(errors);
+        }
+        node_id = function.current_node_id;
+        functions.push(function.identifier_path.clone());
+        function_details.push(function);
+        operators.push(None);
+    }
+
+    let for_token = expect_token(token::TOKEN_FOR);
+    if !for_token.errors.is_empty() {
+        errors.extend(for_token.errors);
+        return empty_using_directive_result(errors);
+    }
+
+    let type_name_detail = if current_token() == token::TOKEN_MUL {
+        advance();
+        empty_type_name_result(Vec::new())
+    } else {
+        let parsed_type_name = parse_type_name_with_node_id(node_id);
+        if parser_errors_have_fatal(&parsed_type_name.errors) {
+            errors.extend(parsed_type_name.errors);
+            return empty_using_directive_result(errors);
+        }
+        errors.extend(parsed_type_name.errors.clone());
+        if !parsed_type_name.type_name.present {
+            return empty_using_directive_result(errors);
+        }
+        parsed_type_name
+    };
+    let type_name = type_name_detail.type_name.clone();
+
+    let mut global = false;
+    if current_token() == token::TOKEN_IDENTIFIER && current_literal().bytes == b"global" {
+        global = true;
+        advance();
+    }
+
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return empty_using_directive_result(errors);
+    }
+
+    let mut child_nodes = functions.clone();
+    child_nodes.push(type_name.clone());
+    let using_directive = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(node_id, &child_nodes)),
+        kind: AST_NODE_KIND_USING_FOR_DIRECTIVE,
+        location,
+        text: empty_string(),
+    };
+
+    ffi::WireUsingDirectiveResult {
+        using_directive,
+        functions,
+        function_details,
+        operators: wire_using_operators(operators),
+        uses_braces,
+        type_name,
+        type_name_detail,
+        global,
+        errors,
+    }
+}
+
+fn empty_using_directive_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireUsingDirectiveResult {
+    ffi::WireUsingDirectiveResult {
+        using_directive: empty_ast_node(),
+        functions: Vec::new(),
+        function_details: Vec::new(),
+        operators: Vec::new(),
+        uses_braces: false,
+        type_name: empty_ast_node(),
+        type_name_detail: empty_type_name_result(Vec::new()),
+        global: false,
+        errors,
+    }
+}
+
+fn wire_using_operators(operators: Vec<Option<u32>>) -> Vec<ffi::WireUsingOperator> {
+    operators
+        .into_iter()
+        .map(|operator| ffi::WireUsingOperator {
+            present: operator.is_some(),
+            token: operator.unwrap_or(token::TOKEN_EOS),
+        })
+        .collect()
+}
+
+pub fn parse_user_defined_value_type_definition() -> ffi::WireUserDefinedValueTypeDefinitionResult {
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let type_token = expect_token(token::TOKEN_TYPE);
+    if !type_token.errors.is_empty() {
+        return empty_user_defined_value_type_definition_result(type_token.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return empty_user_defined_value_type_definition_result(parsed_name.errors);
+    }
+
+    let is_token = expect_token(token::TOKEN_IS);
+    if !is_token.errors.is_empty() {
+        return empty_user_defined_value_type_definition_result(is_token.errors);
+    }
+
+    let parsed_type_name = parse_type_name();
+    if parser_errors_have_fatal(&parsed_type_name.errors) {
+        return empty_user_defined_value_type_definition_result(parsed_type_name.errors);
+    }
+    let type_name_detail = parsed_type_name.clone();
+    errors.extend(parsed_type_name.errors);
+    let type_name_elementary_token = parsed_type_name.elementary_type_token;
+    let type_name_elementary_first_number = parsed_type_name.elementary_type_first_number;
+    let type_name_elementary_second_number = parsed_type_name.elementary_type_second_number;
+    let type_name_has_state_mutability = parsed_type_name.has_state_mutability;
+    let type_name_state_mutability = parsed_type_name.state_mutability;
+    let type_name = parsed_type_name.type_name;
+    if !type_name.present {
+        return empty_user_defined_value_type_definition_result(errors);
+    }
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return empty_user_defined_value_type_definition_result(errors);
+    }
+
+    ffi::WireUserDefinedValueTypeDefinitionResult {
+        user_defined_value_type_definition: ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(type_name.node_id.max(current_node_id())),
+            kind: AST_NODE_KIND_USER_DEFINED_VALUE_TYPE_DEFINITION,
+            location,
+            text: parsed_name.identifier.clone(),
+        },
+        name: parsed_name.identifier,
+        name_location: parsed_name.location,
+        type_name,
+        type_name_elementary_token,
+        type_name_elementary_first_number,
+        type_name_elementary_second_number,
+        type_name_has_state_mutability,
+        type_name_state_mutability,
+        type_name_detail,
+        errors,
+    }
+}
+
+fn empty_user_defined_value_type_definition_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireUserDefinedValueTypeDefinitionResult {
+    ffi::WireUserDefinedValueTypeDefinitionResult {
+        user_defined_value_type_definition: empty_ast_node(),
+        name: empty_string(),
+        name_location: empty_source_location(),
+        type_name: empty_ast_node(),
+        type_name_elementary_token: token::TOKEN_ILLEGAL,
+        type_name_elementary_first_number: 0,
+        type_name_elementary_second_number: 0,
+        type_name_has_state_mutability: false,
+        type_name_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        type_name_detail: empty_type_name_result(Vec::new()),
+        errors,
+    }
+}
+
+pub fn parse_type_name_suffix() -> ffi::WireTypeNameResult {
+    parse_type_name_suffix_with_type(empty_ast_node(), current_node_id())
+}
+
+fn parse_type_name_suffix_with_type(
+    mut type_name: ffi::WireAstNode,
+    mut node_id: i64,
+) -> ffi::WireTypeNameResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut errors = Vec::new();
+    node_id = node_id.max(type_name.node_id);
+    let mut array_base_type = empty_ast_node();
+    let mut array_length = empty_ast_node();
+    let mut array_base_types = Vec::new();
+    let mut array_lengths = Vec::new();
+    let mut array_length_details = Vec::new();
+    while current_token() == token::TOKEN_LBRACK {
+        let mut location = type_name.location.clone();
+        advance();
+
+        let length = if current_token() != token::TOKEN_RBRACK {
+            let length = parse_expression();
+            if parser_errors_have_fatal(&length.errors) {
+                errors.extend(length.errors);
+                return empty_type_name_result(errors);
+            }
+            errors.extend(length.errors.clone());
+            let length_node = length.expression.clone();
+            if !length_node.present {
+                return empty_type_name_result(errors);
+            }
+            (length_node, length)
+        } else {
+            (empty_ast_node(), empty_expression_result(Vec::new()))
+        };
+
+        location.end = current_location().end;
+        let rbrack = expect_token(token::TOKEN_RBRACK);
+        if !rbrack.errors.is_empty() {
+            errors.extend(rbrack.errors);
+            return empty_type_name_result(errors);
+        }
+
+        array_base_type = type_name.clone();
+        array_length = length.0.clone();
+        array_base_types.push(array_base_type.clone());
+        array_lengths.push(array_length.clone());
+        array_length_details.push(length.1);
+        let nodes = [type_name, array_length.clone()];
+        type_name = ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(node_id, &nodes)),
+            kind: AST_NODE_KIND_ARRAY_TYPE_NAME,
+            location,
+            text: empty_string(),
+        };
+        node_id = type_name.node_id;
+    }
+
+    ffi::WireTypeNameResult {
+        type_name,
+        array_base_type,
+        array_length,
+        array_base_types,
+        array_lengths,
+        array_length_details,
+        elementary_type_token: token::TOKEN_ILLEGAL,
+        elementary_type_first_number: 0,
+        elementary_type_second_number: 0,
+        has_state_mutability: false,
+        state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        user_defined_path_node: empty_ast_node(),
+        user_defined_path: Vec::new(),
+        user_defined_path_locations: Vec::new(),
+        function_parameters: empty_ast_node(),
+        function_parameter_declarations: Vec::new(),
+        function_parameter_details: Vec::new(),
+        function_return_parameters: empty_ast_node(),
+        function_return_parameter_declarations: Vec::new(),
+        function_return_parameter_details: Vec::new(),
+        function_visibility: VISIBILITY_DEFAULT,
+        function_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        mapping_key_type: empty_ast_node(),
+        mapping_key_elementary_token: token::TOKEN_ILLEGAL,
+        mapping_key_elementary_first_number: 0,
+        mapping_key_elementary_second_number: 0,
+        mapping_key_user_defined_path_node: empty_ast_node(),
+        mapping_key_user_defined_path: Vec::new(),
+        mapping_key_user_defined_path_locations: Vec::new(),
+        mapping_key_name: empty_string(),
+        mapping_key_name_location: empty_source_location(),
+        mapping_value_type: empty_ast_node(),
+        mapping_value_elementary_token: token::TOKEN_ILLEGAL,
+        mapping_value_elementary_first_number: 0,
+        mapping_value_elementary_second_number: 0,
+        mapping_value_has_state_mutability: false,
+        mapping_value_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        mapping_value_user_defined_path_node: empty_ast_node(),
+        mapping_value_user_defined_path: Vec::new(),
+        mapping_value_user_defined_path_locations: Vec::new(),
+        mapping_value_array_base_types: Vec::new(),
+        mapping_value_array_lengths: Vec::new(),
+        mapping_value_array_length_details: Vec::new(),
+        mapping_value_function_parameters: empty_ast_node(),
+        mapping_value_function_parameter_declarations: Vec::new(),
+        mapping_value_function_parameter_details: Vec::new(),
+        mapping_value_function_return_parameters: empty_ast_node(),
+        mapping_value_function_return_parameter_declarations: Vec::new(),
+        mapping_value_function_return_parameter_details: Vec::new(),
+        mapping_value_function_visibility: VISIBILITY_DEFAULT,
+        mapping_value_function_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        mapping_value_name: empty_string(),
+        mapping_value_name_location: empty_source_location(),
+        mapping_details: Vec::new(),
+        errors,
+    }
+}
+
+pub fn parse_type_name() -> ffi::WireTypeNameResult {
+    parse_type_name_with_node_id(current_node_id())
+}
+
+fn parse_type_name_with_node_id(current_node_id: i64) -> ffi::WireTypeNameResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut errors = Vec::new();
+    let token = current_token();
+    let mut elementary_type_token = token::TOKEN_ILLEGAL;
+    let mut elementary_type_first_number = 0;
+    let mut elementary_type_second_number = 0;
+    let mut has_state_mutability = false;
+    let mut result_state_mutability = STATE_MUTABILITY_NON_PAYABLE;
+    let mut user_defined_path_node = empty_ast_node();
+    let mut user_defined_path = Vec::new();
+    let mut user_defined_path_locations = Vec::new();
+    let mut function_parameters = empty_ast_node();
+    let mut function_parameter_declarations = Vec::new();
+    let mut function_parameter_details = Vec::new();
+    let mut function_return_parameters = empty_ast_node();
+    let mut function_return_parameter_declarations = Vec::new();
+    let mut function_return_parameter_details = Vec::new();
+    let mut function_visibility = VISIBILITY_DEFAULT;
+    let mut function_state_mutability = STATE_MUTABILITY_NON_PAYABLE;
+    let mut mapping_key_type = empty_ast_node();
+    let mut mapping_key_elementary_token = token::TOKEN_ILLEGAL;
+    let mut mapping_key_elementary_first_number = 0;
+    let mut mapping_key_elementary_second_number = 0;
+    let mut mapping_key_user_defined_path_node = empty_ast_node();
+    let mut mapping_key_user_defined_path = Vec::new();
+    let mut mapping_key_user_defined_path_locations = Vec::new();
+    let mut mapping_key_name = empty_string();
+    let mut mapping_key_name_location = empty_source_location();
+    let mut mapping_value_type = empty_ast_node();
+    let mut mapping_value_elementary_token = token::TOKEN_ILLEGAL;
+    let mut mapping_value_elementary_first_number = 0;
+    let mut mapping_value_elementary_second_number = 0;
+    let mut mapping_value_has_state_mutability = false;
+    let mut mapping_value_state_mutability = STATE_MUTABILITY_NON_PAYABLE;
+    let mut mapping_value_user_defined_path_node = empty_ast_node();
+    let mut mapping_value_user_defined_path = Vec::new();
+    let mut mapping_value_user_defined_path_locations = Vec::new();
+    let mut mapping_value_array_base_types = Vec::new();
+    let mut mapping_value_array_lengths = Vec::new();
+    let mut mapping_value_array_length_details = Vec::new();
+    let mut mapping_value_function_parameters = empty_ast_node();
+    let mut mapping_value_function_parameter_declarations = Vec::new();
+    let mut mapping_value_function_parameter_details = Vec::new();
+    let mut mapping_value_function_return_parameters = empty_ast_node();
+    let mut mapping_value_function_return_parameter_declarations = Vec::new();
+    let mut mapping_value_function_return_parameter_details = Vec::new();
+    let mut mapping_value_function_visibility = VISIBILITY_DEFAULT;
+    let mut mapping_value_function_state_mutability = STATE_MUTABILITY_NON_PAYABLE;
+    let mut mapping_value_name = empty_string();
+    let mut mapping_value_name_location = empty_source_location();
+    let mut mapping_details = Vec::new();
+    let type_name = if token::is_elementary_type_name(token) {
+        let mut location = current_location();
+        let (first_number, second_number) = current_token_numbers();
+        elementary_type_token = token;
+        elementary_type_first_number = first_number;
+        elementary_type_second_number = second_number;
+        let text = current_elementary_type_text(token);
+        advance();
+
+        let mut state_mutability = if token == token::TOKEN_ADDRESS {
+            Some(STATE_MUTABILITY_NON_PAYABLE)
+        } else {
+            None
+        };
+        if token::is_state_mutability_specifier(current_token()) {
+            if token == token::TOKEN_ADDRESS {
+                location.end = current_location().end;
+                let parsed_state_mutability = parse_state_mutability(current_token());
+                advance_by(parsed_state_mutability.tokens_consumed);
+                state_mutability = Some(parsed_state_mutability.state_mutability);
+            } else {
+                errors.push(parser_error(
+                    9106,
+                    "State mutability can only be specified for address types.",
+                ));
+                advance();
+            }
+        }
+        if let Some(state_mutability) = state_mutability {
+            has_state_mutability = true;
+            result_state_mutability = state_mutability;
+        }
+
+        ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(current_node_id),
+            kind: AST_NODE_KIND_ELEMENTARY_TYPE_NAME,
+            location,
+            text: ffi::WireString { bytes: text },
+        }
+    } else if token == token::TOKEN_FUNCTION {
+        let function_type = parse_function_type_with_node_id(current_node_id);
+        errors.extend(function_type.errors);
+        function_parameters = function_type.parameters;
+        function_parameter_declarations = function_type.parameter_declarations;
+        function_parameter_details = function_type.parameter_details;
+        function_return_parameters = function_type.return_parameters;
+        function_return_parameter_declarations = function_type.return_parameter_declarations;
+        function_return_parameter_details = function_type.return_parameter_details;
+        function_visibility = function_type.visibility;
+        function_state_mutability = function_type.state_mutability;
+        function_type.function_type
+    } else if token == token::TOKEN_MAPPING {
+        let mapping = parse_mapping_with_node_id(current_node_id);
+        errors.extend(mapping.errors);
+        mapping_details = mapping.mapping_details.clone();
+        mapping_key_type = mapping.key_type;
+        mapping_key_elementary_token = mapping.key_type_elementary_token;
+        mapping_key_elementary_first_number = mapping.key_type_elementary_first_number;
+        mapping_key_elementary_second_number = mapping.key_type_elementary_second_number;
+        mapping_key_user_defined_path_node = mapping.key_type_user_defined_path_node;
+        mapping_key_user_defined_path = mapping.key_type_user_defined_path;
+        mapping_key_user_defined_path_locations = mapping.key_type_user_defined_path_locations;
+        mapping_key_name = mapping.key_name;
+        mapping_key_name_location = mapping.key_name_location;
+        mapping_value_type = mapping.value_type;
+        mapping_value_elementary_token = mapping.value_type_elementary_token;
+        mapping_value_elementary_first_number = mapping.value_type_elementary_first_number;
+        mapping_value_elementary_second_number = mapping.value_type_elementary_second_number;
+        mapping_value_has_state_mutability = mapping.value_type_has_state_mutability;
+        mapping_value_state_mutability = mapping.value_type_state_mutability;
+        mapping_value_user_defined_path_node = mapping.value_type_user_defined_path_node;
+        mapping_value_user_defined_path = mapping.value_type_user_defined_path;
+        mapping_value_user_defined_path_locations = mapping.value_type_user_defined_path_locations;
+        mapping_value_array_base_types = mapping.value_type_array_base_types;
+        mapping_value_array_lengths = mapping.value_type_array_lengths;
+        mapping_value_array_length_details = mapping.value_type_array_length_details;
+        mapping_value_function_parameters = mapping.value_type_function_parameters;
+        mapping_value_function_parameter_declarations =
+            mapping.value_type_function_parameter_declarations;
+        mapping_value_function_parameter_details = mapping.value_type_function_parameter_details;
+        mapping_value_function_return_parameters = mapping.value_type_function_return_parameters;
+        mapping_value_function_return_parameter_declarations =
+            mapping.value_type_function_return_parameter_declarations;
+        mapping_value_function_return_parameter_details =
+            mapping.value_type_function_return_parameter_details;
+        mapping_value_function_visibility = mapping.value_type_function_visibility;
+        mapping_value_function_state_mutability = mapping.value_type_function_state_mutability;
+        mapping_value_name = mapping.value_name;
+        mapping_value_name_location = mapping.value_name_location;
+        mapping.mapping
+    } else if token == token::TOKEN_IDENTIFIER {
+        let type_name = parse_current_user_defined_type_name_with_node_id(current_node_id);
+        errors.extend(type_name.errors);
+        user_defined_path_node = type_name.path_node;
+        user_defined_path = type_name.path;
+        user_defined_path_locations = type_name.path_locations;
+        type_name.type_name
+    } else {
+        return empty_type_name_result(vec![fatal_parser_error(3546, "Expected type name")]);
+    };
+
+    if !type_name.present {
+        return empty_type_name_result(errors);
+    }
+    let type_name = parse_type_name_suffix_with_type(type_name, current_node_id);
+    errors.extend(type_name.errors);
+    ffi::WireTypeNameResult {
+        type_name: type_name.type_name,
+        array_base_type: type_name.array_base_type,
+        array_length: type_name.array_length,
+        array_base_types: type_name.array_base_types,
+        array_lengths: type_name.array_lengths,
+        array_length_details: type_name.array_length_details,
+        elementary_type_token,
+        elementary_type_first_number,
+        elementary_type_second_number,
+        has_state_mutability,
+        state_mutability: result_state_mutability,
+        user_defined_path_node,
+        user_defined_path,
+        user_defined_path_locations,
+        function_parameters,
+        function_parameter_declarations,
+        function_parameter_details,
+        function_return_parameters,
+        function_return_parameter_declarations,
+        function_return_parameter_details,
+        function_visibility,
+        function_state_mutability,
+        mapping_key_type,
+        mapping_key_elementary_token,
+        mapping_key_elementary_first_number,
+        mapping_key_elementary_second_number,
+        mapping_key_user_defined_path_node,
+        mapping_key_user_defined_path,
+        mapping_key_user_defined_path_locations,
+        mapping_key_name,
+        mapping_key_name_location,
+        mapping_value_type,
+        mapping_value_elementary_token,
+        mapping_value_elementary_first_number,
+        mapping_value_elementary_second_number,
+        mapping_value_has_state_mutability,
+        mapping_value_state_mutability,
+        mapping_value_user_defined_path_node,
+        mapping_value_user_defined_path,
+        mapping_value_user_defined_path_locations,
+        mapping_value_array_base_types,
+        mapping_value_array_lengths,
+        mapping_value_array_length_details,
+        mapping_value_function_parameters,
+        mapping_value_function_parameter_declarations,
+        mapping_value_function_parameter_details,
+        mapping_value_function_return_parameters,
+        mapping_value_function_return_parameter_declarations,
+        mapping_value_function_return_parameter_details,
+        mapping_value_function_visibility,
+        mapping_value_function_state_mutability,
+        mapping_value_name,
+        mapping_value_name_location,
+        mapping_details,
+        errors,
+    }
+}
+
+fn empty_type_name_result(errors: Vec<ffi::WireParserError>) -> ffi::WireTypeNameResult {
+    ffi::WireTypeNameResult {
+        type_name: empty_ast_node(),
+        array_base_type: empty_ast_node(),
+        array_length: empty_ast_node(),
+        array_base_types: Vec::new(),
+        array_lengths: Vec::new(),
+        array_length_details: Vec::new(),
+        elementary_type_token: token::TOKEN_ILLEGAL,
+        elementary_type_first_number: 0,
+        elementary_type_second_number: 0,
+        has_state_mutability: false,
+        state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        user_defined_path_node: empty_ast_node(),
+        user_defined_path: Vec::new(),
+        user_defined_path_locations: Vec::new(),
+        function_parameters: empty_ast_node(),
+        function_parameter_declarations: Vec::new(),
+        function_parameter_details: Vec::new(),
+        function_return_parameters: empty_ast_node(),
+        function_return_parameter_declarations: Vec::new(),
+        function_return_parameter_details: Vec::new(),
+        function_visibility: VISIBILITY_DEFAULT,
+        function_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        mapping_key_type: empty_ast_node(),
+        mapping_key_elementary_token: token::TOKEN_ILLEGAL,
+        mapping_key_elementary_first_number: 0,
+        mapping_key_elementary_second_number: 0,
+        mapping_key_user_defined_path_node: empty_ast_node(),
+        mapping_key_user_defined_path: Vec::new(),
+        mapping_key_user_defined_path_locations: Vec::new(),
+        mapping_key_name: empty_string(),
+        mapping_key_name_location: empty_source_location(),
+        mapping_value_type: empty_ast_node(),
+        mapping_value_elementary_token: token::TOKEN_ILLEGAL,
+        mapping_value_elementary_first_number: 0,
+        mapping_value_elementary_second_number: 0,
+        mapping_value_has_state_mutability: false,
+        mapping_value_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        mapping_value_user_defined_path_node: empty_ast_node(),
+        mapping_value_user_defined_path: Vec::new(),
+        mapping_value_user_defined_path_locations: Vec::new(),
+        mapping_value_array_base_types: Vec::new(),
+        mapping_value_array_lengths: Vec::new(),
+        mapping_value_array_length_details: Vec::new(),
+        mapping_value_function_parameters: empty_ast_node(),
+        mapping_value_function_parameter_declarations: Vec::new(),
+        mapping_value_function_parameter_details: Vec::new(),
+        mapping_value_function_return_parameters: empty_ast_node(),
+        mapping_value_function_return_parameter_declarations: Vec::new(),
+        mapping_value_function_return_parameter_details: Vec::new(),
+        mapping_value_function_visibility: VISIBILITY_DEFAULT,
+        mapping_value_function_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        mapping_value_name: empty_string(),
+        mapping_value_name_location: empty_source_location(),
+        mapping_details: Vec::new(),
+        errors,
+    }
+}
+
+pub fn parse_function_type() -> ffi::WireFunctionTypeResult {
+    parse_function_type_with_node_id(current_node_id())
+}
+
+fn parse_function_type_with_node_id(current_node_id: i64) -> ffi::WireFunctionTypeResult {
+    assert!(!experimental_solidity_enabled_in_current_source_unit());
+
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let function = expect_token(token::TOKEN_FUNCTION);
+    if !function.errors.is_empty() {
+        return empty_function_type_result(function.errors);
+    }
+
+    let header = parse_function_header_with_node_id(true, current_node_id);
+    if parser_errors_have_fatal(&header.errors) {
+        return empty_function_type_result(header.errors);
+    }
+    errors.extend(header.errors);
+    assert!(!header.experimental_return_expression.present);
+
+    location.end = current_location().end;
+    let nodes = [header.parameters.clone(), header.return_parameters.clone()];
+    ffi::WireFunctionTypeResult {
+        function_type: ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(current_node_id, &nodes)),
+            kind: AST_NODE_KIND_FUNCTION_TYPE_NAME,
+            location,
+            text: empty_string(),
+        },
+        parameters: header.parameters,
+        parameter_declarations: header.parameter_declarations,
+        parameter_details: header.parameter_details,
+        return_parameters: header.return_parameters,
+        return_parameter_declarations: header.return_parameter_declarations,
+        return_parameter_details: header.return_parameter_details,
+        visibility: header.visibility,
+        state_mutability: header.state_mutability,
+        errors,
+    }
+}
+
+fn empty_function_type_result(errors: Vec<ffi::WireParserError>) -> ffi::WireFunctionTypeResult {
+    ffi::WireFunctionTypeResult {
+        function_type: empty_ast_node(),
+        parameters: empty_ast_node(),
+        parameter_declarations: Vec::new(),
+        parameter_details: Vec::new(),
+        return_parameters: empty_ast_node(),
+        return_parameter_declarations: Vec::new(),
+        return_parameter_details: Vec::new(),
+        visibility: VISIBILITY_DEFAULT,
+        state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        errors,
+    }
+}
+
+pub fn parse_mapping() -> ffi::WireMappingResult {
+    parse_mapping_with_node_id(current_node_id())
+}
+
+fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let mapping = expect_token(token::TOKEN_MAPPING);
+    if !mapping.errors.is_empty() {
+        return empty_mapping_result(mapping.errors);
+    }
+
+    let lparen = expect_token(token::TOKEN_LPAREN);
+    if !lparen.errors.is_empty() {
+        return empty_mapping_result(lparen.errors);
+    }
+
+    let key_token = current_token();
+    let mut key_type_elementary_token = token::TOKEN_ILLEGAL;
+    let mut key_type_elementary_first_number = 0;
+    let mut key_type_elementary_second_number = 0;
+    let mut key_type_user_defined_path_node = empty_ast_node();
+    let mut key_type_user_defined_path = Vec::new();
+    let mut key_type_user_defined_path_locations = Vec::new();
+    let key_type = if key_token == token::TOKEN_IDENTIFIER {
+        let key_type = parse_current_user_defined_type_name_with_node_id(current_node_id);
+        if parser_errors_have_fatal(&key_type.errors) {
+            errors.extend(key_type.errors);
+            return empty_mapping_result(errors);
+        }
+        errors.extend(key_type.errors);
+        key_type_user_defined_path_node = key_type.path_node;
+        key_type_user_defined_path = key_type.path;
+        key_type_user_defined_path_locations = key_type.path_locations;
+        key_type.type_name
+    } else if token::is_elementary_type_name(key_token) {
+        let key_location = current_location();
+        let (first_number, second_number) = current_token_numbers();
+        key_type_elementary_token = key_token;
+        key_type_elementary_first_number = first_number;
+        key_type_elementary_second_number = second_number;
+        let key_text = current_elementary_type_text(key_token);
+        advance();
+        ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(current_node_id),
+            kind: AST_NODE_KIND_ELEMENTARY_TYPE_NAME,
+            location: key_location,
+            text: ffi::WireString { bytes: key_text },
+        }
+    } else {
+        return empty_mapping_result(vec![fatal_parser_error(
+            1005,
+            "Expected elementary type name or identifier for mapping key type",
+        )]);
+    };
+    if !key_type.present {
+        return empty_mapping_result(errors);
+    }
+
+    let mut key_name = empty_string();
+    let mut key_name_location = empty_source_location();
+    if current_token() == token::TOKEN_IDENTIFIER {
+        let parsed_key_name = expect_identifier_with_location(
+            current_token(),
+            current_literal(),
+            current_token_name(),
+            current_location(),
+        );
+        advance_by(parsed_key_name.tokens_consumed);
+        if !parsed_key_name.errors.is_empty() {
+            errors.extend(parsed_key_name.errors);
+            return empty_mapping_result(errors);
+        }
+        key_name = parsed_key_name.identifier;
+        key_name_location = parsed_key_name.location;
+    }
+
+    let arrow = expect_token(token::TOKEN_DOUBLE_ARROW);
+    if !arrow.errors.is_empty() {
+        errors.extend(arrow.errors);
+        return empty_mapping_result(errors);
+    }
+
+    let node_id = key_type.node_id.max(current_node_id);
+    let parsed_value_type = parse_type_name_with_node_id(node_id);
+    if parser_errors_have_fatal(&parsed_value_type.errors) {
+        errors.extend(parsed_value_type.errors);
+        return empty_mapping_result(errors);
+    }
+    errors.extend(parsed_value_type.errors);
+    let mut mapping_details = parsed_value_type.mapping_details;
+    let value_type_has_state_mutability = parsed_value_type.has_state_mutability;
+    let value_type_state_mutability = parsed_value_type.state_mutability;
+    let value_type_elementary_token = parsed_value_type.elementary_type_token;
+    let value_type_elementary_first_number = parsed_value_type.elementary_type_first_number;
+    let value_type_elementary_second_number = parsed_value_type.elementary_type_second_number;
+    let value_type_user_defined_path_node = parsed_value_type.user_defined_path_node;
+    let value_type_user_defined_path = parsed_value_type.user_defined_path;
+    let value_type_user_defined_path_locations = parsed_value_type.user_defined_path_locations;
+    let value_type_array_base_types = parsed_value_type.array_base_types;
+    let value_type_array_lengths = parsed_value_type.array_lengths;
+    let value_type_array_length_details = parsed_value_type.array_length_details;
+    let value_type_function_parameters = parsed_value_type.function_parameters;
+    let value_type_function_parameter_declarations =
+        parsed_value_type.function_parameter_declarations;
+    let value_type_function_parameter_details = parsed_value_type.function_parameter_details;
+    let value_type_function_return_parameters = parsed_value_type.function_return_parameters;
+    let value_type_function_return_parameter_declarations =
+        parsed_value_type.function_return_parameter_declarations;
+    let value_type_function_return_parameter_details =
+        parsed_value_type.function_return_parameter_details;
+    let value_type_function_visibility = parsed_value_type.function_visibility;
+    let value_type_function_state_mutability = parsed_value_type.function_state_mutability;
+    let value_type = parsed_value_type.type_name;
+    if !value_type.present {
+        return empty_mapping_result(errors);
+    }
+
+    let mut value_name = empty_string();
+    let mut value_name_location = empty_source_location();
+    if current_token() == token::TOKEN_IDENTIFIER {
+        let parsed_value_name = expect_identifier_with_location(
+            current_token(),
+            current_literal(),
+            current_token_name(),
+            current_location(),
+        );
+        advance_by(parsed_value_name.tokens_consumed);
+        if !parsed_value_name.errors.is_empty() {
+            errors.extend(parsed_value_name.errors);
+            return empty_mapping_result(errors);
+        }
+        value_name = parsed_value_name.identifier;
+        value_name_location = parsed_value_name.location;
+    }
+
+    location.end = current_location().end;
+    let rparen = expect_token(token::TOKEN_RPAREN);
+    if !rparen.errors.is_empty() {
+        errors.extend(rparen.errors);
+        return empty_mapping_result(errors);
+    }
+
+    let nodes = [key_type.clone(), value_type.clone()];
+    let mapping = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id, &nodes)),
+        kind: AST_NODE_KIND_MAPPING,
+        location,
+        text: empty_string(),
+    };
+    mapping_details.insert(
+        0,
+        ffi::WireMappingTypeName {
+            mapping: mapping.clone(),
+            key_type: key_type.clone(),
+            key_type_elementary_token,
+            key_type_elementary_first_number,
+            key_type_elementary_second_number,
+            key_type_user_defined_path_node: key_type_user_defined_path_node.clone(),
+            key_type_user_defined_path: key_type_user_defined_path.clone(),
+            key_type_user_defined_path_locations: key_type_user_defined_path_locations.clone(),
+            key_name: key_name.clone(),
+            key_name_location: key_name_location.clone(),
+            value_type: value_type.clone(),
+            value_type_elementary_token,
+            value_type_elementary_first_number,
+            value_type_elementary_second_number,
+            value_type_has_state_mutability,
+            value_type_state_mutability,
+            value_type_user_defined_path_node: value_type_user_defined_path_node.clone(),
+            value_type_user_defined_path: value_type_user_defined_path.clone(),
+            value_type_user_defined_path_locations: value_type_user_defined_path_locations.clone(),
+            value_type_array_base_types: value_type_array_base_types.clone(),
+            value_type_array_lengths: value_type_array_lengths.clone(),
+            value_type_array_length_details: value_type_array_length_details.clone(),
+            value_type_function_parameters: value_type_function_parameters.clone(),
+            value_type_function_parameter_declarations: value_type_function_parameter_declarations
+                .clone(),
+            value_type_function_parameter_details: value_type_function_parameter_details.clone(),
+            value_type_function_return_parameters: value_type_function_return_parameters.clone(),
+            value_type_function_return_parameter_declarations:
+                value_type_function_return_parameter_declarations.clone(),
+            value_type_function_return_parameter_details:
+                value_type_function_return_parameter_details.clone(),
+            value_type_function_visibility,
+            value_type_function_state_mutability,
+            value_name: value_name.clone(),
+            value_name_location: value_name_location.clone(),
+        },
+    );
+
+    ffi::WireMappingResult {
+        mapping,
+        key_type,
+        key_type_elementary_token,
+        key_type_elementary_first_number,
+        key_type_elementary_second_number,
+        key_type_user_defined_path_node,
+        key_type_user_defined_path,
+        key_type_user_defined_path_locations,
+        key_name,
+        key_name_location,
+        value_type,
+        value_type_elementary_token,
+        value_type_elementary_first_number,
+        value_type_elementary_second_number,
+        value_type_has_state_mutability,
+        value_type_state_mutability,
+        value_type_user_defined_path_node,
+        value_type_user_defined_path,
+        value_type_user_defined_path_locations,
+        value_type_array_base_types,
+        value_type_array_lengths,
+        value_type_array_length_details,
+        value_type_function_parameters,
+        value_type_function_parameter_declarations,
+        value_type_function_parameter_details,
+        value_type_function_return_parameters,
+        value_type_function_return_parameter_declarations,
+        value_type_function_return_parameter_details,
+        value_type_function_visibility,
+        value_type_function_state_mutability,
+        value_name,
+        value_name_location,
+        mapping_details,
+        errors,
+    }
+}
+
+fn empty_mapping_result(errors: Vec<ffi::WireParserError>) -> ffi::WireMappingResult {
+    ffi::WireMappingResult {
+        mapping: empty_ast_node(),
+        key_type: empty_ast_node(),
+        key_type_elementary_token: token::TOKEN_ILLEGAL,
+        key_type_elementary_first_number: 0,
+        key_type_elementary_second_number: 0,
+        key_type_user_defined_path_node: empty_ast_node(),
+        key_type_user_defined_path: Vec::new(),
+        key_type_user_defined_path_locations: Vec::new(),
+        key_name: empty_string(),
+        key_name_location: empty_source_location(),
+        value_type: empty_ast_node(),
+        value_type_elementary_token: token::TOKEN_ILLEGAL,
+        value_type_elementary_first_number: 0,
+        value_type_elementary_second_number: 0,
+        value_type_has_state_mutability: false,
+        value_type_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        value_type_user_defined_path_node: empty_ast_node(),
+        value_type_user_defined_path: Vec::new(),
+        value_type_user_defined_path_locations: Vec::new(),
+        value_type_array_base_types: Vec::new(),
+        value_type_array_lengths: Vec::new(),
+        value_type_array_length_details: Vec::new(),
+        value_type_function_parameters: empty_ast_node(),
+        value_type_function_parameter_declarations: Vec::new(),
+        value_type_function_parameter_details: Vec::new(),
+        value_type_function_return_parameters: empty_ast_node(),
+        value_type_function_return_parameter_declarations: Vec::new(),
+        value_type_function_return_parameter_details: Vec::new(),
+        value_type_function_visibility: VISIBILITY_DEFAULT,
+        value_type_function_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        value_name: empty_string(),
+        value_name_location: empty_source_location(),
+        mapping_details: Vec::new(),
+        errors,
+    }
+}
+
+pub fn parse_function_call_list_arguments() -> ffi::WireFunctionCallArguments {
+    parse_function_call_list_arguments_with_errors()
+}
+
+fn parse_function_call_list_arguments_with_errors() -> ffi::WireFunctionCallArguments {
+    let _recursion_guard = RecursionGuard::new();
+
+    let start_cursor = parser_cursor();
+    let mut ret = empty_function_call_arguments();
+    if current_token() != token::TOKEN_RPAREN {
+        let argument = parse_expression();
+        if parser_errors_have_fatal(&argument.errors) {
+            ret.errors.extend(argument.errors);
+            return function_call_arguments_with_consumed(ret, start_cursor);
+        }
+        ret.errors.extend(argument.errors.clone());
+        let argument_node = argument.expression.clone();
+        if !argument_node.present {
+            return function_call_arguments_with_consumed(ret, start_cursor);
+        }
+        ret.arguments.push(argument_node);
+        ret.argument_details.push(argument);
+        while current_token() != token::TOKEN_RPAREN {
+            let comma = expect_token(token::TOKEN_COMMA);
+            if !comma.errors.is_empty() {
+                ret.errors.extend(comma.errors);
+                break;
+            }
+            let argument = parse_expression();
+            if parser_errors_have_fatal(&argument.errors) {
+                ret.errors.extend(argument.errors);
+                return function_call_arguments_with_consumed(ret, start_cursor);
+            }
+            ret.errors.extend(argument.errors.clone());
+            let argument_node = argument.expression.clone();
+            if !argument_node.present {
+                return function_call_arguments_with_consumed(ret, start_cursor);
+            }
+            ret.arguments.push(argument_node);
+            ret.argument_details.push(argument);
+        }
+    }
+    function_call_arguments_with_consumed(ret, start_cursor)
+}
+
+pub fn create_empty_parameter_list(
+    mut current_location: ffi::WireSourceLocation,
+    current_node_id: i64,
+) -> ffi::WireParameterListResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    current_location.end = current_location.start;
+    let next_node_id = allocate_node_id_after(current_node_id);
+    ffi::WireParameterListResult {
+        parameter_list: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_PARAMETER_LIST,
+            location: current_location,
+            text: empty_string(),
+        },
+        parameters: Vec::new(),
+        current_node_id: next_node_id,
+    }
+}
+
+fn create_current_empty_parameter_list_with_node_id(
+    mut current_location: ffi::WireSourceLocation,
+    current_node_id: i64,
+) -> ffi::WireParameterListResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    current_location.end = current_location.start;
+    let next_node_id = allocate_node_id_after(current_node_id);
+    ffi::WireParameterListResult {
+        parameter_list: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_PARAMETER_LIST,
+            location: current_location,
+            text: empty_string(),
+        },
+        parameters: Vec::new(),
+        current_node_id: next_node_id,
+    }
+}
+
+pub fn parse_parameter_list() -> ffi::WireParameterListParseResult {
+    parse_parameter_list_with_options(VarDeclParserOptions::default(), true)
+}
+
+fn parse_parameter_list_with_options(
+    options: VarDeclParserOptions,
+    allow_empty: bool,
+) -> ffi::WireParameterListParseResult {
+    parse_parameter_list_with_options_and_node_id(options, allow_empty, current_node_id())
+}
+
+fn parse_parameter_list_with_options_and_node_id(
+    mut options: VarDeclParserOptions,
+    allow_empty: bool,
+    current_node_id: i64,
+) -> ffi::WireParameterListParseResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let mut parameters = Vec::new();
+    let mut parameter_details = Vec::new();
+    let mut node_id = current_node_id;
+    options.allow_empty_name = true;
+
+    if experimental_solidity_enabled_in_current_source_unit()
+        && current_token() == token::TOKEN_IDENTIFIER
+    {
+        let parameter = parse_postfix_variable_declaration_with_node_id(node_id);
+        if parser_errors_have_fatal(&parameter.errors) {
+            errors.extend(parameter.errors);
+            return empty_parameter_list_parse_result(errors);
+        }
+        errors.extend(parameter.errors);
+        let mut parameter_detail = empty_variable_declaration_result(Vec::new());
+        parameter_detail.variable_declaration = parameter.variable_declaration;
+        parameter_detail.type_expression = parameter.type_expression;
+        parameter_detail.type_expression_detail = parameter.type_expression_detail;
+        parameter_detail.documentation = parameter.documentation;
+        parameter_detail.name = parameter.name;
+        parameter_detail.name_location = parameter.name_location;
+        if !parameter_detail.variable_declaration.present {
+            return empty_parameter_list_parse_result(errors);
+        }
+        location.end = parameter_detail.variable_declaration.location.end;
+        node_id = parameter_detail.variable_declaration.node_id.max(node_id);
+        parameters.push(parameter_detail.variable_declaration.clone());
+        parameter_details.push(parameter_detail);
+        let parameter_list = ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(node_id, &parameters)),
+            kind: AST_NODE_KIND_PARAMETER_LIST,
+            location,
+            text: empty_string(),
+        };
+        return ffi::WireParameterListParseResult {
+            parameter_list,
+            parameters,
+            parameter_details,
+            errors,
+        };
+    }
+
+    let lparen = expect_token(token::TOKEN_LPAREN);
+    if !lparen.errors.is_empty() {
+        return empty_parameter_list_parse_result(lparen.errors);
+    }
+
+    if !allow_empty || current_token() != token::TOKEN_RPAREN {
+        let parameter = if experimental_solidity_enabled_in_current_source_unit() {
+            let parameter = parse_postfix_variable_declaration_with_node_id(node_id);
+            if parser_errors_have_fatal(&parameter.errors) {
+                errors.extend(parameter.errors);
+                return empty_parameter_list_parse_result(errors);
+            }
+            errors.extend(parameter.errors);
+            let mut parameter_detail = empty_variable_declaration_result(Vec::new());
+            parameter_detail.variable_declaration = parameter.variable_declaration;
+            parameter_detail.type_expression = parameter.type_expression;
+            parameter_detail.type_expression_detail = parameter.type_expression_detail;
+            parameter_detail.documentation = parameter.documentation;
+            parameter_detail.name = parameter.name;
+            parameter_detail.name_location = parameter.name_location;
+            parameter_detail
+        } else {
+            let parameter = parse_single_parameter_declaration_with_node_id(options, node_id);
+            if parser_errors_have_fatal(&parameter.errors) {
+                errors.extend(parameter.errors);
+                return empty_parameter_list_parse_result(errors);
+            }
+            errors.extend(parameter.errors.clone());
+            parameter
+        };
+        if !parameter.variable_declaration.present {
+            return empty_parameter_list_parse_result(errors);
+        }
+        node_id = parameter.variable_declaration.node_id.max(node_id);
+        parameters.push(parameter.variable_declaration.clone());
+        parameter_details.push(parameter);
+        while current_token() != token::TOKEN_RPAREN {
+            if current_token() == token::TOKEN_COMMA && peek_next_token() == token::TOKEN_RPAREN {
+                errors.push(fatal_parser_error(
+                    7591,
+                    "Unexpected trailing comma in parameter list.",
+                ));
+                return empty_parameter_list_parse_result(errors);
+            }
+
+            let comma = expect_token(token::TOKEN_COMMA);
+            if !comma.errors.is_empty() {
+                errors.extend(comma.errors);
+                return empty_parameter_list_parse_result(errors);
+            }
+
+            let parameter = if experimental_solidity_enabled_in_current_source_unit() {
+                let parameter = parse_postfix_variable_declaration_with_node_id(node_id);
+                if parser_errors_have_fatal(&parameter.errors) {
+                    errors.extend(parameter.errors);
+                    return empty_parameter_list_parse_result(errors);
+                }
+                errors.extend(parameter.errors);
+                let mut parameter_detail = empty_variable_declaration_result(Vec::new());
+                parameter_detail.variable_declaration = parameter.variable_declaration;
+                parameter_detail.type_expression = parameter.type_expression;
+                parameter_detail.type_expression_detail = parameter.type_expression_detail;
+                parameter_detail.documentation = parameter.documentation;
+                parameter_detail.name = parameter.name;
+                parameter_detail.name_location = parameter.name_location;
+                parameter_detail
+            } else {
+                let parameter = parse_single_parameter_declaration_with_node_id(options, node_id);
+                if parser_errors_have_fatal(&parameter.errors) {
+                    errors.extend(parameter.errors);
+                    return empty_parameter_list_parse_result(errors);
+                }
+                errors.extend(parameter.errors.clone());
+                parameter
+            };
+            if !parameter.variable_declaration.present {
+                return empty_parameter_list_parse_result(errors);
+            }
+            node_id = parameter.variable_declaration.node_id.max(node_id);
+            parameters.push(parameter.variable_declaration.clone());
+            parameter_details.push(parameter);
+        }
+    }
+
+    location.end = current_location().end;
+    let rparen = expect_token(token::TOKEN_RPAREN);
+    if !rparen.errors.is_empty() {
+        errors.extend(rparen.errors);
+        return empty_parameter_list_parse_result(errors);
+    }
+
+    let parameter_list = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(node_id, &parameters)),
+        kind: AST_NODE_KIND_PARAMETER_LIST,
+        location,
+        text: empty_string(),
+    };
+
+    ffi::WireParameterListParseResult {
+        parameter_list,
+        parameters,
+        parameter_details,
+        errors,
+    }
+}
+
+fn empty_parameter_list_parse_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireParameterListParseResult {
+    ffi::WireParameterListParseResult {
+        parameter_list: empty_ast_node(),
+        parameters: Vec::new(),
+        parameter_details: Vec::new(),
+        errors,
+    }
+}
+
+fn parse_single_parameter_declaration(
+    options: VarDeclParserOptions,
+) -> ffi::WireVariableDeclarationResult {
+    parse_single_parameter_declaration_with_node_id(options, current_node_id())
+}
+
+fn parse_single_parameter_declaration_with_node_id(
+    options: VarDeclParserOptions,
+    current_node_id: i64,
+) -> ffi::WireVariableDeclarationResult {
+    if experimental_solidity_enabled_in_current_source_unit() {
+        let parameter = parse_postfix_variable_declaration_with_node_id(current_node_id);
+        if parser_errors_have_fatal(&parameter.errors) {
+            return empty_variable_declaration_result(parameter.errors);
+        }
+        let mut result = empty_variable_declaration_result(parameter.errors);
+        result.variable_declaration = parameter.variable_declaration;
+        result.type_expression = parameter.type_expression;
+        result.type_expression_detail = parameter.type_expression_detail;
+        result.documentation = parameter.documentation;
+        result.name = parameter.name;
+        result.name_location = parameter.name_location;
+        result
+    } else {
+        parse_variable_declaration_with_options(options, empty_ast_node(), current_node_id)
+    }
+}
+
+pub fn parse_block() -> ffi::WireBlockResult {
+    parse_block_with_options(false, empty_string())
+}
+
+fn parse_block_with_options(
+    allow_unchecked: bool,
+    doc_string: ffi::WireString,
+) -> ffi::WireBlockResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let unchecked = current_token() == token::TOKEN_UNCHECKED;
+    if unchecked {
+        if !allow_unchecked {
+            errors.push(parser_error(
+                5296,
+                "\"unchecked\" blocks can only be used inside regular blocks.",
+            ));
+        }
+        advance();
+    }
+
+    let lbrace = expect_token(token::TOKEN_LBRACE);
+    if !lbrace.errors.is_empty() {
+        errors.extend(lbrace.errors);
+        return empty_block_result(errors);
+    }
+
+    let mut statements = Vec::new();
+    let mut statement_details = Vec::new();
+    while current_token() != token::TOKEN_RBRACE {
+        let statement = parse_statement_with_options(true);
+        if parser_errors_have_fatal(&statement.errors) {
+            errors.extend(statement.errors);
+            return empty_block_result(errors);
+        }
+        errors.extend(statement.errors.clone());
+        if !statement.statement.present {
+            return empty_block_result(errors);
+        }
+        statements.push(statement.statement.clone());
+        statement_details.push(statement);
+    }
+
+    location.end = current_location().end;
+    let rbrace = expect_token(token::TOKEN_RBRACE);
+    if !rbrace.errors.is_empty() {
+        errors.extend(rbrace.errors);
+        return empty_block_result(errors);
+    }
+
+    ffi::WireBlockResult {
+        block: ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(current_node_id(), &statements)),
+            kind: if unchecked {
+                AST_NODE_KIND_UNCHECKED_BLOCK
+            } else {
+                AST_NODE_KIND_BLOCK
+            },
+            location,
+            text: doc_string,
+        },
+        unchecked,
+        statements,
+        statement_details,
+        errors,
+    }
+}
+
+fn empty_block_result(errors: Vec<ffi::WireParserError>) -> ffi::WireBlockResult {
+    ffi::WireBlockResult {
+        block: empty_ast_node(),
+        unchecked: false,
+        statements: Vec::new(),
+        statement_details: Vec::new(),
+        errors,
+    }
+}
+
+pub fn parse_statement() -> ffi::WireStatementResult {
+    parse_statement_with_options(false)
+}
+
+fn parse_statement_with_options(allow_unchecked: bool) -> ffi::WireStatementResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let doc_string = current_comment_literal();
+    let token = current_token();
+    let mut errors = Vec::new();
+
+    let mut result = match token {
+        token::TOKEN_IF => {
+            let statement = parse_if_statement_with_doc(doc_string);
+            if parser_errors_have_fatal(&statement.errors) {
+                return empty_statement_result(statement.errors);
+            }
+            return statement;
+        }
+        token::TOKEN_WHILE => {
+            let statement = parse_while_statement_with_doc(doc_string);
+            if parser_errors_have_fatal(&statement.errors) {
+                return empty_statement_result(statement.errors);
+            }
+            return statement;
+        }
+        token::TOKEN_DO => {
+            let statement = parse_do_while_statement_with_doc(doc_string);
+            if parser_errors_have_fatal(&statement.errors) {
+                return empty_statement_result(statement.errors);
+            }
+            return statement;
+        }
+        token::TOKEN_FOR => {
+            let statement = parse_for_statement_with_doc(doc_string);
+            if parser_errors_have_fatal(&statement.errors) {
+                return empty_statement_result(statement.errors);
+            }
+            return statement;
+        }
+        token::TOKEN_UNCHECKED | token::TOKEN_LBRACE => {
+            let block = parse_block_with_options(allow_unchecked, doc_string);
+            if parser_errors_have_fatal(&block.errors) {
+                return empty_statement_result(block.errors);
+            }
+            let mut result = statement_result(block.block, block.errors);
+            result.block_unchecked = block.unchecked;
+            result.block_statements = block.statements;
+            result.block_statement_details = block.statement_details;
+            return result;
+        }
+        token::TOKEN_CONTINUE => {
+            let location = current_location();
+            advance();
+            statement_result(
+                ffi::WireAstNode {
+                    present: true,
+                    node_id: allocate_node_id_after(current_node_id()),
+                    kind: AST_NODE_KIND_CONTINUE_STATEMENT,
+                    location,
+                    text: doc_string.clone(),
+                },
+                Vec::new(),
+            )
+        }
+        token::TOKEN_BREAK => {
+            let location = current_location();
+            advance();
+            statement_result(
+                ffi::WireAstNode {
+                    present: true,
+                    node_id: allocate_node_id_after(current_node_id()),
+                    kind: AST_NODE_KIND_BREAK_STATEMENT,
+                    location,
+                    text: doc_string.clone(),
+                },
+                Vec::new(),
+            )
+        }
+        token::TOKEN_RETURN => {
+            let mut location = current_location();
+            let mut return_errors = Vec::new();
+            advance();
+            let (expression, expression_detail) = if current_token() != token::TOKEN_SEMICOLON {
+                let parsed_expression = parse_expression();
+                if parser_errors_have_fatal(&parsed_expression.errors) {
+                    return empty_statement_result(parsed_expression.errors);
+                }
+                return_errors.extend(parsed_expression.errors.clone());
+                let expression = parsed_expression.expression.clone();
+                if !expression.present {
+                    return empty_statement_result(return_errors);
+                }
+                (expression, parsed_expression)
+            } else {
+                location.end = current_location().end;
+                (empty_ast_node(), empty_expression_result(Vec::new()))
+            };
+            if expression.present {
+                location.end = expression.location.end;
+            }
+            let statement = ffi::WireAstNode {
+                present: true,
+                node_id: allocate_node_id_after(expression.node_id.max(current_node_id())),
+                kind: AST_NODE_KIND_RETURN_STATEMENT,
+                location,
+                text: doc_string.clone(),
+            };
+            let mut result = statement_result(statement, return_errors);
+            result.expression = expression;
+            result.expression_detail = expression_detail;
+            result
+        }
+        token::TOKEN_THROW => {
+            let location = current_location();
+            advance();
+            statement_result(
+                ffi::WireAstNode {
+                    present: true,
+                    node_id: allocate_node_id_after(current_node_id()),
+                    kind: AST_NODE_KIND_THROW_STATEMENT,
+                    location,
+                    text: doc_string.clone(),
+                },
+                Vec::new(),
+            )
+        }
+        token::TOKEN_TRY => {
+            let statement = parse_try_statement_with_doc(doc_string);
+            if parser_errors_have_fatal(&statement.errors) {
+                return empty_statement_result(statement.errors);
+            }
+            return statement;
+        }
+        token::TOKEN_ASSEMBLY => {
+            let inline_assembly = parse_inline_assembly_with_doc(doc_string);
+            if parser_errors_have_fatal(&inline_assembly.errors) {
+                return empty_statement_result(inline_assembly.errors);
+            }
+            let mut result =
+                statement_result(inline_assembly.inline_assembly, inline_assembly.errors);
+            result.inline_assembly_flags = inline_assembly.flags;
+            result.inline_assembly_block_location = inline_assembly.block_location;
+            return result;
+        }
+        token::TOKEN_EMIT => {
+            let mut emit_statement = parse_emit_statement_with_doc(doc_string.clone());
+            if parser_errors_have_fatal(&emit_statement.errors) {
+                errors.extend(std::mem::take(&mut emit_statement.errors));
+                return empty_statement_result(errors);
+            }
+            emit_statement
+        }
+        token::TOKEN_IDENTIFIER => {
+            if current_literal().bytes == b"revert" && peek_next_token() == token::TOKEN_IDENTIFIER
+            {
+                let mut revert_statement = parse_revert_statement_with_doc(doc_string.clone());
+                if parser_errors_have_fatal(&revert_statement.errors) {
+                    errors.extend(std::mem::take(&mut revert_statement.errors));
+                    return empty_statement_result(errors);
+                }
+                revert_statement
+            } else if inside_modifier() && current_literal().bytes == b"_" {
+                let location = current_location();
+                advance();
+                statement_result(
+                    ffi::WireAstNode {
+                        present: true,
+                        node_id: allocate_node_id_after(current_node_id()),
+                        kind: AST_NODE_KIND_PLACEHOLDER_STATEMENT,
+                        location,
+                        text: doc_string.clone(),
+                    },
+                    Vec::new(),
+                )
+            } else {
+                let mut statement = parse_simple_statement_with_doc(doc_string.clone());
+                if parser_errors_have_fatal(&statement.errors) {
+                    errors.extend(std::mem::take(&mut statement.errors));
+                    return empty_statement_result(errors);
+                }
+                statement
+            }
+        }
+        _ => {
+            let mut statement = parse_simple_statement_with_doc(doc_string.clone());
+            if parser_errors_have_fatal(&statement.errors) {
+                errors.extend(std::mem::take(&mut statement.errors));
+                return empty_statement_result(errors);
+            }
+            statement
+        }
+    };
+    errors.extend(std::mem::take(&mut result.errors));
+    if !result.statement.present {
+        return empty_statement_result(errors);
+    }
+
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return empty_statement_result(errors);
+    }
+
+    if result.statement.text.bytes.is_empty() {
+        result.statement.text = doc_string;
+    }
+    result.errors = errors;
+    result
+}
+
+pub fn parse_inline_assembly() -> ffi::WireInlineAssemblyResult {
+    parse_inline_assembly_with_doc(empty_string())
+}
+
+fn parse_inline_assembly_with_doc(doc_string: ffi::WireString) -> ffi::WireInlineAssemblyResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let assembly = expect_token(token::TOKEN_ASSEMBLY);
+    if !assembly.errors.is_empty() {
+        return empty_inline_assembly_result(assembly.errors);
+    }
+
+    if current_token() == token::TOKEN_STRING_LITERAL {
+        if current_literal().bytes != b"evmasm" {
+            errors.push(fatal_parser_error(4531, "Only \"evmasm\" supported."));
+            return empty_inline_assembly_result(errors);
+        }
+        advance();
+    }
+
+    let mut flags = Vec::new();
+    if current_token() == token::TOKEN_LPAREN {
+        loop {
+            advance();
+            let string_literal = expect_token_no_advance(token::TOKEN_STRING_LITERAL);
+            if !string_literal.errors.is_empty() {
+                errors.extend(string_literal.errors);
+                return empty_inline_assembly_result(errors);
+            }
+            flags.push(current_literal());
+            advance();
+
+            if current_token() != token::TOKEN_COMMA {
+                break;
+            }
+        }
+
+        let rparen = expect_token(token::TOKEN_RPAREN);
+        if !rparen.errors.is_empty() {
+            errors.extend(rparen.errors);
+            return empty_inline_assembly_result(errors);
+        }
+    }
+
+    set_scanner_mode_yul_for_current_inline_block();
+    let yul_result = match parse_yul_inline() {
+        Ok(result) => result,
+        Err(yul_errors) => {
+            errors.extend(yul_errors);
+            return empty_inline_assembly_result(errors);
+        }
+    };
+    let block_location = yul_result.location.clone();
+    errors.extend(yul_result.errors);
+
+    location.end = yul_result.location.end;
+    ffi::WireInlineAssemblyResult {
+        inline_assembly: ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(current_node_id()),
+            kind: AST_NODE_KIND_INLINE_ASSEMBLY,
+            location,
+            text: doc_string,
+        },
+        flags,
+        block_location,
+        errors,
+    }
+}
+
+struct YulInlineParseResult {
+    location: ffi::WireSourceLocation,
+    errors: Vec<ffi::WireParserError>,
+}
+
+#[derive(Clone, Copy)]
+enum YulForLoopComponent {
+    None,
+    Pre,
+    Post,
+    Body,
+}
+
+#[derive(Clone, Copy)]
+struct YulBlockContext {
+    is_function_body: bool,
+    for_loop_component: YulForLoopComponent,
+    next_for_loop_component: Option<YulForLoopComponent>,
+    statement_start: bool,
+}
+
+#[derive(Clone, Copy)]
+enum YulSwitchState {
+    ExpectExpression,
+    InCallExpression { paren_depth: u32 },
+    ExpectCase,
+    CaseLiteral,
+    ExpectCaseBody,
+    TypedLiteralColon { target: YulTypedLiteralTarget },
+    TypedLiteralIdentifier { target: YulTypedLiteralTarget },
+    InCaseBody { block_depth: usize },
+}
+
+#[derive(Clone, Copy)]
+enum YulTypedLiteralTarget {
+    ExpectCase,
+    ExpectCaseBody,
+}
+
+#[derive(Clone, Copy)]
+struct YulSwitchContext {
+    depth: usize,
+    state: YulSwitchState,
+    seen_case: bool,
+    seen_default: bool,
+}
+
+#[derive(Clone, Copy)]
+enum YulFunctionSignatureState {
+    Name,
+    AwaitParameters,
+    Parameters,
+    ExpectParameter,
+    ParameterTypeColon,
+    ParameterTypeIdentifier,
+    AfterParameter,
+    AfterParameters,
+    ReturnParameters,
+    ReturnTypeColon,
+    ReturnTypeIdentifier,
+    AfterReturnParameter,
+}
+
+#[derive(Clone, Copy)]
+enum YulLetDeclarationState {
+    ExpectName { depth: usize },
+    AfterName { depth: usize },
+    TypeColon { depth: usize },
+    TypeIdentifier { depth: usize },
+}
+
+#[derive(Clone, Copy)]
+enum YulAssignmentTargetListState {
+    AfterTarget { depth: usize },
+    ExpectTarget { depth: usize },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum YulCallArgumentState {
+    ExpectArgumentOrEnd,
+    ExpectArgument,
+    LiteralTypeColon,
+    LiteralTypeIdentifier,
+    ExpectCommaOrEnd,
+}
+
+#[derive(Clone, Copy)]
+struct YulCallContext {
+    state: YulCallArgumentState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum YulControlExpressionState {
+    ExpectExpression,
+    LiteralTypeColon,
+    LiteralTypeIdentifier,
+    ExpectBlock,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum YulForLoopSyntaxState {
+    ExpectPreBlock,
+    ExpectCondition,
+    ConditionLiteralTypeColon,
+    ConditionLiteralTypeIdentifier,
+    ExpectPostBlock,
+    ExpectBodyBlock,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum YulRhsExpressionState {
+    ExpectExpression,
+    LiteralTypeColon,
+    LiteralTypeIdentifier,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum YulStatementElementary {
+    Literal {
+        assignment_target: bool,
+    },
+    Identifier {
+        builtin_name: Option<String>,
+        assignment_target: bool,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum YulStatementTypedLiteralState {
+    Colon,
+    Identifier,
+    Complete,
+}
+
+fn empty_inline_assembly_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireInlineAssemblyResult {
+    ffi::WireInlineAssemblyResult {
+        inline_assembly: empty_ast_node(),
+        flags: Vec::new(),
+        block_location: empty_source_location(),
+        errors,
+    }
+}
+
+fn parse_yul_inline() -> Result<YulInlineParseResult, Vec<ffi::WireParserError>> {
+    let lbrace = expect_token_no_advance(token::TOKEN_LBRACE);
+    if !lbrace.errors.is_empty() {
+        return Err(lbrace.errors);
+    }
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let mut block_stack: Vec<YulBlockContext> = Vec::new();
+    let mut call_stack: Vec<YulCallContext> = Vec::new();
+    let mut switch_stack: Vec<YulSwitchContext> = Vec::new();
+    let mut next_block_is_function_body = false;
+    let mut next_block_for_loop_component = None;
+    let mut function_signature_state = None;
+    let mut let_declaration_state = None;
+    let mut assignment_target_list_state = None;
+    let mut control_expression_state = None;
+    let mut for_loop_syntax_state = None;
+    let mut rhs_expression_state = None;
+    let mut next_lparen_starts_call = false;
+    let mut statement_elementary: Option<YulStatementElementary> = None;
+    let mut statement_typed_literal_state: Option<YulStatementTypedLiteralState> = None;
+
+    loop {
+        normalize_yul_let_declaration_state(
+            current_token(),
+            block_stack.len(),
+            &mut let_declaration_state,
+        );
+        if let Some(error) =
+            validate_yul_statement_typed_literal_context(statement_typed_literal_state)
+        {
+            return Err(yul_errors_with(&mut errors, error));
+        }
+        if statement_typed_literal_state == Some(YulStatementTypedLiteralState::Complete)
+            || (statement_elementary.is_some() && statement_typed_literal_state.is_none())
+        {
+            if let Some(elementary) = statement_elementary.take() {
+                return Err(yul_errors_with(
+                    &mut errors,
+                    yul_statement_elementary_follow_error(&elementary),
+                ));
+            }
+        }
+        if let Some(error) =
+            validate_yul_let_declaration_name_context(block_stack.len(), let_declaration_state)
+        {
+            return Err(yul_errors_with(&mut errors, error));
+        }
+        if let Some(error) = validate_yul_function_signature_context(function_signature_state) {
+            return Err(yul_errors_with(&mut errors, error));
+        }
+        if let Some(error) =
+            validate_yul_call_argument_context(&call_stack, next_lparen_starts_call)
+        {
+            return Err(yul_errors_with(&mut errors, error));
+        }
+        if let Some(error) = validate_yul_control_expression_context(
+            control_expression_state,
+            &call_stack,
+            next_lparen_starts_call,
+        ) {
+            return Err(yul_errors_with(&mut errors, error));
+        }
+        if let Some(error) = validate_yul_for_loop_syntax_context(
+            for_loop_syntax_state,
+            &call_stack,
+            next_lparen_starts_call,
+        ) {
+            return Err(yul_errors_with(&mut errors, error));
+        }
+        if let Some(error) = validate_yul_rhs_expression_context(
+            rhs_expression_state,
+            &call_stack,
+            next_lparen_starts_call,
+        ) {
+            return Err(yul_errors_with(&mut errors, error));
+        }
+        normalize_yul_assignment_target_list_state(
+            block_stack.len(),
+            &mut assignment_target_list_state,
+        );
+        if let Some(error) = validate_yul_assignment_target_list_context(
+            block_stack.len(),
+            assignment_target_list_state,
+        ) {
+            return Err(yul_errors_with(&mut errors, error));
+        }
+        let current_is_switch_typed_literal_type_identifier =
+            is_current_yul_switch_typed_literal_type_identifier(block_stack.len(), &switch_stack);
+        let current_is_switch_case_literal =
+            is_current_yul_switch_case_literal(current_token(), block_stack.len(), &switch_stack);
+        if let Err(switch_errors) =
+            validate_yul_switch_token(current_token(), block_stack.len(), &mut switch_stack)
+        {
+            return Err(yul_errors_with_many(&mut errors, switch_errors));
+        }
+
+        match current_token() {
+            token::TOKEN_STRING_LITERAL
+            | token::TOKEN_HEX_STRING_LITERAL
+            | token::TOKEN_TRUE_LITERAL
+            | token::TOKEN_FALSE_LITERAL => {
+                let defer_statement_error = should_defer_yul_literal_statement_error(
+                    &block_stack,
+                    assignment_target_list_state,
+                    next_block_for_loop_component.is_some() || current_is_switch_case_literal,
+                );
+                if defer_statement_error {
+                    statement_elementary = Some(YulStatementElementary::Literal {
+                        assignment_target: is_current_yul_assignment_target_list_target(
+                            block_stack.len(),
+                            assignment_target_list_state,
+                        ),
+                    });
+                    if peek_next_token() == token::TOKEN_COLON {
+                        statement_typed_literal_state = Some(YulStatementTypedLiteralState::Colon);
+                    }
+                }
+                let in_call_argument = !call_stack.is_empty();
+                let rhs_complete = if peek_next_token() == token::TOKEN_COLON {
+                    mark_current_yul_call_argument_literal_type(&mut call_stack);
+                    if !in_call_argument {
+                        mark_current_yul_control_expression_literal_type(
+                            &mut control_expression_state,
+                        );
+                        mark_current_yul_for_loop_condition_literal_type(
+                            &mut for_loop_syntax_state,
+                        );
+                        mark_current_yul_rhs_literal_type(&mut rhs_expression_state);
+                    }
+                    false
+                } else {
+                    mark_current_yul_call_argument_complete(&mut call_stack);
+                    if in_call_argument {
+                        false
+                    } else {
+                        mark_current_yul_control_expression_complete(&mut control_expression_state);
+                        mark_current_yul_for_loop_condition_complete(&mut for_loop_syntax_state);
+                        mark_current_yul_rhs_expression_complete(&mut rhs_expression_state)
+                    }
+                };
+                mark_current_yul_statement_started(&mut block_stack);
+                if rhs_complete {
+                    mark_current_yul_statement_start(&mut block_stack);
+                }
+                advance();
+            }
+            token::TOKEN_NUMBER => {
+                if !is_valid_yul_number_literal(&current_literal().bytes) {
+                    return Err(yul_errors_with(
+                        &mut errors,
+                        fatal_parser_error(4828, "Invalid number literal."),
+                    ));
+                }
+                let defer_statement_error = should_defer_yul_literal_statement_error(
+                    &block_stack,
+                    assignment_target_list_state,
+                    next_block_for_loop_component.is_some() || current_is_switch_case_literal,
+                );
+                if defer_statement_error {
+                    statement_elementary = Some(YulStatementElementary::Literal {
+                        assignment_target: is_current_yul_assignment_target_list_target(
+                            block_stack.len(),
+                            assignment_target_list_state,
+                        ),
+                    });
+                    if peek_next_token() == token::TOKEN_COLON {
+                        statement_typed_literal_state = Some(YulStatementTypedLiteralState::Colon);
+                    }
+                }
+                let in_call_argument = !call_stack.is_empty();
+                let rhs_complete = if peek_next_token() == token::TOKEN_COLON {
+                    mark_current_yul_call_argument_literal_type(&mut call_stack);
+                    if !in_call_argument {
+                        mark_current_yul_control_expression_literal_type(
+                            &mut control_expression_state,
+                        );
+                        mark_current_yul_for_loop_condition_literal_type(
+                            &mut for_loop_syntax_state,
+                        );
+                        mark_current_yul_rhs_literal_type(&mut rhs_expression_state);
+                    }
+                    false
+                } else {
+                    mark_current_yul_call_argument_complete(&mut call_stack);
+                    if in_call_argument {
+                        false
+                    } else {
+                        mark_current_yul_control_expression_complete(&mut control_expression_state);
+                        mark_current_yul_for_loop_condition_complete(&mut for_loop_syntax_state);
+                        mark_current_yul_rhs_expression_complete(&mut rhs_expression_state)
+                    }
+                };
+                mark_current_yul_statement_started(&mut block_stack);
+                if rhs_complete {
+                    mark_current_yul_statement_start(&mut block_stack);
+                }
+                advance();
+            }
+            token::TOKEN_LBRACE => {
+                if is_current_yul_for_loop_block_start(for_loop_syntax_state) {
+                    for_loop_syntax_state = None;
+                }
+                if matches!(
+                    control_expression_state,
+                    Some(YulControlExpressionState::ExpectBlock)
+                ) {
+                    control_expression_state = None;
+                }
+                if matches!(
+                    function_signature_state,
+                    Some(YulFunctionSignatureState::AfterParameters)
+                        | Some(YulFunctionSignatureState::AfterReturnParameter)
+                ) {
+                    function_signature_state = None;
+                }
+                let for_loop_component = if next_block_is_function_body {
+                    YulForLoopComponent::None
+                } else {
+                    next_block_for_loop_component.unwrap_or_else(|| {
+                        block_stack
+                            .last()
+                            .map_or(YulForLoopComponent::None, |context| {
+                                context.for_loop_component
+                            })
+                    })
+                };
+                let next_for_loop_component = if next_block_is_function_body {
+                    None
+                } else {
+                    match next_block_for_loop_component {
+                        Some(YulForLoopComponent::Pre) => Some(YulForLoopComponent::Post),
+                        Some(YulForLoopComponent::Post) => Some(YulForLoopComponent::Body),
+                        _ => None,
+                    }
+                };
+                block_stack.push(YulBlockContext {
+                    is_function_body: next_block_is_function_body,
+                    for_loop_component,
+                    next_for_loop_component,
+                    statement_start: true,
+                });
+                next_block_is_function_body = false;
+                next_block_for_loop_component = None;
+                advance();
+            }
+            token::TOKEN_RBRACE => {
+                location.end = current_location().end;
+                let context = block_stack.pop();
+                advance();
+                if block_stack.is_empty() {
+                    return Ok(YulInlineParseResult { location, errors });
+                }
+                next_block_for_loop_component =
+                    context.and_then(|context| context.next_for_loop_component);
+                update_yul_for_loop_syntax_after_rbrace(context, &mut for_loop_syntax_state);
+                update_yul_switch_after_rbrace(block_stack.len(), &mut switch_stack);
+                mark_current_yul_statement_start(&mut block_stack);
+                assignment_target_list_state = None;
+                next_lparen_starts_call = false;
+            }
+            token::TOKEN_FOR => {
+                next_block_for_loop_component = Some(YulForLoopComponent::Pre);
+                for_loop_syntax_state = Some(YulForLoopSyntaxState::ExpectPreBlock);
+                mark_current_yul_statement_started(&mut block_stack);
+                advance();
+            }
+            token::TOKEN_IF => {
+                control_expression_state = Some(YulControlExpressionState::ExpectExpression);
+                mark_current_yul_statement_started(&mut block_stack);
+                advance();
+            }
+            token::TOKEN_LET => {
+                let_declaration_state = Some(YulLetDeclarationState::ExpectName {
+                    depth: block_stack.len(),
+                });
+                mark_current_yul_statement_started(&mut block_stack);
+                advance();
+            }
+            token::TOKEN_SWITCH => {
+                switch_stack.push(YulSwitchContext {
+                    depth: block_stack.len(),
+                    state: YulSwitchState::ExpectExpression,
+                    seen_case: false,
+                    seen_default: false,
+                });
+                mark_current_yul_statement_started(&mut block_stack);
+                advance();
+            }
+            token::TOKEN_IDENTIFIER => {
+                let current_builtin_name = current_yul_evm_builtin_name();
+                let current_is_expression_context = is_current_yul_identifier_expression_context(
+                    &call_stack,
+                    control_expression_state,
+                    for_loop_syntax_state,
+                    rhs_expression_state,
+                );
+                let current_is_typed_literal_type_identifier = statement_typed_literal_state
+                    == Some(YulStatementTypedLiteralState::Identifier)
+                    || is_current_yul_call_literal_type_identifier(&call_stack)
+                    || is_current_yul_control_expression_literal_type_identifier(
+                        control_expression_state,
+                    )
+                    || is_current_yul_for_loop_condition_literal_type_identifier(
+                        for_loop_syntax_state,
+                    )
+                    || is_current_yul_rhs_literal_type_identifier(rhs_expression_state)
+                    || current_is_switch_typed_literal_type_identifier;
+                if current_is_typed_literal_type_identifier {
+                    if let Some(name) = &current_builtin_name {
+                        errors.push(yul_builtin_identifier_name_error(name));
+                    }
+                    errors.push(yul_unsupported_type_error());
+                    if statement_typed_literal_state
+                        == Some(YulStatementTypedLiteralState::Identifier)
+                    {
+                        statement_typed_literal_state =
+                            Some(YulStatementTypedLiteralState::Complete);
+                        advance();
+                        continue;
+                    }
+                }
+                if should_defer_yul_identifier_statement_error(
+                    &block_stack,
+                    next_block_for_loop_component.is_some()
+                        || function_signature_state.is_some()
+                        || let_declaration_state.is_some()
+                        || current_is_expression_context,
+                    current_builtin_name.as_deref(),
+                ) {
+                    statement_elementary = Some(YulStatementElementary::Identifier {
+                        builtin_name: current_builtin_name.clone(),
+                        assignment_target: false,
+                    });
+                }
+                if let Some(name) = &current_builtin_name {
+                    if is_current_yul_identifier_assignment_target(
+                        block_stack.len(),
+                        &block_stack,
+                        assignment_target_list_state,
+                    ) {
+                        statement_elementary = Some(YulStatementElementary::Identifier {
+                            builtin_name: Some(name.clone()),
+                            assignment_target: true,
+                        });
+                    }
+                    if current_is_expression_context && peek_next_token() != token::TOKEN_LPAREN {
+                        return Err(yul_errors_with(
+                            &mut errors,
+                            yul_builtin_must_be_called_error(name),
+                        ));
+                    }
+                }
+                handle_yul_identifier_in_name_contexts(
+                    block_stack.len(),
+                    &mut errors,
+                    &mut function_signature_state,
+                    &mut let_declaration_state,
+                    current_builtin_name.as_deref(),
+                );
+                update_yul_assignment_target_list_after_identifier(
+                    block_stack.len(),
+                    &block_stack,
+                    &mut assignment_target_list_state,
+                );
+                let in_call_argument = !call_stack.is_empty();
+                let mut rhs_complete = false;
+                if is_current_yul_call_literal_type_identifier(&call_stack) {
+                    mark_current_yul_call_argument_complete(&mut call_stack);
+                } else if is_current_yul_control_expression_literal_type_identifier(
+                    control_expression_state,
+                ) {
+                    mark_current_yul_control_expression_complete(&mut control_expression_state);
+                } else if is_current_yul_for_loop_condition_literal_type_identifier(
+                    for_loop_syntax_state,
+                ) {
+                    mark_current_yul_for_loop_condition_complete(&mut for_loop_syntax_state);
+                } else if is_current_yul_rhs_literal_type_identifier(rhs_expression_state) {
+                    rhs_complete =
+                        mark_current_yul_rhs_expression_complete(&mut rhs_expression_state);
+                } else if is_current_yul_identifier_call_start(
+                    function_signature_state,
+                    let_declaration_state,
+                    assignment_target_list_state,
+                ) {
+                    next_lparen_starts_call = true;
+                } else {
+                    mark_current_yul_call_argument_complete(&mut call_stack);
+                    if !in_call_argument {
+                        mark_current_yul_control_expression_complete(&mut control_expression_state);
+                        mark_current_yul_for_loop_condition_complete(&mut for_loop_syntax_state);
+                        rhs_complete =
+                            mark_current_yul_rhs_expression_complete(&mut rhs_expression_state);
+                    }
+                }
+                mark_current_yul_statement_started(&mut block_stack);
+                if rhs_complete {
+                    mark_current_yul_statement_start(&mut block_stack);
+                }
+                advance();
+            }
+            token::TOKEN_LPAREN => {
+                let starts_function_parameters = matches!(
+                    function_signature_state,
+                    Some(YulFunctionSignatureState::AwaitParameters)
+                );
+                if !starts_function_parameters && !next_lparen_starts_call {
+                    return Err(yul_errors_with(
+                        &mut errors,
+                        fatal_parser_error(1856, "Literal or identifier expected."),
+                    ));
+                }
+                if starts_function_parameters {
+                    function_signature_state = Some(YulFunctionSignatureState::Parameters);
+                }
+                if next_lparen_starts_call {
+                    call_stack.push(YulCallContext {
+                        state: YulCallArgumentState::ExpectArgumentOrEnd,
+                    });
+                    next_lparen_starts_call = false;
+                }
+                advance();
+            }
+            token::TOKEN_RPAREN => {
+                let closes_function_parameters = matches!(
+                    function_signature_state,
+                    Some(YulFunctionSignatureState::Parameters)
+                        | Some(YulFunctionSignatureState::AfterParameter)
+                );
+                let closes_call = is_current_yul_call_end(&call_stack);
+                if !closes_function_parameters && !closes_call {
+                    return Err(yul_errors_with(
+                        &mut errors,
+                        fatal_parser_error(1856, "Literal or identifier expected."),
+                    ));
+                }
+                if closes_function_parameters {
+                    function_signature_state = Some(YulFunctionSignatureState::AfterParameters);
+                }
+                if closes_call {
+                    let closed_outermost_call = call_stack.len() == 1;
+                    call_stack.pop();
+                    mark_current_yul_call_argument_complete(&mut call_stack);
+                    if closed_outermost_call {
+                        mark_current_yul_control_expression_complete(&mut control_expression_state);
+                        mark_current_yul_for_loop_condition_complete(&mut for_loop_syntax_state);
+                        let rhs_complete =
+                            mark_current_yul_rhs_expression_complete(&mut rhs_expression_state);
+                        if rhs_complete {
+                            mark_current_yul_statement_start(&mut block_stack);
+                        }
+                    }
+                }
+                advance();
+            }
+            token::TOKEN_RIGHT_ARROW => {
+                if matches!(
+                    function_signature_state,
+                    Some(YulFunctionSignatureState::AfterParameters)
+                ) {
+                    function_signature_state = Some(YulFunctionSignatureState::ReturnParameters);
+                } else {
+                    return Err(yul_errors_with(
+                        &mut errors,
+                        fatal_parser_error(1856, "Literal or identifier expected."),
+                    ));
+                }
+                advance();
+            }
+            token::TOKEN_COLON => {
+                let mut consumed_colon = false;
+                if statement_typed_literal_state == Some(YulStatementTypedLiteralState::Colon) {
+                    statement_typed_literal_state = Some(YulStatementTypedLiteralState::Identifier);
+                    consumed_colon = true;
+                }
+                if let Some(YulLetDeclarationState::TypeColon { depth }) = let_declaration_state {
+                    if depth == block_stack.len() {
+                        let_declaration_state =
+                            Some(YulLetDeclarationState::TypeIdentifier { depth });
+                        consumed_colon = true;
+                    }
+                }
+                match function_signature_state {
+                    Some(YulFunctionSignatureState::ParameterTypeColon) => {
+                        function_signature_state =
+                            Some(YulFunctionSignatureState::ParameterTypeIdentifier);
+                        consumed_colon = true;
+                    }
+                    Some(YulFunctionSignatureState::ReturnTypeColon) => {
+                        function_signature_state =
+                            Some(YulFunctionSignatureState::ReturnTypeIdentifier);
+                        consumed_colon = true;
+                    }
+                    _ => {}
+                }
+                if is_current_yul_call_literal_type_colon(&call_stack) {
+                    mark_current_yul_call_literal_type_colon_consumed(&mut call_stack);
+                    consumed_colon = true;
+                }
+                if is_current_yul_control_expression_literal_type_colon(control_expression_state) {
+                    mark_current_yul_control_expression_literal_type_colon_consumed(
+                        &mut control_expression_state,
+                    );
+                    consumed_colon = true;
+                }
+                if is_current_yul_for_loop_condition_literal_type_colon(for_loop_syntax_state) {
+                    mark_current_yul_for_loop_condition_literal_type_colon_consumed(
+                        &mut for_loop_syntax_state,
+                    );
+                    consumed_colon = true;
+                }
+                if is_current_yul_rhs_literal_type_colon(rhs_expression_state) {
+                    mark_current_yul_rhs_literal_type_colon_consumed(&mut rhs_expression_state);
+                    consumed_colon = true;
+                }
+                if is_current_yul_switch_typed_literal_type_colon_consumed(
+                    block_stack.len(),
+                    &switch_stack,
+                ) {
+                    consumed_colon = true;
+                }
+                if !consumed_colon {
+                    return Err(yul_errors_with(
+                        &mut errors,
+                        fatal_parser_error(1856, "Literal or identifier expected."),
+                    ));
+                }
+                advance();
+            }
+            token::TOKEN_COMMA => {
+                let mut consumed_comma = false;
+                if let Some(YulLetDeclarationState::AfterName { depth }) = let_declaration_state {
+                    if depth == block_stack.len() {
+                        let_declaration_state = Some(YulLetDeclarationState::ExpectName { depth });
+                        consumed_comma = true;
+                    }
+                }
+                if let Some(YulAssignmentTargetListState::AfterTarget { depth }) =
+                    assignment_target_list_state
+                {
+                    if depth == block_stack.len() {
+                        assignment_target_list_state =
+                            Some(YulAssignmentTargetListState::ExpectTarget { depth });
+                        consumed_comma = true;
+                    }
+                }
+                match function_signature_state {
+                    Some(YulFunctionSignatureState::AfterParameter) => {
+                        function_signature_state = Some(YulFunctionSignatureState::ExpectParameter);
+                        consumed_comma = true;
+                    }
+                    Some(YulFunctionSignatureState::AfterReturnParameter) => {
+                        function_signature_state =
+                            Some(YulFunctionSignatureState::ReturnParameters);
+                        consumed_comma = true;
+                    }
+                    _ => {}
+                }
+                if is_current_yul_call_comma(&call_stack) {
+                    mark_current_yul_call_comma_consumed(&mut call_stack);
+                    consumed_comma = true;
+                }
+                if !consumed_comma {
+                    return Err(yul_errors_with(
+                        &mut errors,
+                        fatal_parser_error(1856, "Literal or identifier expected."),
+                    ));
+                }
+                advance();
+            }
+            token::TOKEN_ASSEMBLY_ASSIGN => {
+                if matches!(
+                    assignment_target_list_state,
+                    Some(YulAssignmentTargetListState::ExpectTarget { .. })
+                ) {
+                    return Err(yul_errors_with(
+                        &mut errors,
+                        fatal_parser_error(1856, "Literal or identifier expected."),
+                    ));
+                }
+                if current_yul_statement_start(&block_stack) {
+                    return Err(yul_errors_with(
+                        &mut errors,
+                        fatal_parser_error(1856, "Literal or identifier expected."),
+                    ));
+                }
+                assignment_target_list_state = None;
+                rhs_expression_state = Some(YulRhsExpressionState::ExpectExpression);
+                if matches!(
+                    let_declaration_state,
+                    Some(YulLetDeclarationState::AfterName { .. })
+                ) {
+                    let_declaration_state = None;
+                }
+                mark_current_yul_statement_started(&mut block_stack);
+                advance();
+            }
+            token::TOKEN_CASE | token::TOKEN_DEFAULT => {
+                if !is_current_yul_switch_case_marker(
+                    current_token(),
+                    block_stack.len(),
+                    &switch_stack,
+                ) {
+                    return Err(yul_errors_with(
+                        &mut errors,
+                        fatal_parser_error(1856, "Literal or identifier expected."),
+                    ));
+                }
+                advance();
+            }
+            token::TOKEN_FUNCTION => {
+                if next_block_for_loop_component.is_none()
+                    && matches!(
+                        current_yul_for_loop_component(&block_stack),
+                        YulForLoopComponent::Pre
+                    )
+                {
+                    errors.push(syntax_error(
+                        3441,
+                        "Functions cannot be defined inside a for-loop init block.",
+                    ));
+                }
+                function_signature_state = Some(YulFunctionSignatureState::Name);
+                next_block_is_function_body = true;
+                mark_current_yul_statement_started(&mut block_stack);
+                advance();
+            }
+            token::TOKEN_BREAK => {
+                if next_block_for_loop_component.is_none() {
+                    check_yul_break_continue_position(
+                        "break",
+                        current_yul_for_loop_component(&block_stack),
+                        &mut errors,
+                    );
+                }
+                mark_current_yul_statement_start(&mut block_stack);
+                advance();
+            }
+            token::TOKEN_CONTINUE => {
+                if next_block_for_loop_component.is_none() {
+                    check_yul_break_continue_position(
+                        "continue",
+                        current_yul_for_loop_component(&block_stack),
+                        &mut errors,
+                    );
+                }
+                mark_current_yul_statement_start(&mut block_stack);
+                advance();
+            }
+            token::TOKEN_LEAVE => {
+                if !block_stack.iter().any(|context| context.is_function_body) {
+                    errors.push(syntax_error(
+                        8149,
+                        "Keyword \"leave\" can only be used inside a function.",
+                    ));
+                }
+                mark_current_yul_statement_start(&mut block_stack);
+                advance();
+            }
+            token::TOKEN_ILLEGAL => {
+                return Err(yul_errors_with(
+                    &mut errors,
+                    fatal_parser_error(1465, &format!("Illegal token: {}", current_error())),
+                ));
+            }
+            token::TOKEN_SEMICOLON => {
+                return Err(yul_errors_with(
+                    &mut errors,
+                    fatal_parser_error(1856, "Literal or identifier expected."),
+                ));
+            }
+            token::TOKEN_EOS => {
+                return Err(yul_errors_with(
+                    &mut errors,
+                    fatal_parser_error(1856, "Literal or identifier expected."),
+                ));
+            }
+            _ => {
+                return Err(yul_errors_with(
+                    &mut errors,
+                    fatal_parser_error(1856, "Literal or identifier expected."),
+                ));
+            }
+        }
+    }
+}
+
+fn should_defer_yul_literal_statement_error(
+    block_stack: &[YulBlockContext],
+    assignment_target_list_state: Option<YulAssignmentTargetListState>,
+    suppress_statement_check: bool,
+) -> bool {
+    if let Some(YulAssignmentTargetListState::ExpectTarget { depth }) = assignment_target_list_state
+    {
+        if depth == block_stack.len() {
+            return true;
+        }
+    }
+
+    !suppress_statement_check && current_yul_statement_start(block_stack)
+}
+
+fn yul_literal_assignment_target_error(current: u32) -> ffi::WireParserError {
+    if current == token::TOKEN_COMMA {
+        fatal_parser_error(
+            2856,
+            "Variable name must precede \",\" in multiple assignment.",
+        )
+    } else {
+        fatal_parser_error(2856, "Variable name must precede \":=\" in assignment.")
+    }
+}
+
+fn should_defer_yul_identifier_statement_error(
+    block_stack: &[YulBlockContext],
+    suppress_statement_check: bool,
+    builtin_name: Option<&str>,
+) -> bool {
+    if suppress_statement_check || !current_yul_statement_start(block_stack) {
+        return false;
+    }
+
+    match peek_next_token() {
+        token::TOKEN_LPAREN => false,
+        token::TOKEN_COMMA | token::TOKEN_ASSEMBLY_ASSIGN => builtin_name.is_some(),
+        _ => true,
+    }
+}
+
+fn yul_statement_elementary_follow_error(
+    elementary: &YulStatementElementary,
+) -> ffi::WireParserError {
+    match elementary {
+        YulStatementElementary::Literal {
+            assignment_target: true,
+        } => yul_literal_assignment_target_error(current_token()),
+        YulStatementElementary::Literal {
+            assignment_target: false,
+        } => match current_token() {
+            token::TOKEN_LPAREN => fatal_parser_error(9980, "Function name expected."),
+            token::TOKEN_COMMA | token::TOKEN_ASSEMBLY_ASSIGN => {
+                yul_literal_assignment_target_error(current_token())
+            }
+            _ => fatal_parser_error(6913, "Call or assignment expected."),
+        },
+        YulStatementElementary::Identifier {
+            builtin_name: Some(name),
+            assignment_target: true,
+        } => yul_builtin_assignment_target_error(name),
+        YulStatementElementary::Identifier {
+            builtin_name: Some(name),
+            assignment_target: false,
+        } if current_token() == token::TOKEN_COMMA
+            || current_token() == token::TOKEN_ASSEMBLY_ASSIGN =>
+        {
+            yul_builtin_assignment_target_error(name)
+        }
+        YulStatementElementary::Identifier { .. } => {
+            fatal_parser_error(6913, "Call or assignment expected.")
+        }
+    }
+}
+
+fn validate_yul_statement_typed_literal_context(
+    state: Option<YulStatementTypedLiteralState>,
+) -> Option<ffi::WireParserError> {
+    match state {
+        Some(YulStatementTypedLiteralState::Colon) => {
+            if current_token() == token::TOKEN_COLON {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_COLON),
+                    current_token_name(),
+                ))
+            }
+        }
+        Some(YulStatementTypedLiteralState::Identifier) => {
+            if current_token() == token::TOKEN_IDENTIFIER {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_IDENTIFIER),
+                    current_token_name(),
+                ))
+            }
+        }
+        Some(YulStatementTypedLiteralState::Complete) | None => None,
+    }
+}
+
+fn yul_errors_with(
+    errors: &mut Vec<ffi::WireParserError>,
+    error: ffi::WireParserError,
+) -> Vec<ffi::WireParserError> {
+    errors.push(error);
+    std::mem::take(errors)
+}
+
+fn yul_errors_with_many(
+    errors: &mut Vec<ffi::WireParserError>,
+    mut new_errors: Vec<ffi::WireParserError>,
+) -> Vec<ffi::WireParserError> {
+    errors.append(&mut new_errors);
+    std::mem::take(errors)
+}
+
+fn validate_yul_call_argument_context(
+    call_stack: &[YulCallContext],
+    next_lparen_starts_call: bool,
+) -> Option<ffi::WireParserError> {
+    if next_lparen_starts_call && current_token() == token::TOKEN_LPAREN {
+        return None;
+    }
+
+    let context = call_stack.last()?;
+
+    match context.state {
+        YulCallArgumentState::ExpectArgumentOrEnd => {
+            if current_token() == token::TOKEN_RPAREN
+                || is_yul_expression_start_or_illegal_token(current_token())
+            {
+                None
+            } else {
+                Some(fatal_parser_error(1856, "Literal or identifier expected."))
+            }
+        }
+        YulCallArgumentState::ExpectArgument => {
+            if is_yul_expression_start_or_illegal_token(current_token()) {
+                None
+            } else {
+                Some(fatal_parser_error(1856, "Literal or identifier expected."))
+            }
+        }
+        YulCallArgumentState::LiteralTypeColon => {
+            if current_token() == token::TOKEN_COLON {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_COLON),
+                    current_token_name(),
+                ))
+            }
+        }
+        YulCallArgumentState::LiteralTypeIdentifier => {
+            if current_token() == token::TOKEN_IDENTIFIER {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_IDENTIFIER),
+                    current_token_name(),
+                ))
+            }
+        }
+        YulCallArgumentState::ExpectCommaOrEnd => {
+            if current_token() == token::TOKEN_COMMA || current_token() == token::TOKEN_RPAREN {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_COMMA),
+                    current_token_name(),
+                ))
+            }
+        }
+    }
+}
+
+fn is_yul_expression_start_token(current: u32) -> bool {
+    matches!(
+        current,
+        token::TOKEN_IDENTIFIER
+            | token::TOKEN_STRING_LITERAL
+            | token::TOKEN_HEX_STRING_LITERAL
+            | token::TOKEN_NUMBER
+            | token::TOKEN_TRUE_LITERAL
+            | token::TOKEN_FALSE_LITERAL
+    )
+}
+
+fn is_yul_expression_start_or_illegal_token(current: u32) -> bool {
+    is_yul_expression_start_token(current) || current == token::TOKEN_ILLEGAL
+}
+
+fn current_yul_evm_builtin_name() -> Option<String> {
+    let literal = current_literal();
+    if is_yul_evm_builtin_identifier(&literal.bytes) {
+        Some(String::from_utf8_lossy(&literal.bytes).into_owned())
+    } else {
+        None
+    }
+}
+
+fn is_yul_evm_builtin_identifier(literal: &[u8]) -> bool {
+    if !is_yul_evm_builtin_identifier_name(literal) {
+        return false;
+    }
+
+    match literal {
+        b"stop" | b"add" | b"sub" | b"mul" | b"div" | b"sdiv" | b"mod" | b"smod" | b"exp"
+        | b"not" | b"lt" | b"gt" | b"slt" | b"sgt" | b"eq" | b"iszero" | b"and" | b"or"
+        | b"xor" | b"byte" | b"addmod" | b"mulmod" | b"signextend" | b"keccak256" | b"address"
+        | b"balance" | b"origin" | b"caller" | b"callvalue" | b"calldataload" | b"calldatasize"
+        | b"calldatacopy" | b"codesize" | b"codecopy" | b"gasprice" | b"extcodesize"
+        | b"extcodecopy" | b"blockhash" | b"coinbase" | b"timestamp" | b"number" | b"gaslimit"
+        | b"pop" | b"mload" | b"mstore" | b"mstore8" | b"sload" | b"sstore" | b"pc" | b"msize"
+        | b"gas" | b"log0" | b"log1" | b"log2" | b"log3" | b"log4" | b"create" | b"call"
+        | b"callcode" | b"return" | b"delegatecall" | b"revert" | b"invalid" | b"selfdestruct" => {
+            true
+        }
+        b"returndatasize" | b"returndatacopy" | b"staticcall" => {
+            evm_version_at_least(EvmVersion::Byzantium)
+        }
+        b"shl" | b"shr" | b"sar" | b"create2" | b"extcodehash" => {
+            evm_version_at_least(EvmVersion::Constantinople)
+        }
+        b"chainid" | b"selfbalance" => evm_version_at_least(EvmVersion::Istanbul),
+        b"basefee" => evm_version_at_least(EvmVersion::London),
+        b"difficulty" => !evm_version_at_least(EvmVersion::Paris),
+        b"prevrandao" => evm_version_at_least(EvmVersion::Paris),
+        b"blobhash" | b"blobbasefee" | b"mcopy" | b"tload" | b"tstore" => {
+            evm_version_at_least(EvmVersion::Cancun)
+        }
+        b"clz" => evm_version_at_least(EvmVersion::Osaka),
+        _ => false,
+    }
+}
+
+fn is_yul_evm_builtin_identifier_name(literal: &[u8]) -> bool {
+    matches!(
+        literal,
+        b"stop"
+            | b"add"
+            | b"sub"
+            | b"mul"
+            | b"div"
+            | b"sdiv"
+            | b"mod"
+            | b"smod"
+            | b"exp"
+            | b"not"
+            | b"lt"
+            | b"gt"
+            | b"slt"
+            | b"sgt"
+            | b"eq"
+            | b"iszero"
+            | b"and"
+            | b"or"
+            | b"xor"
+            | b"byte"
+            | b"addmod"
+            | b"mulmod"
+            | b"signextend"
+            | b"keccak256"
+            | b"address"
+            | b"balance"
+            | b"origin"
+            | b"caller"
+            | b"callvalue"
+            | b"calldataload"
+            | b"calldatasize"
+            | b"calldatacopy"
+            | b"codesize"
+            | b"codecopy"
+            | b"gasprice"
+            | b"extcodesize"
+            | b"extcodecopy"
+            | b"blockhash"
+            | b"coinbase"
+            | b"timestamp"
+            | b"number"
+            | b"gaslimit"
+            | b"pop"
+            | b"mload"
+            | b"mstore"
+            | b"mstore8"
+            | b"sload"
+            | b"sstore"
+            | b"pc"
+            | b"msize"
+            | b"gas"
+            | b"log0"
+            | b"log1"
+            | b"log2"
+            | b"log3"
+            | b"log4"
+            | b"create"
+            | b"call"
+            | b"callcode"
+            | b"return"
+            | b"delegatecall"
+            | b"revert"
+            | b"invalid"
+            | b"selfdestruct"
+            | b"returndatasize"
+            | b"returndatacopy"
+            | b"staticcall"
+            | b"shl"
+            | b"shr"
+            | b"sar"
+            | b"create2"
+            | b"extcodehash"
+            | b"chainid"
+            | b"selfbalance"
+            | b"basefee"
+            | b"difficulty"
+            | b"prevrandao"
+            | b"blobhash"
+            | b"blobbasefee"
+            | b"mcopy"
+            | b"tload"
+            | b"tstore"
+            | b"clz"
+    )
+}
+
+fn yul_builtin_assignment_target_error(name: &str) -> ffi::WireParserError {
+    fatal_parser_error(
+        6272,
+        &format!("Cannot assign to builtin function \"{name}\"."),
+    )
+}
+
+fn yul_builtin_must_be_called_error(name: &str) -> ffi::WireParserError {
+    fatal_parser_error(
+        7104,
+        &format!("Builtin function \"{name}\" must be called."),
+    )
+}
+
+fn yul_builtin_identifier_name_error(name: &str) -> ffi::WireParserError {
+    parser_error(
+        5568,
+        &format!("Cannot use builtin function name \"{name}\" as identifier name."),
+    )
+}
+
+fn is_current_yul_identifier_assignment_target(
+    current_depth: usize,
+    block_stack: &[YulBlockContext],
+    assignment_target_list_state: Option<YulAssignmentTargetListState>,
+) -> bool {
+    matches!(
+        assignment_target_list_state,
+        Some(YulAssignmentTargetListState::ExpectTarget { depth }) if depth == current_depth
+    ) || (current_yul_statement_start(block_stack)
+        && matches!(
+            peek_next_token(),
+            token::TOKEN_COMMA | token::TOKEN_ASSEMBLY_ASSIGN
+        ))
+}
+
+fn is_current_yul_identifier_expression_context(
+    call_stack: &[YulCallContext],
+    control_expression_state: Option<YulControlExpressionState>,
+    for_loop_syntax_state: Option<YulForLoopSyntaxState>,
+    rhs_expression_state: Option<YulRhsExpressionState>,
+) -> bool {
+    call_stack.last().is_some_and(|context| {
+        matches!(
+            context.state,
+            YulCallArgumentState::ExpectArgumentOrEnd | YulCallArgumentState::ExpectArgument
+        )
+    }) || control_expression_state == Some(YulControlExpressionState::ExpectExpression)
+        || for_loop_syntax_state == Some(YulForLoopSyntaxState::ExpectCondition)
+        || rhs_expression_state == Some(YulRhsExpressionState::ExpectExpression)
+}
+
+fn is_current_yul_identifier_call_start(
+    function_signature_state: Option<YulFunctionSignatureState>,
+    let_declaration_state: Option<YulLetDeclarationState>,
+    assignment_target_list_state: Option<YulAssignmentTargetListState>,
+) -> bool {
+    function_signature_state.is_none()
+        && let_declaration_state.is_none()
+        && assignment_target_list_state.is_none()
+        && peek_next_token() == token::TOKEN_LPAREN
+}
+
+fn is_current_yul_call_literal_type_identifier(call_stack: &[YulCallContext]) -> bool {
+    call_stack
+        .last()
+        .is_some_and(|context| context.state == YulCallArgumentState::LiteralTypeIdentifier)
+}
+
+fn is_current_yul_call_literal_type_colon(call_stack: &[YulCallContext]) -> bool {
+    call_stack
+        .last()
+        .is_some_and(|context| context.state == YulCallArgumentState::LiteralTypeColon)
+}
+
+fn is_current_yul_call_end(call_stack: &[YulCallContext]) -> bool {
+    call_stack.last().is_some_and(|context| {
+        matches!(
+            context.state,
+            YulCallArgumentState::ExpectArgumentOrEnd | YulCallArgumentState::ExpectCommaOrEnd
+        )
+    })
+}
+
+fn is_current_yul_call_comma(call_stack: &[YulCallContext]) -> bool {
+    call_stack
+        .last()
+        .is_some_and(|context| context.state == YulCallArgumentState::ExpectCommaOrEnd)
+}
+
+fn mark_current_yul_call_argument_literal_type(call_stack: &mut [YulCallContext]) {
+    if let Some(context) = call_stack.last_mut() {
+        if matches!(
+            context.state,
+            YulCallArgumentState::ExpectArgumentOrEnd | YulCallArgumentState::ExpectArgument
+        ) {
+            context.state = YulCallArgumentState::LiteralTypeColon;
+        }
+    }
+}
+
+fn mark_current_yul_call_literal_type_colon_consumed(call_stack: &mut [YulCallContext]) {
+    if let Some(context) = call_stack.last_mut() {
+        if context.state == YulCallArgumentState::LiteralTypeColon {
+            context.state = YulCallArgumentState::LiteralTypeIdentifier;
+        }
+    }
+}
+
+fn mark_current_yul_call_comma_consumed(call_stack: &mut [YulCallContext]) {
+    if let Some(context) = call_stack.last_mut() {
+        if context.state == YulCallArgumentState::ExpectCommaOrEnd {
+            context.state = YulCallArgumentState::ExpectArgument;
+        }
+    }
+}
+
+fn mark_current_yul_call_argument_complete(call_stack: &mut [YulCallContext]) {
+    if let Some(context) = call_stack.last_mut() {
+        if matches!(
+            context.state,
+            YulCallArgumentState::ExpectArgumentOrEnd
+                | YulCallArgumentState::ExpectArgument
+                | YulCallArgumentState::LiteralTypeIdentifier
+        ) {
+            context.state = YulCallArgumentState::ExpectCommaOrEnd;
+        }
+    }
+}
+
+fn validate_yul_control_expression_context(
+    state: Option<YulControlExpressionState>,
+    call_stack: &[YulCallContext],
+    next_lparen_starts_call: bool,
+) -> Option<ffi::WireParserError> {
+    if !call_stack.is_empty() || (next_lparen_starts_call && current_token() == token::TOKEN_LPAREN)
+    {
+        return None;
+    }
+
+    match state {
+        Some(YulControlExpressionState::ExpectExpression) => {
+            if is_yul_expression_start_or_illegal_token(current_token()) {
+                None
+            } else {
+                Some(fatal_parser_error(1856, "Literal or identifier expected."))
+            }
+        }
+        Some(YulControlExpressionState::LiteralTypeColon) => {
+            if current_token() == token::TOKEN_COLON {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_COLON),
+                    current_token_name(),
+                ))
+            }
+        }
+        Some(YulControlExpressionState::LiteralTypeIdentifier) => {
+            if current_token() == token::TOKEN_IDENTIFIER {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_IDENTIFIER),
+                    current_token_name(),
+                ))
+            }
+        }
+        Some(YulControlExpressionState::ExpectBlock) => {
+            if current_token() == token::TOKEN_LBRACE {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_LBRACE),
+                    current_token_name(),
+                ))
+            }
+        }
+        None => None,
+    }
+}
+
+fn is_current_yul_control_expression_literal_type_identifier(
+    state: Option<YulControlExpressionState>,
+) -> bool {
+    state == Some(YulControlExpressionState::LiteralTypeIdentifier)
+}
+
+fn is_current_yul_control_expression_literal_type_colon(
+    state: Option<YulControlExpressionState>,
+) -> bool {
+    state == Some(YulControlExpressionState::LiteralTypeColon)
+}
+
+fn mark_current_yul_control_expression_literal_type(state: &mut Option<YulControlExpressionState>) {
+    if *state == Some(YulControlExpressionState::ExpectExpression) {
+        *state = Some(YulControlExpressionState::LiteralTypeColon);
+    }
+}
+
+fn mark_current_yul_control_expression_literal_type_colon_consumed(
+    state: &mut Option<YulControlExpressionState>,
+) {
+    if *state == Some(YulControlExpressionState::LiteralTypeColon) {
+        *state = Some(YulControlExpressionState::LiteralTypeIdentifier);
+    }
+}
+
+fn mark_current_yul_control_expression_complete(state: &mut Option<YulControlExpressionState>) {
+    if matches!(
+        *state,
+        Some(
+            YulControlExpressionState::ExpectExpression
+                | YulControlExpressionState::LiteralTypeIdentifier
+        )
+    ) {
+        *state = Some(YulControlExpressionState::ExpectBlock);
+    }
+}
+
+fn validate_yul_for_loop_syntax_context(
+    state: Option<YulForLoopSyntaxState>,
+    call_stack: &[YulCallContext],
+    next_lparen_starts_call: bool,
+) -> Option<ffi::WireParserError> {
+    if !call_stack.is_empty() || (next_lparen_starts_call && current_token() == token::TOKEN_LPAREN)
+    {
+        return None;
+    }
+
+    match state {
+        Some(YulForLoopSyntaxState::ExpectPreBlock)
+        | Some(YulForLoopSyntaxState::ExpectPostBlock)
+        | Some(YulForLoopSyntaxState::ExpectBodyBlock) => {
+            if current_token() == token::TOKEN_LBRACE {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_LBRACE),
+                    current_token_name(),
+                ))
+            }
+        }
+        Some(YulForLoopSyntaxState::ExpectCondition) => {
+            if is_yul_expression_start_or_illegal_token(current_token()) {
+                None
+            } else {
+                Some(fatal_parser_error(1856, "Literal or identifier expected."))
+            }
+        }
+        Some(YulForLoopSyntaxState::ConditionLiteralTypeColon) => {
+            if current_token() == token::TOKEN_COLON {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_COLON),
+                    current_token_name(),
+                ))
+            }
+        }
+        Some(YulForLoopSyntaxState::ConditionLiteralTypeIdentifier) => {
+            if current_token() == token::TOKEN_IDENTIFIER {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_IDENTIFIER),
+                    current_token_name(),
+                ))
+            }
+        }
+        None => None,
+    }
+}
+
+fn is_current_yul_for_loop_block_start(state: Option<YulForLoopSyntaxState>) -> bool {
+    matches!(
+        state,
+        Some(
+            YulForLoopSyntaxState::ExpectPreBlock
+                | YulForLoopSyntaxState::ExpectPostBlock
+                | YulForLoopSyntaxState::ExpectBodyBlock
+        )
+    )
+}
+
+fn is_current_yul_for_loop_condition_literal_type_identifier(
+    state: Option<YulForLoopSyntaxState>,
+) -> bool {
+    state == Some(YulForLoopSyntaxState::ConditionLiteralTypeIdentifier)
+}
+
+fn is_current_yul_for_loop_condition_literal_type_colon(
+    state: Option<YulForLoopSyntaxState>,
+) -> bool {
+    state == Some(YulForLoopSyntaxState::ConditionLiteralTypeColon)
+}
+
+fn mark_current_yul_for_loop_condition_literal_type(state: &mut Option<YulForLoopSyntaxState>) {
+    if *state == Some(YulForLoopSyntaxState::ExpectCondition) {
+        *state = Some(YulForLoopSyntaxState::ConditionLiteralTypeColon);
+    }
+}
+
+fn mark_current_yul_for_loop_condition_literal_type_colon_consumed(
+    state: &mut Option<YulForLoopSyntaxState>,
+) {
+    if *state == Some(YulForLoopSyntaxState::ConditionLiteralTypeColon) {
+        *state = Some(YulForLoopSyntaxState::ConditionLiteralTypeIdentifier);
+    }
+}
+
+fn mark_current_yul_for_loop_condition_complete(state: &mut Option<YulForLoopSyntaxState>) {
+    if matches!(
+        *state,
+        Some(
+            YulForLoopSyntaxState::ExpectCondition
+                | YulForLoopSyntaxState::ConditionLiteralTypeIdentifier
+        )
+    ) {
+        *state = Some(YulForLoopSyntaxState::ExpectPostBlock);
+    }
+}
+
+fn update_yul_for_loop_syntax_after_rbrace(
+    context: Option<YulBlockContext>,
+    state: &mut Option<YulForLoopSyntaxState>,
+) {
+    match context.and_then(|context| context.next_for_loop_component) {
+        Some(YulForLoopComponent::Post) => {
+            *state = Some(YulForLoopSyntaxState::ExpectCondition);
+        }
+        Some(YulForLoopComponent::Body) => {
+            *state = Some(YulForLoopSyntaxState::ExpectBodyBlock);
+        }
+        _ => {}
+    }
+}
+
+fn validate_yul_rhs_expression_context(
+    state: Option<YulRhsExpressionState>,
+    call_stack: &[YulCallContext],
+    next_lparen_starts_call: bool,
+) -> Option<ffi::WireParserError> {
+    if !call_stack.is_empty() || (next_lparen_starts_call && current_token() == token::TOKEN_LPAREN)
+    {
+        return None;
+    }
+
+    match state {
+        Some(YulRhsExpressionState::ExpectExpression) => {
+            if is_yul_expression_start_or_illegal_token(current_token()) {
+                None
+            } else {
+                Some(fatal_parser_error(1856, "Literal or identifier expected."))
+            }
+        }
+        Some(YulRhsExpressionState::LiteralTypeColon) => {
+            if current_token() == token::TOKEN_COLON {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_COLON),
+                    current_token_name(),
+                ))
+            }
+        }
+        Some(YulRhsExpressionState::LiteralTypeIdentifier) => {
+            if current_token() == token::TOKEN_IDENTIFIER {
+                None
+            } else {
+                Some(expected_token_error(
+                    &token_name(token::TOKEN_IDENTIFIER),
+                    current_token_name(),
+                ))
+            }
+        }
+        None => None,
+    }
+}
+
+fn is_current_yul_rhs_literal_type_identifier(state: Option<YulRhsExpressionState>) -> bool {
+    state == Some(YulRhsExpressionState::LiteralTypeIdentifier)
+}
+
+fn is_current_yul_rhs_literal_type_colon(state: Option<YulRhsExpressionState>) -> bool {
+    state == Some(YulRhsExpressionState::LiteralTypeColon)
+}
+
+fn mark_current_yul_rhs_literal_type(state: &mut Option<YulRhsExpressionState>) {
+    if *state == Some(YulRhsExpressionState::ExpectExpression) {
+        *state = Some(YulRhsExpressionState::LiteralTypeColon);
+    }
+}
+
+fn mark_current_yul_rhs_literal_type_colon_consumed(state: &mut Option<YulRhsExpressionState>) {
+    if *state == Some(YulRhsExpressionState::LiteralTypeColon) {
+        *state = Some(YulRhsExpressionState::LiteralTypeIdentifier);
+    }
+}
+
+fn mark_current_yul_rhs_expression_complete(state: &mut Option<YulRhsExpressionState>) -> bool {
+    if matches!(
+        *state,
+        Some(
+            YulRhsExpressionState::ExpectExpression | YulRhsExpressionState::LiteralTypeIdentifier
+        )
+    ) {
+        *state = None;
+        return true;
+    }
+    false
+}
+
+fn normalize_yul_assignment_target_list_state(
+    current_depth: usize,
+    state: &mut Option<YulAssignmentTargetListState>,
+) {
+    let Some(current_state) = *state else {
+        return;
+    };
+
+    let state_depth = match current_state {
+        YulAssignmentTargetListState::AfterTarget { depth }
+        | YulAssignmentTargetListState::ExpectTarget { depth } => depth,
+    };
+    if state_depth != current_depth {
+        *state = None;
+    }
+}
+
+fn validate_yul_assignment_target_list_context(
+    current_depth: usize,
+    state: Option<YulAssignmentTargetListState>,
+) -> Option<ffi::WireParserError> {
+    match state {
+        Some(YulAssignmentTargetListState::AfterTarget { depth })
+            if depth == current_depth
+                && current_token() != token::TOKEN_COMMA
+                && current_token() != token::TOKEN_ASSEMBLY_ASSIGN =>
+        {
+            Some(expected_token_error(
+                &token_name(token::TOKEN_ASSEMBLY_ASSIGN),
+                current_token_name(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn is_current_yul_assignment_target_list_target(
+    current_depth: usize,
+    state: Option<YulAssignmentTargetListState>,
+) -> bool {
+    matches!(
+        state,
+        Some(YulAssignmentTargetListState::ExpectTarget { depth }) if depth == current_depth
+    )
+}
+
+fn update_yul_assignment_target_list_after_identifier(
+    current_depth: usize,
+    block_stack: &[YulBlockContext],
+    state: &mut Option<YulAssignmentTargetListState>,
+) {
+    match *state {
+        Some(YulAssignmentTargetListState::ExpectTarget { depth }) if depth == current_depth => {
+            *state = Some(YulAssignmentTargetListState::AfterTarget { depth });
+        }
+        None if current_yul_statement_start(block_stack)
+            && peek_next_token() == token::TOKEN_COMMA =>
+        {
+            *state = Some(YulAssignmentTargetListState::AfterTarget {
+                depth: current_depth,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn current_yul_statement_start(block_stack: &[YulBlockContext]) -> bool {
+    block_stack
+        .last()
+        .is_some_and(|context| context.statement_start)
+}
+
+fn mark_current_yul_statement_started(block_stack: &mut [YulBlockContext]) {
+    if let Some(context) = block_stack.last_mut() {
+        context.statement_start = false;
+    }
+}
+
+fn mark_current_yul_statement_start(block_stack: &mut [YulBlockContext]) {
+    if let Some(context) = block_stack.last_mut() {
+        context.statement_start = true;
+    }
+}
+
+fn normalize_yul_let_declaration_state(
+    current: u32,
+    current_depth: usize,
+    state: &mut Option<YulLetDeclarationState>,
+) {
+    let Some(current_state) = *state else {
+        return;
+    };
+
+    let state_depth = match current_state {
+        YulLetDeclarationState::ExpectName { depth }
+        | YulLetDeclarationState::AfterName { depth }
+        | YulLetDeclarationState::TypeColon { depth }
+        | YulLetDeclarationState::TypeIdentifier { depth } => depth,
+    };
+    if state_depth != current_depth {
+        *state = None;
+        return;
+    }
+
+    if matches!(current_state, YulLetDeclarationState::AfterName { .. })
+        && current != token::TOKEN_COMMA
+        && current != token::TOKEN_ASSEMBLY_ASSIGN
+    {
+        *state = None;
+    }
+}
+
+fn validate_yul_let_declaration_name_context(
+    current_depth: usize,
+    state: Option<YulLetDeclarationState>,
+) -> Option<ffi::WireParserError> {
+    match state {
+        Some(YulLetDeclarationState::ExpectName { depth })
+        | Some(YulLetDeclarationState::TypeIdentifier { depth })
+            if depth == current_depth && current_token() != token::TOKEN_IDENTIFIER =>
+        {
+            Some(expected_token_error(
+                &token_name(token::TOKEN_IDENTIFIER),
+                current_token_name(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn validate_yul_function_signature_context(
+    state: Option<YulFunctionSignatureState>,
+) -> Option<ffi::WireParserError> {
+    match state {
+        Some(YulFunctionSignatureState::Name) if current_token() != token::TOKEN_IDENTIFIER => {
+            Some(expected_token_error(
+                &token_name(token::TOKEN_IDENTIFIER),
+                current_token_name(),
+            ))
+        }
+        Some(YulFunctionSignatureState::AwaitParameters)
+            if current_token() != token::TOKEN_LPAREN =>
+        {
+            Some(expected_token_error(
+                &token_name(token::TOKEN_LPAREN),
+                current_token_name(),
+            ))
+        }
+        Some(YulFunctionSignatureState::Parameters)
+            if current_token() != token::TOKEN_RPAREN
+                && current_token() != token::TOKEN_IDENTIFIER =>
+        {
+            Some(expected_token_error(
+                &token_name(token::TOKEN_IDENTIFIER),
+                current_token_name(),
+            ))
+        }
+        Some(YulFunctionSignatureState::ExpectParameter)
+        | Some(YulFunctionSignatureState::ParameterTypeIdentifier)
+        | Some(YulFunctionSignatureState::ReturnParameters)
+        | Some(YulFunctionSignatureState::ReturnTypeIdentifier)
+            if current_token() != token::TOKEN_IDENTIFIER =>
+        {
+            Some(expected_token_error(
+                &token_name(token::TOKEN_IDENTIFIER),
+                current_token_name(),
+            ))
+        }
+        Some(YulFunctionSignatureState::AfterParameter)
+            if current_token() != token::TOKEN_COMMA && current_token() != token::TOKEN_RPAREN =>
+        {
+            Some(expected_token_error(
+                &token_name(token::TOKEN_COMMA),
+                current_token_name(),
+            ))
+        }
+        Some(YulFunctionSignatureState::AfterParameters)
+            if current_token() != token::TOKEN_RIGHT_ARROW
+                && current_token() != token::TOKEN_LBRACE =>
+        {
+            Some(expected_token_error(
+                &token_name(token::TOKEN_LBRACE),
+                current_token_name(),
+            ))
+        }
+        Some(YulFunctionSignatureState::AfterReturnParameter)
+            if current_token() != token::TOKEN_COMMA && current_token() != token::TOKEN_LBRACE =>
+        {
+            Some(expected_token_error(
+                &token_name(token::TOKEN_COMMA),
+                current_token_name(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn handle_yul_identifier_in_name_contexts(
+    current_depth: usize,
+    errors: &mut Vec<ffi::WireParserError>,
+    function_signature_state: &mut Option<YulFunctionSignatureState>,
+    let_declaration_state: &mut Option<YulLetDeclarationState>,
+    current_builtin_name: Option<&str>,
+) {
+    if let Some(name) = current_builtin_name {
+        if is_current_yul_identifier_name_context(
+            current_depth,
+            *function_signature_state,
+            *let_declaration_state,
+        ) {
+            errors.push(yul_builtin_identifier_name_error(name));
+        }
+    }
+
+    match *let_declaration_state {
+        Some(YulLetDeclarationState::ExpectName { depth }) if depth == current_depth => {
+            if peek_next_token() == token::TOKEN_COLON {
+                *let_declaration_state = Some(YulLetDeclarationState::TypeColon { depth });
+            } else {
+                *let_declaration_state = Some(YulLetDeclarationState::AfterName { depth });
+            }
+        }
+        Some(YulLetDeclarationState::TypeIdentifier { depth }) if depth == current_depth => {
+            errors.push(yul_unsupported_type_error());
+            *let_declaration_state = Some(YulLetDeclarationState::AfterName { depth });
+        }
+        _ => {}
+    }
+
+    match *function_signature_state {
+        Some(YulFunctionSignatureState::Name) => {
+            *function_signature_state = Some(YulFunctionSignatureState::AwaitParameters);
+        }
+        Some(YulFunctionSignatureState::Parameters)
+        | Some(YulFunctionSignatureState::ExpectParameter) => {
+            if peek_next_token() == token::TOKEN_COLON {
+                *function_signature_state = Some(YulFunctionSignatureState::ParameterTypeColon);
+            } else {
+                *function_signature_state = Some(YulFunctionSignatureState::AfterParameter);
+            }
+        }
+        Some(YulFunctionSignatureState::ParameterTypeIdentifier) => {
+            errors.push(yul_unsupported_type_error());
+            *function_signature_state = Some(YulFunctionSignatureState::AfterParameter);
+        }
+        Some(YulFunctionSignatureState::ReturnParameters) => {
+            if peek_next_token() == token::TOKEN_COLON {
+                *function_signature_state = Some(YulFunctionSignatureState::ReturnTypeColon);
+            } else {
+                *function_signature_state = Some(YulFunctionSignatureState::AfterReturnParameter);
+            }
+        }
+        Some(YulFunctionSignatureState::ReturnTypeIdentifier) => {
+            errors.push(yul_unsupported_type_error());
+            *function_signature_state = Some(YulFunctionSignatureState::AfterReturnParameter);
+        }
+        _ => {}
+    }
+}
+
+fn is_current_yul_identifier_name_context(
+    current_depth: usize,
+    function_signature_state: Option<YulFunctionSignatureState>,
+    let_declaration_state: Option<YulLetDeclarationState>,
+) -> bool {
+    matches!(
+        let_declaration_state,
+        Some(YulLetDeclarationState::ExpectName { depth })
+            | Some(YulLetDeclarationState::TypeIdentifier { depth }) if depth == current_depth
+    ) || matches!(
+        function_signature_state,
+        Some(
+            YulFunctionSignatureState::Name
+                | YulFunctionSignatureState::Parameters
+                | YulFunctionSignatureState::ExpectParameter
+                | YulFunctionSignatureState::ParameterTypeIdentifier
+                | YulFunctionSignatureState::ReturnParameters
+                | YulFunctionSignatureState::ReturnTypeIdentifier
+        )
+    )
+}
+
+fn yul_unsupported_type_error() -> ffi::WireParserError {
+    parser_error_at(
+        5473,
+        "Types are not supported in untyped Yul.",
+        current_yul_type_annotation_location(),
+    )
+}
+
+fn current_yul_type_annotation_location() -> ffi::WireSourceLocation {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        let Some(current) = state.tokens.get(state.cursor) else {
+            return empty_source_location();
+        };
+
+        let mut start = current.location.start;
+        if state.cursor >= 2 {
+            if let (Some(colon), Some(annotated)) = (
+                state.tokens.get(state.cursor - 1),
+                state.tokens.get(state.cursor - 2),
+            ) {
+                if colon.token == token::TOKEN_COLON
+                    && annotated.location.source_id == current.location.source_id
+                {
+                    start = annotated.location.start;
+                }
+            }
+        }
+
+        ffi::WireSourceLocation {
+            start,
+            end: current.location.end,
+            source_id: current.location.source_id,
+        }
+    })
+}
+
+fn is_current_yul_switch_case_marker(
+    current: u32,
+    current_depth: usize,
+    switch_stack: &[YulSwitchContext],
+) -> bool {
+    let Some(context) = switch_stack.last() else {
+        return false;
+    };
+    if context.depth != current_depth {
+        return false;
+    }
+
+    matches!(
+        (current, context.state),
+        (token::TOKEN_CASE, YulSwitchState::CaseLiteral)
+            | (token::TOKEN_DEFAULT, YulSwitchState::ExpectCaseBody)
+    )
+}
+
+fn is_current_yul_switch_typed_literal_type_colon_consumed(
+    current_depth: usize,
+    switch_stack: &[YulSwitchContext],
+) -> bool {
+    is_current_yul_switch_typed_literal_type_identifier(current_depth, switch_stack)
+}
+
+fn is_current_yul_switch_typed_literal_type_identifier(
+    current_depth: usize,
+    switch_stack: &[YulSwitchContext],
+) -> bool {
+    switch_stack.last().is_some_and(|context| {
+        context.depth == current_depth
+            && matches!(context.state, YulSwitchState::TypedLiteralIdentifier { .. })
+    })
+}
+
+fn is_current_yul_switch_case_literal(
+    current: u32,
+    current_depth: usize,
+    switch_stack: &[YulSwitchContext],
+) -> bool {
+    is_yul_literal_token(current)
+        && switch_stack.last().is_some_and(|context| {
+            context.depth == current_depth && matches!(context.state, YulSwitchState::CaseLiteral)
+        })
+}
+
+fn validate_yul_switch_token(
+    current: u32,
+    current_depth: usize,
+    switch_stack: &mut Vec<YulSwitchContext>,
+) -> Result<(), Vec<ffi::WireParserError>> {
+    loop {
+        let Some(context) = switch_stack.last_mut() else {
+            return Ok(());
+        };
+        if current_depth < context.depth {
+            switch_stack.pop();
+            continue;
+        }
+        if current_depth != context.depth {
+            return Ok(());
+        }
+
+        match context.state {
+            YulSwitchState::ExpectExpression => {
+                if is_yul_literal_or_identifier(current) {
+                    if current == token::TOKEN_IDENTIFIER
+                        && peek_next_token() != token::TOKEN_LPAREN
+                    {
+                        if let Some(name) = current_yul_evm_builtin_name() {
+                            return Err(vec![yul_builtin_must_be_called_error(&name)]);
+                        }
+                    }
+                    context.state = if current == token::TOKEN_IDENTIFIER
+                        && peek_next_token() == token::TOKEN_LPAREN
+                    {
+                        YulSwitchState::InCallExpression { paren_depth: 0 }
+                    } else if is_yul_literal_token(current)
+                        && peek_next_token() == token::TOKEN_COLON
+                    {
+                        YulSwitchState::TypedLiteralColon {
+                            target: YulTypedLiteralTarget::ExpectCase,
+                        }
+                    } else {
+                        YulSwitchState::ExpectCase
+                    };
+                    return Ok(());
+                }
+                if current == token::TOKEN_ILLEGAL {
+                    return Ok(());
+                }
+                return Err(vec![fatal_parser_error(
+                    1856,
+                    "Literal or identifier expected.",
+                )]);
+            }
+            YulSwitchState::InCallExpression { paren_depth } => {
+                if current == token::TOKEN_LPAREN {
+                    context.state = YulSwitchState::InCallExpression {
+                        paren_depth: paren_depth + 1,
+                    };
+                } else if current == token::TOKEN_RPAREN {
+                    if paren_depth <= 1 {
+                        context.state = YulSwitchState::ExpectCase;
+                    } else {
+                        context.state = YulSwitchState::InCallExpression {
+                            paren_depth: paren_depth - 1,
+                        };
+                    }
+                }
+                return Ok(());
+            }
+            YulSwitchState::ExpectCase => {
+                if current == token::TOKEN_CASE {
+                    if context.seen_default {
+                        return Err(vec![fatal_parser_error(
+                            4904,
+                            "Case not allowed after default case.",
+                        )]);
+                    }
+                    context.seen_case = true;
+                    context.state = YulSwitchState::CaseLiteral;
+                    return Ok(());
+                }
+                if current == token::TOKEN_DEFAULT {
+                    if context.seen_default {
+                        return Err(vec![fatal_parser_error(
+                            6931,
+                            "Only one default case allowed.",
+                        )]);
+                    }
+                    context.seen_case = true;
+                    context.seen_default = true;
+                    context.state = YulSwitchState::ExpectCaseBody;
+                    return Ok(());
+                }
+                if context.seen_case {
+                    switch_stack.pop();
+                    continue;
+                }
+                return Err(vec![fatal_parser_error(
+                    2418,
+                    "Switch statement without any cases.",
+                )]);
+            }
+            YulSwitchState::CaseLiteral => {
+                if is_yul_literal_token(current) {
+                    context.state = if peek_next_token() == token::TOKEN_COLON {
+                        YulSwitchState::TypedLiteralColon {
+                            target: YulTypedLiteralTarget::ExpectCaseBody,
+                        }
+                    } else {
+                        YulSwitchState::ExpectCaseBody
+                    };
+                    return Ok(());
+                }
+                if current == token::TOKEN_IDENTIFIER {
+                    return Err(vec![fatal_parser_error(4805, "Literal expected.")]);
+                }
+                if current == token::TOKEN_ILLEGAL {
+                    return Ok(());
+                }
+                return Err(vec![fatal_parser_error(
+                    1856,
+                    "Literal or identifier expected.",
+                )]);
+            }
+            YulSwitchState::TypedLiteralColon { target } => {
+                if current == token::TOKEN_COLON {
+                    context.state = YulSwitchState::TypedLiteralIdentifier { target };
+                    return Ok(());
+                }
+                context.state = yul_switch_state_for_typed_literal_target(target);
+                continue;
+            }
+            YulSwitchState::TypedLiteralIdentifier { target } => {
+                if current == token::TOKEN_IDENTIFIER {
+                    context.state = yul_switch_state_for_typed_literal_target(target);
+                    return Ok(());
+                }
+                return Err(vec![expected_token_error(
+                    "identifier",
+                    current_token_name(),
+                )]);
+            }
+            YulSwitchState::ExpectCaseBody => {
+                if current == token::TOKEN_LBRACE {
+                    context.state = YulSwitchState::InCaseBody {
+                        block_depth: current_depth + 1,
+                    };
+                    return Ok(());
+                }
+                return Err(vec![expected_token_error("{", current_token_name())]);
+            }
+            YulSwitchState::InCaseBody { .. } => return Ok(()),
+        }
+    }
+}
+
+fn yul_switch_state_for_typed_literal_target(target: YulTypedLiteralTarget) -> YulSwitchState {
+    match target {
+        YulTypedLiteralTarget::ExpectCase => YulSwitchState::ExpectCase,
+        YulTypedLiteralTarget::ExpectCaseBody => YulSwitchState::ExpectCaseBody,
+    }
+}
+
+fn update_yul_switch_after_rbrace(current_depth: usize, switch_stack: &mut [YulSwitchContext]) {
+    if let Some(context) = switch_stack.last_mut() {
+        if let YulSwitchState::InCaseBody { block_depth } = context.state {
+            if current_depth < block_depth {
+                context.state = YulSwitchState::ExpectCase;
+            }
+        }
+    }
+}
+
+fn is_yul_literal_or_identifier(token_id: u32) -> bool {
+    token_id == token::TOKEN_IDENTIFIER || is_yul_literal_token(token_id)
+}
+
+fn is_yul_literal_token(token_id: u32) -> bool {
+    matches!(
+        token_id,
+        token::TOKEN_STRING_LITERAL
+            | token::TOKEN_HEX_STRING_LITERAL
+            | token::TOKEN_NUMBER
+            | token::TOKEN_TRUE_LITERAL
+            | token::TOKEN_FALSE_LITERAL
+    )
+}
+
+fn is_valid_yul_number_literal(literal: &[u8]) -> bool {
+    if let Some(hex_digits) = literal.strip_prefix(b"0x") {
+        if hex_digits.is_empty() || !hex_digits.iter().all(u8::is_ascii_hexdigit) {
+            return false;
+        }
+        return trim_leading_ascii_zeros(hex_digits).len() <= 64;
+    }
+
+    if literal.is_empty() || !literal.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+
+    let decimal_digits = trim_leading_ascii_zeros(literal);
+    let max_u256 =
+        b"115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    decimal_digits.is_empty()
+        || decimal_digits.len() < max_u256.len()
+        || (decimal_digits.len() == max_u256.len() && decimal_digits <= max_u256)
+}
+
+fn trim_leading_ascii_zeros(bytes: &[u8]) -> &[u8] {
+    let first_non_zero = bytes
+        .iter()
+        .position(|byte| *byte != b'0')
+        .unwrap_or(bytes.len());
+    &bytes[first_non_zero..]
+}
+
+fn current_yul_for_loop_component(block_stack: &[YulBlockContext]) -> YulForLoopComponent {
+    block_stack
+        .last()
+        .map_or(YulForLoopComponent::None, |context| {
+            context.for_loop_component
+        })
+}
+
+fn check_yul_break_continue_position(
+    which: &str,
+    component: YulForLoopComponent,
+    errors: &mut Vec<ffi::WireParserError>,
+) {
+    match component {
+        YulForLoopComponent::None => errors.push(syntax_error(
+            2592,
+            &format!("Keyword \"{which}\" needs to be inside a for-loop body."),
+        )),
+        YulForLoopComponent::Pre => errors.push(syntax_error(
+            9615,
+            &format!("Keyword \"{which}\" in for-loop init block is not allowed."),
+        )),
+        YulForLoopComponent::Post => errors.push(syntax_error(
+            2461,
+            &format!("Keyword \"{which}\" in for-loop post block is not allowed."),
+        )),
+        YulForLoopComponent::Body => {}
+    }
+}
+
+pub fn parse_if_statement() -> ffi::WireStatementResult {
+    parse_if_statement_with_doc(empty_string())
+}
+
+fn parse_if_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let if_token = expect_token(token::TOKEN_IF);
+    if !if_token.errors.is_empty() {
+        return empty_statement_result(if_token.errors);
+    }
+
+    let lparen = expect_token(token::TOKEN_LPAREN);
+    if !lparen.errors.is_empty() {
+        return empty_statement_result(lparen.errors);
+    }
+
+    let condition_detail = parse_expression();
+    if parser_errors_have_fatal(&condition_detail.errors) {
+        errors.extend(condition_detail.errors);
+        return empty_statement_result(errors);
+    }
+    errors.extend(condition_detail.errors.clone());
+    let condition = condition_detail.expression.clone();
+    if !condition.present {
+        return empty_statement_result(errors);
+    }
+    let rparen = expect_token(token::TOKEN_RPAREN);
+    if !rparen.errors.is_empty() {
+        errors.extend(rparen.errors);
+        return empty_statement_result(errors);
+    }
+
+    let true_body_detail = parse_statement();
+    if parser_errors_have_fatal(&true_body_detail.errors) {
+        errors.extend(true_body_detail.errors);
+        return empty_statement_result(errors);
+    }
+    errors.extend(true_body_detail.errors.clone());
+    let true_body = true_body_detail.statement.clone();
+    if !true_body.present {
+        return empty_statement_result(errors);
+    }
+
+    let mut false_body = empty_ast_node();
+    let mut false_body_detail = Vec::new();
+    if current_token() == token::TOKEN_ELSE {
+        advance();
+        let parsed_false_body = parse_statement();
+        if parser_errors_have_fatal(&parsed_false_body.errors) {
+            errors.extend(parsed_false_body.errors);
+            return empty_statement_result(errors);
+        }
+        errors.extend(parsed_false_body.errors.clone());
+        false_body = parsed_false_body.statement.clone();
+        if !false_body.present {
+            return empty_statement_result(errors);
+        }
+        false_body_detail.push(parsed_false_body);
+        location.end = false_body.location.end;
+    } else {
+        location.end = true_body.location.end;
+    }
+
+    let nodes = [condition.clone(), true_body.clone(), false_body.clone()];
+    let statement = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+        kind: AST_NODE_KIND_IF_STATEMENT,
+        location,
+        text: doc_string,
+    };
+    let mut result = statement_result(statement, errors);
+    result.condition_expression = condition;
+    result.condition_expression_detail = condition_detail;
+    result.true_body = true_body;
+    result.true_body_detail.push(true_body_detail);
+    result.false_body = false_body;
+    result.false_body_detail = false_body_detail;
+    result
+}
+
+pub fn parse_try_statement() -> ffi::WireStatementResult {
+    parse_try_statement_with_doc(empty_string())
+}
+
+fn parse_try_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let try_token = expect_token(token::TOKEN_TRY);
+    if !try_token.errors.is_empty() {
+        return empty_statement_result(try_token.errors);
+    }
+
+    let external_call_detail = parse_expression();
+    if parser_errors_have_fatal(&external_call_detail.errors) {
+        errors.extend(external_call_detail.errors);
+        return empty_statement_result(errors);
+    }
+    errors.extend(external_call_detail.errors.clone());
+    let external_call = external_call_detail.expression.clone();
+    if !external_call.present {
+        return empty_statement_result(errors);
+    }
+    let mut clauses = Vec::new();
+    let mut clause_details = Vec::new();
+    let mut clause_block_statement_details = Vec::new();
+    let mut clause_error_names = Vec::new();
+    let mut clause_error_parameters = Vec::new();
+    let mut clause_blocks = Vec::new();
+
+    let success_clause_location = current_location();
+    let mut returns_parameter_declarations = Vec::new();
+    let mut returns_parameter_details = Vec::new();
+    let returns_parameters = if current_token() == token::TOKEN_RETURNS {
+        advance();
+        let options = VarDeclParserOptions {
+            allow_empty_name: true,
+            allow_location_specifier: true,
+            ..VarDeclParserOptions::default()
+        };
+        let returns_parameters = parse_parameter_list_with_options_and_node_id(
+            options,
+            false,
+            external_call.node_id.max(current_node_id()),
+        );
+        if parser_errors_have_fatal(&returns_parameters.errors) {
+            errors.extend(returns_parameters.errors);
+            return empty_statement_result(errors);
+        }
+        errors.extend(returns_parameters.errors);
+        if !returns_parameters.parameter_list.present {
+            return empty_statement_result(errors);
+        }
+        returns_parameter_declarations = returns_parameters.parameters;
+        returns_parameter_details = returns_parameters.parameter_details;
+        returns_parameters.parameter_list
+    } else {
+        empty_ast_node()
+    };
+
+    let success_block = parse_block();
+    if parser_errors_have_fatal(&success_block.errors) {
+        errors.extend(success_block.errors);
+        return empty_statement_result(errors);
+    }
+    errors.extend(success_block.errors.clone());
+    let success_block_node = success_block.block.clone();
+    if !success_block_node.present {
+        return empty_statement_result(errors);
+    }
+    let success_clause = create_try_catch_clause(
+        success_clause_location,
+        empty_string(),
+        returns_parameters.clone(),
+        success_block_node.clone(),
+    );
+    clauses.push(success_clause);
+    clause_details.push(ffi::WireTryCatchClauseResult {
+        try_catch_clause: clauses.last().cloned().unwrap_or_else(empty_ast_node),
+        error_name: empty_string(),
+        error_parameters: returns_parameters.clone(),
+        error_parameter_declarations: returns_parameter_declarations,
+        error_parameter_details: returns_parameter_details,
+        block: success_block_node.clone(),
+        block_unchecked: success_block.unchecked,
+        block_statements: success_block.statements.clone(),
+        block_statement_details: success_block.statement_details.clone(),
+        errors: Vec::new(),
+    });
+    clause_block_statement_details.extend(success_block.statement_details);
+    clause_error_names.push(empty_string());
+    clause_error_parameters.push(returns_parameters);
+    clause_blocks.push(success_block_node);
+
+    loop {
+        let clause_result = parse_catch_clause();
+        if parser_errors_have_fatal(&clause_result.errors) {
+            errors.extend(clause_result.errors);
+            return empty_statement_result(errors);
+        }
+        errors.extend(clause_result.errors.clone());
+        let clause = clause_result.try_catch_clause.clone();
+        if !clause.present {
+            return empty_statement_result(errors);
+        }
+        location.end = clause.location.end;
+        clause_block_statement_details.extend(clause_result.block_statement_details.clone());
+        clause_details.push(clause_result.clone());
+        clauses.push(clause);
+        clause_error_names.push(clause_result.error_name);
+        clause_error_parameters.push(clause_result.error_parameters);
+        clause_blocks.push(clause_result.block.clone());
+
+        if current_token() != token::TOKEN_CATCH {
+            break;
+        }
+    }
+
+    let mut nodes = Vec::with_capacity(clauses.len() + 1);
+    nodes.push(external_call.clone());
+    nodes.extend(clauses.clone());
+    let statement = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+        kind: AST_NODE_KIND_TRY_STATEMENT,
+        location,
+        text: doc_string,
+    };
+    let mut result = statement_result(statement, errors);
+    result.external_call = external_call;
+    result.external_call_detail = external_call_detail;
+    result.clauses = clauses;
+    result.clause_details = clause_details;
+    result.clause_block_statement_details = clause_block_statement_details;
+    result.clause_error_names = clause_error_names;
+    result.clause_error_parameters = clause_error_parameters;
+    result.clause_blocks = clause_blocks;
+    result
+}
+
+pub fn parse_catch_clause() -> ffi::WireTryCatchClauseResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let clause_location = current_location();
+    let mut errors = Vec::new();
+    let catch_token = expect_token(token::TOKEN_CATCH);
+    if !catch_token.errors.is_empty() {
+        return empty_try_catch_clause_result(catch_token.errors);
+    }
+
+    let mut error_name = empty_string();
+    let mut error_parameters = empty_ast_node();
+    let mut error_parameter_declarations = Vec::new();
+    let mut error_parameter_details = Vec::new();
+    if current_token() != token::TOKEN_LBRACE {
+        if current_token() == token::TOKEN_IDENTIFIER {
+            let parsed_error_name =
+                expect_identifier_token(current_token(), current_literal(), current_token_name());
+            advance_by(parsed_error_name.tokens_consumed);
+            if !parsed_error_name.errors.is_empty() {
+                errors.extend(parsed_error_name.errors);
+                return empty_try_catch_clause_result(errors);
+            }
+            error_name = parsed_error_name.value;
+        }
+
+        let options = VarDeclParserOptions {
+            allow_empty_name: true,
+            allow_location_specifier: true,
+            ..VarDeclParserOptions::default()
+        };
+        let parsed_error_parameters = parse_parameter_list_with_options_and_node_id(
+            options,
+            !error_name.bytes.is_empty(),
+            current_node_id(),
+        );
+        if parser_errors_have_fatal(&parsed_error_parameters.errors) {
+            errors.extend(parsed_error_parameters.errors);
+            return empty_try_catch_clause_result(errors);
+        }
+        errors.extend(parsed_error_parameters.errors);
+        if !parsed_error_parameters.parameter_list.present {
+            return empty_try_catch_clause_result(errors);
+        }
+        error_parameter_declarations = parsed_error_parameters.parameters;
+        error_parameter_details = parsed_error_parameters.parameter_details;
+        error_parameters = parsed_error_parameters.parameter_list;
+    }
+
+    let block = parse_block();
+    if parser_errors_have_fatal(&block.errors) {
+        errors.extend(block.errors);
+        return empty_try_catch_clause_result(errors);
+    }
+    errors.extend(block.errors.clone());
+    let block_node = block.block.clone();
+    if !block_node.present {
+        return empty_try_catch_clause_result(errors);
+    }
+
+    ffi::WireTryCatchClauseResult {
+        try_catch_clause: create_try_catch_clause(
+            clause_location,
+            error_name.clone(),
+            error_parameters.clone(),
+            block_node.clone(),
+        ),
+        error_name,
+        error_parameters,
+        error_parameter_declarations,
+        error_parameter_details,
+        block: block_node,
+        block_unchecked: block.unchecked,
+        block_statements: block.statements,
+        block_statement_details: block.statement_details,
+        errors,
+    }
+}
+
+fn empty_try_catch_clause_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireTryCatchClauseResult {
+    ffi::WireTryCatchClauseResult {
+        try_catch_clause: empty_ast_node(),
+        error_name: empty_string(),
+        error_parameters: empty_ast_node(),
+        error_parameter_declarations: Vec::new(),
+        error_parameter_details: Vec::new(),
+        block: empty_ast_node(),
+        block_unchecked: false,
+        block_statements: Vec::new(),
+        block_statement_details: Vec::new(),
+        errors,
+    }
+}
+
+fn create_try_catch_clause(
+    mut location: ffi::WireSourceLocation,
+    error_name: ffi::WireString,
+    error_parameters: ffi::WireAstNode,
+    block: ffi::WireAstNode,
+) -> ffi::WireAstNode {
+    location.end = block.location.end;
+    let nodes = [error_parameters, block];
+    ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+        kind: AST_NODE_KIND_TRY_CATCH_CLAUSE,
+        location,
+        text: error_name,
+    }
+}
+
+pub fn parse_while_statement() -> ffi::WireStatementResult {
+    parse_while_statement_with_doc(empty_string())
+}
+
+fn parse_while_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let while_token = expect_token(token::TOKEN_WHILE);
+    if !while_token.errors.is_empty() {
+        errors.extend(while_token.errors);
+        return empty_statement_result(errors);
+    }
+
+    let lparen = expect_token(token::TOKEN_LPAREN);
+    if !lparen.errors.is_empty() {
+        errors.extend(lparen.errors);
+        return empty_statement_result(errors);
+    }
+
+    let condition_detail = parse_expression();
+    if parser_errors_have_fatal(&condition_detail.errors) {
+        errors.extend(condition_detail.errors);
+        return empty_statement_result(errors);
+    }
+    errors.extend(condition_detail.errors.clone());
+    let condition = condition_detail.expression.clone();
+    if !condition.present {
+        return empty_statement_result(errors);
+    }
+    let rparen = expect_token(token::TOKEN_RPAREN);
+    if !rparen.errors.is_empty() {
+        errors.extend(rparen.errors);
+        return empty_statement_result(errors);
+    }
+
+    let body_detail = parse_statement();
+    if parser_errors_have_fatal(&body_detail.errors) {
+        errors.extend(body_detail.errors);
+        return empty_statement_result(errors);
+    }
+    errors.extend(body_detail.errors.clone());
+    let body = body_detail.statement.clone();
+    if !body.present {
+        return empty_statement_result(errors);
+    }
+    location.end = body.location.end;
+
+    let nodes = [condition.clone(), body.clone()];
+    let statement = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+        kind: AST_NODE_KIND_WHILE_STATEMENT,
+        location,
+        text: doc_string,
+    };
+    let mut result = statement_result(statement, errors);
+    result.condition_expression = condition;
+    result.condition_expression_detail = condition_detail;
+    result.body = body;
+    result.body_detail.push(body_detail);
+    result.is_do_while = false;
+    result
+}
+
+pub fn parse_do_while_statement() -> ffi::WireStatementResult {
+    parse_do_while_statement_with_doc(empty_string())
+}
+
+fn parse_do_while_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let do_token = expect_token(token::TOKEN_DO);
+    if !do_token.errors.is_empty() {
+        return empty_statement_result(do_token.errors);
+    }
+
+    let body_detail = parse_statement();
+    if parser_errors_have_fatal(&body_detail.errors) {
+        errors.extend(body_detail.errors);
+        return empty_statement_result(errors);
+    }
+    errors.extend(body_detail.errors.clone());
+    let body = body_detail.statement.clone();
+    if !body.present {
+        return empty_statement_result(errors);
+    }
+
+    let while_token = expect_token(token::TOKEN_WHILE);
+    if !while_token.errors.is_empty() {
+        errors.extend(while_token.errors);
+        return empty_statement_result(errors);
+    }
+
+    let lparen = expect_token(token::TOKEN_LPAREN);
+    if !lparen.errors.is_empty() {
+        errors.extend(lparen.errors);
+        return empty_statement_result(errors);
+    }
+
+    let condition_detail = parse_expression();
+    if parser_errors_have_fatal(&condition_detail.errors) {
+        errors.extend(condition_detail.errors);
+        return empty_statement_result(errors);
+    }
+    errors.extend(condition_detail.errors.clone());
+    let condition = condition_detail.expression.clone();
+    if !condition.present {
+        return empty_statement_result(errors);
+    }
+    let rparen = expect_token(token::TOKEN_RPAREN);
+    if !rparen.errors.is_empty() {
+        errors.extend(rparen.errors);
+        return empty_statement_result(errors);
+    }
+
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return empty_statement_result(errors);
+    }
+
+    let nodes = [condition.clone(), body.clone()];
+    let statement = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+        kind: AST_NODE_KIND_DO_WHILE_STATEMENT,
+        location,
+        text: doc_string,
+    };
+    let mut result = statement_result(statement, errors);
+    result.condition_expression = condition;
+    result.condition_expression_detail = condition_detail;
+    result.body = body;
+    result.body_detail.push(body_detail);
+    result.is_do_while = true;
+    result
+}
+
+pub fn parse_for_statement() -> ffi::WireStatementResult {
+    parse_for_statement_with_doc(empty_string())
+}
+
+fn parse_for_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let for_token = expect_token(token::TOKEN_FOR);
+    if !for_token.errors.is_empty() {
+        return empty_statement_result(for_token.errors);
+    }
+
+    let lparen = expect_token(token::TOKEN_LPAREN);
+    if !lparen.errors.is_empty() {
+        return empty_statement_result(lparen.errors);
+    }
+
+    let mut init_expression_detail = Vec::new();
+    let init_expression = if current_token() != token::TOKEN_SEMICOLON {
+        let parsed_init_expression = parse_simple_statement();
+        if parser_errors_have_fatal(&parsed_init_expression.errors) {
+            errors.extend(parsed_init_expression.errors);
+            return empty_statement_result(errors);
+        }
+        errors.extend(parsed_init_expression.errors.clone());
+        let init_expression = parsed_init_expression.statement.clone();
+        if !init_expression.present {
+            return empty_statement_result(errors);
+        }
+        init_expression_detail.push(parsed_init_expression);
+        init_expression
+    } else {
+        empty_ast_node()
+    };
+    let first_semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !first_semicolon.errors.is_empty() {
+        errors.extend(first_semicolon.errors);
+        return empty_statement_result(errors);
+    }
+
+    let mut condition_expression_detail = empty_expression_result(Vec::new());
+    let condition_expression = if current_token() != token::TOKEN_SEMICOLON {
+        let parsed_condition_expression = parse_expression();
+        if parser_errors_have_fatal(&parsed_condition_expression.errors) {
+            errors.extend(parsed_condition_expression.errors);
+            return empty_statement_result(errors);
+        }
+        errors.extend(parsed_condition_expression.errors.clone());
+        let condition_expression = parsed_condition_expression.expression.clone();
+        if !condition_expression.present {
+            return empty_statement_result(errors);
+        }
+        condition_expression_detail = parsed_condition_expression;
+        condition_expression
+    } else {
+        empty_ast_node()
+    };
+    let second_semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !second_semicolon.errors.is_empty() {
+        errors.extend(second_semicolon.errors);
+        return empty_statement_result(errors);
+    }
+
+    let mut loop_expression_detail = Vec::new();
+    let loop_expression = if current_token() != token::TOKEN_RPAREN {
+        let parsed_loop_expression = parse_expression_statement();
+        if parser_errors_have_fatal(&parsed_loop_expression.errors) {
+            errors.extend(parsed_loop_expression.errors);
+            return empty_statement_result(errors);
+        }
+        errors.extend(parsed_loop_expression.errors.clone());
+        let loop_expression = parsed_loop_expression.statement.clone();
+        if !loop_expression.present {
+            return empty_statement_result(errors);
+        }
+        loop_expression_detail.push(parsed_loop_expression);
+        loop_expression
+    } else {
+        empty_ast_node()
+    };
+    let rparen = expect_token(token::TOKEN_RPAREN);
+    if !rparen.errors.is_empty() {
+        errors.extend(rparen.errors);
+        return empty_statement_result(errors);
+    }
+
+    let body_detail = parse_statement();
+    if parser_errors_have_fatal(&body_detail.errors) {
+        errors.extend(body_detail.errors);
+        return empty_statement_result(errors);
+    }
+    errors.extend(body_detail.errors.clone());
+    let body = body_detail.statement.clone();
+    if !body.present {
+        return empty_statement_result(errors);
+    }
+    location.end = body.location.end;
+
+    let nodes = [
+        init_expression.clone(),
+        condition_expression.clone(),
+        loop_expression.clone(),
+        body.clone(),
+    ];
+    let statement = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+        kind: AST_NODE_KIND_FOR_STATEMENT,
+        location,
+        text: doc_string,
+    };
+    let mut result = statement_result(statement, errors);
+    result.init_expression = init_expression;
+    result.init_expression_detail = init_expression_detail;
+    result.condition_expression = condition_expression;
+    result.condition_expression_detail = condition_expression_detail;
+    result.loop_expression = loop_expression;
+    result.loop_expression_detail = loop_expression_detail;
+    result.body = body;
+    result.body_detail.push(body_detail);
+    result
+}
+
+pub fn parse_emit_statement() -> ffi::WireStatementResult {
+    parse_emit_statement_with_doc(empty_string())
+}
+
+fn parse_emit_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let emit = expect_token(token::TOKEN_EMIT);
+    if !emit.errors.is_empty() {
+        return empty_statement_result(emit.errors);
+    }
+
+    let mut event_call = parse_path_function_call(true);
+    errors.extend(std::mem::take(&mut event_call.errors));
+    let event_call_node = event_call.function_call.clone();
+    if !event_call_node.present {
+        return empty_statement_result(errors);
+    }
+    location.end = event_call_node.location.end;
+
+    let statement = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(event_call_node.node_id.max(current_node_id())),
+        kind: AST_NODE_KIND_EMIT_STATEMENT,
+        location,
+        text: doc_string,
+    };
+    let mut result = statement_result(statement, errors);
+    result.event_call = event_call_node;
+    result.event_call_callee = event_call.callee;
+    result.event_call_callee_detail = event_call.callee_detail;
+    result.event_call_arguments = event_call.arguments;
+    result.event_call_argument_details = event_call.argument_details;
+    result.event_call_parameter_names = event_call.parameter_names;
+    result.event_call_parameter_name_locations = event_call.parameter_name_locations;
+    result
+}
+
+pub fn parse_revert_statement() -> ffi::WireStatementResult {
+    parse_revert_statement_with_doc(empty_string())
+}
+
+fn parse_revert_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let revert = expect_identifier_token(current_token(), current_literal(), current_token_name());
+    advance_by(revert.tokens_consumed);
+    if !revert.errors.is_empty() {
+        return empty_statement_result(revert.errors);
+    }
+    assert_eq!(revert.value.bytes, b"revert");
+
+    assert!(current_token() == token::TOKEN_IDENTIFIER);
+    let mut error_call = parse_path_function_call(false);
+    errors.extend(std::mem::take(&mut error_call.errors));
+    let error_call_node = error_call.function_call.clone();
+    if !error_call_node.present {
+        return empty_statement_result(errors);
+    }
+    location.end = error_call_node.location.end;
+
+    let statement = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(error_call_node.node_id.max(current_node_id())),
+        kind: AST_NODE_KIND_REVERT_STATEMENT,
+        location,
+        text: doc_string,
+    };
+    let mut result = statement_result(statement, errors);
+    result.error_call = error_call_node;
+    result.error_call_callee = error_call.callee;
+    result.error_call_callee_detail = error_call.callee_detail;
+    result.error_call_arguments = error_call.arguments;
+    result.error_call_argument_details = error_call.argument_details;
+    result.error_call_parameter_names = error_call.parameter_names;
+    result.error_call_parameter_name_locations = error_call.parameter_name_locations;
+    result
+}
+
+fn parse_path_function_call(fatal_on_missing_identifier: bool) -> ffi::WirePathFunctionCallResult {
+    let mut errors = Vec::new();
+    if current_token() != token::TOKEN_IDENTIFIER {
+        if fatal_on_missing_identifier {
+            errors.push(fatal_parser_error(5620, "Expected event name or path."));
+            return empty_path_function_call_result(errors);
+        }
+        assert!(current_token() == token::TOKEN_IDENTIFIER);
+    }
+
+    let mut path_and_indices = empty_index_accessed_path();
+    let mut node_id = current_node_id();
+    loop {
+        let identifier = parse_current_identifier_with_node_id(node_id);
+        if !identifier.errors.is_empty() || !identifier.identifier.present {
+            errors.extend(identifier.errors);
+            return empty_path_function_call_result(errors);
+        }
+        node_id = identifier.current_node_id;
+        path_and_indices.path.push(identifier.identifier);
+        path_and_indices
+            .path_expression_types
+            .push(empty_ast_node());
+        if current_token() != token::TOKEN_PERIOD {
+            break;
+        }
+        advance();
+    }
+
+    let callee_detail = expression_from_index_access_structure(path_and_indices);
+    let expression = callee_detail.expression.clone();
+    let lparen = expect_token(token::TOKEN_LPAREN);
+    if !lparen.errors.is_empty() {
+        errors.extend(lparen.errors);
+        return empty_path_function_call_result(errors);
+    }
+
+    let function_call_arguments = parse_function_call_arguments();
+    if parser_errors_have_fatal(&function_call_arguments.errors) {
+        errors.extend(function_call_arguments.errors);
+        return empty_path_function_call_result(errors);
+    }
+    errors.extend(function_call_arguments.errors);
+    let arguments = function_call_arguments.arguments;
+    let argument_details = function_call_arguments.argument_details;
+    let parameter_names = function_call_arguments.parameter_names;
+    let parameter_name_locations = function_call_arguments.parameter_name_locations;
+
+    let mut location = expression.location.clone();
+    location.end = current_location().end;
+    let rparen = expect_token(token::TOKEN_RPAREN);
+    if !rparen.errors.is_empty() {
+        errors.extend(rparen.errors);
+        return empty_path_function_call_result(errors);
+    }
+
+    let mut nodes = arguments.clone();
+    nodes.push(expression.clone());
+    ffi::WirePathFunctionCallResult {
+        function_call: ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(node_id, &nodes)),
+            kind: AST_NODE_KIND_FUNCTION_CALL,
+            location,
+            text: empty_string(),
+        },
+        callee: expression,
+        callee_detail,
+        arguments,
+        argument_details,
+        parameter_names,
+        parameter_name_locations,
+        errors,
+    }
+}
+
+fn empty_path_function_call_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WirePathFunctionCallResult {
+    ffi::WirePathFunctionCallResult {
+        function_call: empty_ast_node(),
+        callee: empty_ast_node(),
+        callee_detail: empty_expression_result(Vec::new()),
+        arguments: Vec::new(),
+        argument_details: Vec::new(),
+        parameter_names: Vec::new(),
+        parameter_name_locations: Vec::new(),
+        errors,
+    }
+}
+
+pub fn parse_postfix_variable_declaration_statement() -> ffi::WireStatementResult {
+    parse_postfix_variable_declaration_statement_with_doc(empty_string())
+}
+
+fn parse_postfix_variable_declaration_statement_with_doc(
+    doc_string: ffi::WireString,
+) -> ffi::WireStatementResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let let_token = expect_token(token::TOKEN_LET);
+    if !let_token.errors.is_empty() {
+        return empty_statement_result(let_token.errors);
+    }
+
+    let variable = parse_postfix_variable_declaration_with_node_id(current_node_id());
+    if parser_errors_have_fatal(&variable.errors) {
+        errors.extend(variable.errors);
+        return empty_statement_result(errors);
+    }
+    errors.extend(variable.errors.clone());
+    let variable_node = variable.variable_declaration.clone();
+    if !variable_node.present {
+        return empty_statement_result(errors);
+    }
+    location.end = variable_node.location.end;
+    let mut variable_detail = empty_variable_declaration_result(Vec::new());
+    variable_detail.variable_declaration = variable.variable_declaration;
+    variable_detail.type_expression = variable.type_expression;
+    variable_detail.type_expression_detail = variable.type_expression_detail;
+    variable_detail.documentation = variable.documentation;
+    variable_detail.name = variable.name;
+    variable_detail.name_location = variable.name_location;
+
+    let (value, value_detail) = if current_token() == token::TOKEN_ASSIGN {
+        advance();
+        let parsed_value = parse_expression();
+        if parser_errors_have_fatal(&parsed_value.errors) {
+            errors.extend(parsed_value.errors);
+            return empty_statement_result(errors);
+        }
+        errors.extend(parsed_value.errors.clone());
+        let value = parsed_value.expression.clone();
+        if !value.present {
+            return empty_statement_result(errors);
+        }
+        location.end = value.location.end;
+        (value, parsed_value)
+    } else {
+        (empty_ast_node(), empty_expression_result(Vec::new()))
+    };
+
+    let nodes = [variable_node.clone(), value.clone()];
+    let statement = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+        kind: AST_NODE_KIND_VARIABLE_DECLARATION_STATEMENT,
+        location,
+        text: doc_string,
+    };
+    let mut result = statement_result(statement, errors);
+    result.variables = vec![variable_node];
+    result.variable_details = vec![variable_detail];
+    result.initial_value = value;
+    result.initial_value_detail = value_detail;
+    result
+}
+
+pub fn parse_postfix_variable_declaration() -> ffi::WirePostfixVariableDeclarationResult {
+    parse_postfix_variable_declaration_with_node_id(current_node_id())
+}
+
+fn parse_postfix_variable_declaration_with_node_id(
+    current_node_id: i64,
+) -> ffi::WirePostfixVariableDeclarationResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let documentation_result = parse_current_structured_documentation_with_node_id(current_node_id);
+    let documentation = documentation_result.documentation;
+    let node_id = documentation_result.current_node_id;
+
+    let parsed_identifier = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_identifier.tokens_consumed);
+    if !parsed_identifier.errors.is_empty() {
+        errors.extend(parsed_identifier.errors);
+        return empty_postfix_variable_declaration_result(errors);
+    }
+    location.end = parsed_identifier.location.end;
+
+    let mut type_expression_detail = empty_expression_result(Vec::new());
+    let type_expression = if current_token() == token::TOKEN_COLON {
+        advance();
+        let parsed_type_expression = parse_binary_expression();
+        if parser_errors_have_fatal(&parsed_type_expression.errors) {
+            errors.extend(parsed_type_expression.errors);
+            return empty_postfix_variable_declaration_result(errors);
+        }
+        errors.extend(parsed_type_expression.errors.clone());
+        let type_expression = parsed_type_expression.expression.clone();
+        if !type_expression.present {
+            return empty_postfix_variable_declaration_result(errors);
+        }
+        location.end = type_expression.location.end;
+        type_expression_detail = parsed_type_expression;
+        type_expression
+    } else {
+        empty_ast_node()
+    };
+
+    let nodes = [documentation.clone(), type_expression.clone()];
+    ffi::WirePostfixVariableDeclarationResult {
+        variable_declaration: ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(node_id, &nodes)),
+            kind: AST_NODE_KIND_VARIABLE_DECLARATION,
+            location,
+            text: parsed_identifier.identifier.clone(),
+        },
+        name: parsed_identifier.identifier,
+        name_location: parsed_identifier.location,
+        documentation,
+        type_expression,
+        type_expression_detail,
+        errors,
+    }
+}
+
+fn empty_postfix_variable_declaration_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WirePostfixVariableDeclarationResult {
+    ffi::WirePostfixVariableDeclarationResult {
+        variable_declaration: empty_ast_node(),
+        name: empty_string(),
+        name_location: empty_source_location(),
+        documentation: empty_ast_node(),
+        type_expression: empty_ast_node(),
+        type_expression_detail: empty_expression_result(Vec::new()),
+        errors,
+    }
+}
+
+pub fn parse_type_class_definition() -> ffi::WireTypeClassDefinitionResult {
+    assert!(experimental_solidity_enabled_in_current_source_unit());
+
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut errors = Vec::new();
+    let documentation_result = parse_current_structured_documentation();
+    let documentation = documentation_result.documentation;
+    let mut node_id = documentation_result.current_node_id;
+
+    let mut location = current_location();
+    let class = expect_token(token::TOKEN_CLASS);
+    if !class.errors.is_empty() {
+        return empty_type_class_definition_result(class.errors);
+    }
+
+    let parsed_type_variable = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_type_variable.tokens_consumed);
+    if !parsed_type_variable.errors.is_empty() {
+        return empty_type_class_definition_result(parsed_type_variable.errors);
+    }
+    let type_variable = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(node_id),
+        kind: AST_NODE_KIND_VARIABLE_DECLARATION,
+        location: parsed_type_variable.location.clone(),
+        text: parsed_type_variable.identifier.clone(),
+    };
+    node_id = type_variable.node_id;
+
+    let colon = expect_token(token::TOKEN_COLON);
+    if !colon.errors.is_empty() {
+        return empty_type_class_definition_result(colon.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return empty_type_class_definition_result(parsed_name.errors);
+    }
+
+    let lbrace = expect_token(token::TOKEN_LBRACE);
+    if !lbrace.errors.is_empty() {
+        return empty_type_class_definition_result(lbrace.errors);
+    }
+
+    let mut sub_nodes = Vec::new();
+    let mut sub_node_function_details = Vec::new();
+    while current_token() != token::TOKEN_RBRACE {
+        let function = expect_token_no_advance(token::TOKEN_FUNCTION);
+        if !function.errors.is_empty() {
+            errors.extend(function.errors);
+            return empty_type_class_definition_result(errors);
+        }
+        let function_definition = parse_function_definition(false, false);
+        if parser_errors_have_fatal(&function_definition.errors) {
+            report_parser_warnings(&function_definition.warnings);
+            errors.extend(function_definition.errors);
+            return empty_type_class_definition_result(errors);
+        }
+        errors.extend(function_definition.errors.clone());
+        report_parser_warnings(&function_definition.warnings);
+        if !function_definition.function_definition.present {
+            return empty_type_class_definition_result(errors);
+        }
+        sub_nodes.push(function_definition.function_definition.clone());
+        sub_node_function_details.push(function_definition);
+    }
+
+    location.end = current_location().end;
+    let rbrace = expect_token(token::TOKEN_RBRACE);
+    if !rbrace.errors.is_empty() {
+        errors.extend(rbrace.errors);
+        return empty_type_class_definition_result(errors);
+    }
+
+    let mut node_children = sub_nodes.clone();
+    node_children.push(type_variable.clone());
+    node_children.push(documentation.clone());
+    ffi::WireTypeClassDefinitionResult {
+        type_class_definition: ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(node_id, &node_children)),
+            kind: AST_NODE_KIND_TYPE_CLASS_DEFINITION,
+            location,
+            text: parsed_name.identifier.clone(),
+        },
+        type_variable,
+        type_variable_name: parsed_type_variable.identifier,
+        type_variable_name_location: parsed_type_variable.location,
+        name: parsed_name.identifier,
+        name_location: parsed_name.location,
+        documentation,
+        sub_nodes,
+        sub_node_function_details,
+        errors,
+    }
+}
+
+fn empty_type_class_definition_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireTypeClassDefinitionResult {
+    ffi::WireTypeClassDefinitionResult {
+        type_class_definition: empty_ast_node(),
+        type_variable: empty_ast_node(),
+        type_variable_name: empty_string(),
+        type_variable_name_location: empty_source_location(),
+        name: empty_string(),
+        name_location: empty_source_location(),
+        documentation: empty_ast_node(),
+        sub_nodes: Vec::new(),
+        sub_node_function_details: Vec::new(),
+        errors,
+    }
+}
+
+pub fn parse_type_class_instantiation() -> ffi::WireTypeClassInstantiationResult {
+    assert!(experimental_solidity_enabled_in_current_source_unit());
+
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let instantiation = expect_token(token::TOKEN_INSTANTIATION);
+    if !instantiation.errors.is_empty() {
+        return empty_type_class_instantiation_result(instantiation.errors);
+    }
+
+    let type_constructor_detail = parse_type_name();
+    if parser_errors_have_fatal(&type_constructor_detail.errors) {
+        return empty_type_class_instantiation_result(type_constructor_detail.errors);
+    }
+    errors.extend(type_constructor_detail.errors.clone());
+    let type_constructor = type_constructor_detail.type_name.clone();
+    if !type_constructor.present {
+        return empty_type_class_instantiation_result(errors);
+    }
+    let mut argument_sort_parameters = Vec::new();
+    let mut argument_sort_details = Vec::new();
+    let argument_sorts = if current_token() == token::TOKEN_LPAREN {
+        let argument_sorts = parse_parameter_list_with_options_and_node_id(
+            VarDeclParserOptions::default(),
+            true,
+            type_constructor.node_id.max(current_node_id()),
+        );
+        if parser_errors_have_fatal(&argument_sorts.errors) {
+            errors.extend(argument_sorts.errors);
+            return empty_type_class_instantiation_result(errors);
+        }
+        errors.extend(argument_sorts.errors);
+        if !argument_sorts.parameter_list.present {
+            return empty_type_class_instantiation_result(errors);
+        }
+        argument_sort_parameters = argument_sorts.parameters;
+        argument_sort_details = argument_sorts.parameter_details;
+        argument_sorts.parameter_list
+    } else {
+        empty_ast_node()
+    };
+
+    let colon = expect_token(token::TOKEN_COLON);
+    if !colon.errors.is_empty() {
+        errors.extend(colon.errors);
+        return empty_type_class_instantiation_result(errors);
+    }
+
+    let type_class_name_detail = parse_current_type_class_name_with_node_id(max_node_id(
+        current_node_id(),
+        &[type_constructor.clone(), argument_sorts.clone()],
+    ));
+    if parser_errors_have_fatal(&type_class_name_detail.errors) {
+        errors.extend(type_class_name_detail.errors.clone());
+        return empty_type_class_instantiation_result(errors);
+    }
+    errors.extend(type_class_name_detail.errors.clone());
+    let type_class_name = type_class_name_detail.type_class_name.clone();
+    if !type_class_name.present {
+        return empty_type_class_instantiation_result(errors);
+    }
+
+    let lbrace = expect_token(token::TOKEN_LBRACE);
+    if !lbrace.errors.is_empty() {
+        errors.extend(lbrace.errors);
+        return empty_type_class_instantiation_result(errors);
+    }
+
+    let mut sub_nodes = Vec::new();
+    let mut sub_node_function_details = Vec::new();
+    while current_token() != token::TOKEN_RBRACE {
+        let function = expect_token_no_advance(token::TOKEN_FUNCTION);
+        if !function.errors.is_empty() {
+            errors.extend(function.errors);
+            return empty_type_class_instantiation_result(errors);
+        }
+        let function_definition = parse_function_definition(false, true);
+        if parser_errors_have_fatal(&function_definition.errors) {
+            report_parser_warnings(&function_definition.warnings);
+            errors.extend(function_definition.errors.clone());
+            return empty_type_class_instantiation_result(errors);
+        }
+        errors.extend(function_definition.errors.clone());
+        report_parser_warnings(&function_definition.warnings);
+        if !function_definition.function_definition.present {
+            return empty_type_class_instantiation_result(errors);
+        }
+        sub_nodes.push(function_definition.function_definition.clone());
+        sub_node_function_details.push(function_definition);
+    }
+
+    location.end = current_location().end;
+    let rbrace = expect_token(token::TOKEN_RBRACE);
+    if !rbrace.errors.is_empty() {
+        errors.extend(rbrace.errors);
+        return empty_type_class_instantiation_result(errors);
+    }
+
+    let mut node_children = sub_nodes.clone();
+    node_children.push(type_constructor.clone());
+    node_children.push(argument_sorts.clone());
+    node_children.push(type_class_name.clone());
+    ffi::WireTypeClassInstantiationResult {
+        type_class_instantiation: ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(current_node_id(), &node_children)),
+            kind: AST_NODE_KIND_TYPE_CLASS_INSTANTIATION,
+            location,
+            text: empty_string(),
+        },
+        type_constructor,
+        type_constructor_detail,
+        argument_sorts,
+        argument_sort_parameters,
+        argument_sort_details,
+        type_class_name,
+        type_class_name_detail,
+        sub_nodes,
+        sub_node_function_details,
+        errors,
+    }
+}
+
+fn empty_type_class_instantiation_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireTypeClassInstantiationResult {
+    ffi::WireTypeClassInstantiationResult {
+        type_class_instantiation: empty_ast_node(),
+        type_constructor: empty_ast_node(),
+        type_constructor_detail: empty_type_name_result(Vec::new()),
+        argument_sorts: empty_ast_node(),
+        argument_sort_parameters: Vec::new(),
+        argument_sort_details: Vec::new(),
+        type_class_name: empty_ast_node(),
+        type_class_name_detail: empty_type_class_name_result(0),
+        sub_nodes: Vec::new(),
+        sub_node_function_details: Vec::new(),
+        errors,
+    }
+}
+
+pub fn parse_type_definition() -> ffi::WireTypeDefinitionResult {
+    assert!(experimental_solidity_enabled_in_current_source_unit());
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let mut has_builtin_name_parameter = false;
+    let mut builtin_name_parameter = empty_string();
+    let mut builtin_name_parameter_location = empty_source_location();
+    let type_token = expect_token(token::TOKEN_TYPE);
+    if !type_token.errors.is_empty() {
+        return empty_type_definition_result(type_token.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return empty_type_definition_result(parsed_name.errors);
+    }
+
+    let mut argument_parameters = Vec::new();
+    let mut argument_details = Vec::new();
+    let arguments = if current_token() == token::TOKEN_LPAREN {
+        let arguments = parse_parameter_list();
+        if parser_errors_have_fatal(&arguments.errors) {
+            return empty_type_definition_result(arguments.errors);
+        }
+        errors.extend(arguments.errors);
+        if !arguments.parameter_list.present {
+            return empty_type_definition_result(errors);
+        }
+        argument_parameters = arguments.parameters;
+        argument_details = arguments.parameter_details;
+        arguments.parameter_list
+    } else {
+        empty_ast_node()
+    };
+
+    let mut expression_detail = empty_expression_result(Vec::new());
+    let expression = if current_token() == token::TOKEN_ASSIGN {
+        let assign = expect_token(token::TOKEN_ASSIGN);
+        if !assign.errors.is_empty() {
+            errors.extend(assign.errors);
+            return empty_type_definition_result(errors);
+        }
+
+        if current_token() != token::TOKEN_BUILTIN {
+            let expression = parse_expression();
+            if parser_errors_have_fatal(&expression.errors) {
+                errors.extend(expression.errors);
+                return empty_type_definition_result(errors);
+            }
+            errors.extend(expression.errors.clone());
+            if !expression.expression.present {
+                return empty_type_definition_result(errors);
+            }
+            let expression_node = expression.expression.clone();
+            expression_detail = expression;
+            expression_node
+        } else {
+            let builtin = expect_token(token::TOKEN_BUILTIN);
+            if !builtin.errors.is_empty() {
+                errors.extend(builtin.errors);
+                return empty_type_definition_result(errors);
+            }
+            let lparen = expect_token(token::TOKEN_LPAREN);
+            if !lparen.errors.is_empty() {
+                errors.extend(lparen.errors);
+                return empty_type_definition_result(errors);
+            }
+
+            let mut builtin_location = location.clone();
+            builtin_location.end = current_location().end;
+            has_builtin_name_parameter = true;
+            builtin_name_parameter = current_literal();
+            builtin_name_parameter_location = current_location();
+            let builtin_expression = ffi::WireAstNode {
+                present: true,
+                node_id: allocate_node_id_after(arguments.node_id.max(current_node_id())),
+                kind: AST_NODE_KIND_BUILTIN,
+                location: builtin_location,
+                text: builtin_name_parameter.clone(),
+            };
+
+            let string_literal = expect_token(token::TOKEN_STRING_LITERAL);
+            if !string_literal.errors.is_empty() {
+                errors.extend(string_literal.errors);
+                return empty_type_definition_result(errors);
+            }
+            let rparen = expect_token(token::TOKEN_RPAREN);
+            if !rparen.errors.is_empty() {
+                errors.extend(rparen.errors);
+                return empty_type_definition_result(errors);
+            }
+
+            builtin_expression
+        }
+    } else {
+        empty_ast_node()
+    };
+
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return empty_type_definition_result(errors);
+    }
+
+    let nodes = [arguments.clone(), expression.clone()];
+    ffi::WireTypeDefinitionResult {
+        type_definition: ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+            kind: AST_NODE_KIND_TYPE_DEFINITION,
+            location,
+            text: parsed_name.identifier.clone(),
+        },
+        name: parsed_name.identifier,
+        name_location: parsed_name.location,
+        arguments,
+        argument_parameters,
+        argument_details,
+        expression,
+        expression_detail,
+        has_builtin_name_parameter,
+        builtin_name_parameter,
+        builtin_name_parameter_location,
+        errors,
+    }
+}
+
+fn empty_type_definition_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireTypeDefinitionResult {
+    ffi::WireTypeDefinitionResult {
+        type_definition: empty_ast_node(),
+        name: empty_string(),
+        name_location: empty_source_location(),
+        arguments: empty_ast_node(),
+        argument_parameters: Vec::new(),
+        argument_details: Vec::new(),
+        expression: empty_ast_node(),
+        expression_detail: empty_expression_result(Vec::new()),
+        has_builtin_name_parameter: false,
+        builtin_name_parameter: empty_string(),
+        builtin_name_parameter_location: empty_source_location(),
+        errors,
+    }
+}
+
+pub fn parse_simple_statement() -> ffi::WireStatementResult {
+    parse_simple_statement_with_doc(empty_string())
+}
+
+fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+    let _recursion_guard = RecursionGuard::new();
+    let mut errors = Vec::new();
+
+    if experimental_solidity_enabled_in_current_source_unit() && current_token() == token::TOKEN_LET
+    {
+        return parse_postfix_variable_declaration_statement_with_doc(doc_string);
+    }
+
+    if current_token() == token::TOKEN_LPAREN {
+        let tuple_location = current_location();
+        let lparen = expect_token(token::TOKEN_LPAREN);
+        if !lparen.errors.is_empty() {
+            return empty_statement_result(lparen.errors);
+        }
+
+        let mut empty_components = 0usize;
+        while current_token() == token::TOKEN_COMMA {
+            advance();
+            empty_components += 1;
+        }
+
+        let mut lookahead = try_parse_current_index_accessed_path();
+        let path_errors = std::mem::take(&mut lookahead.path.errors);
+        if parser_errors_have_fatal(&path_errors) {
+            errors.extend(path_errors);
+            return empty_statement_result(errors);
+        }
+        errors.extend(path_errors);
+        match lookahead.kind {
+            LOOK_AHEAD_VARIABLE_DECLARATION => {
+                let type_name_result = type_name_from_index_access_structure(lookahead.path);
+                if parser_errors_have_fatal(&type_name_result.errors) {
+                    errors.extend(type_name_result.errors);
+                    return empty_statement_result(errors);
+                }
+                errors.extend(type_name_result.errors.clone());
+
+                let options = VarDeclParserOptions {
+                    allow_location_specifier: true,
+                    ..VarDeclParserOptions::default()
+                };
+                let mut variables = vec![empty_ast_node(); empty_components];
+                let mut variable_details = Vec::new();
+                let mut node_id = type_name_result.type_name.node_id.max(current_node_id());
+                let variable = parse_variable_declaration_with_type_name_result(
+                    options,
+                    type_name_result,
+                    node_id,
+                );
+                if parser_errors_have_fatal(&variable.errors) {
+                    errors.extend(variable.errors);
+                    return empty_statement_result(errors);
+                }
+                errors.extend(variable.errors.clone());
+                if !variable.variable_declaration.present {
+                    return empty_statement_result(errors);
+                }
+                node_id = variable.variable_declaration.node_id.max(node_id);
+                variables.push(variable.variable_declaration.clone());
+                variable_details.push(variable);
+
+                while current_token() != token::TOKEN_RPAREN {
+                    let comma = expect_token(token::TOKEN_COMMA);
+                    if !comma.errors.is_empty() {
+                        errors.extend(comma.errors);
+                        return empty_statement_result(errors);
+                    }
+
+                    if current_token() == token::TOKEN_COMMA
+                        || current_token() == token::TOKEN_RPAREN
+                    {
+                        variables.push(empty_ast_node());
+                    } else {
+                        let variable = parse_variable_declaration_with_options(
+                            options,
+                            empty_ast_node(),
+                            node_id,
+                        );
+                        if parser_errors_have_fatal(&variable.errors) {
+                            errors.extend(variable.errors);
+                            return empty_statement_result(errors);
+                        }
+                        errors.extend(variable.errors.clone());
+                        if !variable.variable_declaration.present {
+                            return empty_statement_result(errors);
+                        }
+                        node_id = variable.variable_declaration.node_id.max(node_id);
+                        variables.push(variable.variable_declaration.clone());
+                        variable_details.push(variable);
+                    }
+                }
+
+                let rparen = expect_token(token::TOKEN_RPAREN);
+                if !rparen.errors.is_empty() {
+                    errors.extend(rparen.errors);
+                    return empty_statement_result(errors);
+                }
+                let assign = expect_token(token::TOKEN_ASSIGN);
+                if !assign.errors.is_empty() {
+                    errors.extend(assign.errors);
+                    return empty_statement_result(errors);
+                }
+                let value = parse_expression();
+                if parser_errors_have_fatal(&value.errors) {
+                    errors.extend(value.errors);
+                    return empty_statement_result(errors);
+                }
+                errors.extend(value.errors.clone());
+                let value_node = value.expression.clone();
+                if !value_node.present {
+                    return empty_statement_result(errors);
+                }
+                let statement = create_variable_declaration_statement_with_start(
+                    doc_string,
+                    variables.clone(),
+                    value_node.clone(),
+                    tuple_location,
+                );
+                let mut result = statement_result(statement, errors);
+                result.variables = variables;
+                result.variable_details = variable_details;
+                result.initial_value = value_node;
+                result.initial_value_detail = value;
+                result
+            }
+            LOOK_AHEAD_EXPRESSION => {
+                let mut components = vec![empty_ast_node(); empty_components];
+                let mut component_details =
+                    vec![empty_expression_result(Vec::new()); empty_components];
+                let expression = parse_expression_with_partial_result(
+                    expression_from_index_access_structure(lookahead.path),
+                );
+                if parser_errors_have_fatal(&expression.errors) {
+                    errors.extend(expression.errors);
+                    return empty_statement_result(errors);
+                }
+                errors.extend(expression.errors.clone());
+                let expression_node = expression.expression.clone();
+                if !expression_node.present {
+                    return empty_statement_result(errors);
+                }
+                components.push(expression_node);
+                component_details.push(expression);
+                while current_token() != token::TOKEN_RPAREN {
+                    let comma = expect_token(token::TOKEN_COMMA);
+                    if !comma.errors.is_empty() {
+                        errors.extend(comma.errors);
+                        return empty_statement_result(errors);
+                    }
+
+                    if current_token() == token::TOKEN_COMMA
+                        || current_token() == token::TOKEN_RPAREN
+                    {
+                        components.push(empty_ast_node());
+                        component_details.push(empty_expression_result(Vec::new()));
+                    } else {
+                        let expression = parse_expression();
+                        if parser_errors_have_fatal(&expression.errors) {
+                            errors.extend(expression.errors);
+                            return empty_statement_result(errors);
+                        }
+                        errors.extend(expression.errors.clone());
+                        let expression_node = expression.expression.clone();
+                        if !expression_node.present {
+                            return empty_statement_result(errors);
+                        }
+                        components.push(expression_node);
+                        component_details.push(expression);
+                    }
+                }
+
+                let mut location = tuple_location;
+                location.end = current_location().end;
+                let rparen = expect_token(token::TOKEN_RPAREN);
+                if !rparen.errors.is_empty() {
+                    errors.extend(rparen.errors);
+                    return empty_statement_result(errors);
+                }
+
+                let tuple_expression = ffi::WireAstNode {
+                    present: true,
+                    node_id: allocate_node_id_after(max_node_id(current_node_id(), &components)),
+                    kind: AST_NODE_KIND_TUPLE_EXPRESSION,
+                    location,
+                    text: empty_string(),
+                };
+                let mut tuple_expression_detail = expression_result(tuple_expression, Vec::new());
+                tuple_expression_detail.components = components;
+                tuple_expression_detail.component_details = component_details;
+                let mut statement = parse_expression_statement_with_partial_result(
+                    doc_string,
+                    tuple_expression_detail,
+                );
+                if parser_errors_have_fatal(&statement.errors) {
+                    errors.extend(std::mem::take(&mut statement.errors));
+                    return empty_statement_result(errors);
+                }
+                errors.extend(std::mem::take(&mut statement.errors));
+                if !statement.statement.present {
+                    return empty_statement_result(errors);
+                }
+                statement.errors = errors;
+                statement
+            }
+            _ => unreachable!(),
+        }
+    } else {
+        let mut lookahead = try_parse_current_index_accessed_path();
+        let path_errors = std::mem::take(&mut lookahead.path.errors);
+        if parser_errors_have_fatal(&path_errors) {
+            errors.extend(path_errors);
+            return empty_statement_result(errors);
+        }
+        errors.extend(path_errors);
+        match lookahead.kind {
+            LOOK_AHEAD_VARIABLE_DECLARATION => {
+                let type_name = type_name_from_index_access_structure(lookahead.path);
+                if parser_errors_have_fatal(&type_name.errors) {
+                    errors.extend(type_name.errors);
+                    return empty_statement_result(errors);
+                }
+                errors.extend(type_name.errors.clone());
+                let mut statement = parse_variable_declaration_statement_with_type_name_result(
+                    doc_string, type_name,
+                );
+                if parser_errors_have_fatal(&statement.errors) {
+                    errors.extend(std::mem::take(&mut statement.errors));
+                    return empty_statement_result(errors);
+                }
+                errors.extend(std::mem::take(&mut statement.errors));
+                if !statement.statement.present {
+                    return empty_statement_result(errors);
+                }
+                statement.errors = errors;
+                statement
+            }
+            LOOK_AHEAD_EXPRESSION => {
+                let mut statement = parse_expression_statement_with_partial_result(
+                    doc_string,
+                    expression_from_index_access_structure(lookahead.path),
+                );
+                if parser_errors_have_fatal(&statement.errors) {
+                    errors.extend(std::mem::take(&mut statement.errors));
+                    return empty_statement_result(errors);
+                }
+                errors.extend(std::mem::take(&mut statement.errors));
+                if !statement.statement.present {
+                    return empty_statement_result(errors);
+                }
+                statement.errors = errors;
+                statement
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn try_parse_current_index_accessed_path() -> ffi::WireLookAheadResult {
+    let statement_type = peek_statement_type(current_token(), peek_next_token());
+    match statement_type {
+        LOOK_AHEAD_VARIABLE_DECLARATION | LOOK_AHEAD_EXPRESSION => {
+            let kind = if experimental_solidity_enabled_in_current_source_unit() {
+                LOOK_AHEAD_EXPRESSION
+            } else {
+                statement_type
+            };
+            ffi::WireLookAheadResult {
+                kind,
+                path: empty_index_accessed_path(),
+            }
+        }
+        _ => {
+            let path = parse_index_accessed_path();
+            let kind = if experimental_solidity_enabled_in_current_source_unit() {
+                LOOK_AHEAD_EXPRESSION
+            } else if current_token() == token::TOKEN_IDENTIFIER
+                || token::is_location_specifier(current_token())
+            {
+                LOOK_AHEAD_VARIABLE_DECLARATION
+            } else {
+                LOOK_AHEAD_EXPRESSION
+            };
+            ffi::WireLookAheadResult { kind, path }
+        }
+    }
+}
+
+pub fn parse_variable_declaration_statement() -> ffi::WireStatementResult {
+    parse_variable_declaration_statement_with_doc(empty_string(), empty_ast_node())
+}
+
+fn parse_variable_declaration_statement_with_doc(
+    doc_string: ffi::WireString,
+    look_ahead_array_type: ffi::WireAstNode,
+) -> ffi::WireStatementResult {
+    parse_variable_declaration_statement_with_type_name_result(
+        doc_string,
+        type_name_from_look_ahead_array_type_node(look_ahead_array_type),
+    )
+}
+
+fn parse_variable_declaration_statement_with_type_name_result(
+    doc_string: ffi::WireString,
+    look_ahead_type_name: ffi::WireTypeNameFromIndexAccessStructureResult,
+) -> ffi::WireStatementResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut errors = Vec::new();
+    let options = VarDeclParserOptions {
+        allow_location_specifier: true,
+        ..VarDeclParserOptions::default()
+    };
+    let variable = parse_variable_declaration_with_type_name_result(
+        options,
+        look_ahead_type_name.clone(),
+        look_ahead_type_name
+            .type_name
+            .node_id
+            .max(current_node_id()),
+    );
+    if parser_errors_have_fatal(&variable.errors) {
+        errors.extend(variable.errors);
+        return empty_statement_result(errors);
+    }
+    errors.extend(variable.errors.clone());
+    let variable_node = variable.variable_declaration.clone();
+    if !variable_node.present {
+        return empty_statement_result(errors);
+    }
+
+    let (value, value_detail) = if current_token() == token::TOKEN_ASSIGN {
+        advance();
+        let parsed_value = parse_expression();
+        if parser_errors_have_fatal(&parsed_value.errors) {
+            errors.extend(parsed_value.errors);
+            return empty_statement_result(errors);
+        }
+        errors.extend(parsed_value.errors.clone());
+        let value = parsed_value.expression.clone();
+        if !value.present {
+            return empty_statement_result(errors);
+        }
+        (value, parsed_value)
+    } else {
+        (empty_ast_node(), empty_expression_result(Vec::new()))
+    };
+
+    let variables = vec![variable_node];
+    let statement =
+        create_variable_declaration_statement(doc_string, variables.clone(), value.clone());
+    let mut result = statement_result(statement, errors);
+    result.variables = variables;
+    result.variable_details = vec![variable];
+    result.initial_value = value;
+    result.initial_value_detail = value_detail;
+    result
+}
+
+fn create_variable_declaration_statement(
+    doc_string: ffi::WireString,
+    variables: Vec<ffi::WireAstNode>,
+    value: ffi::WireAstNode,
+) -> ffi::WireAstNode {
+    let location = variables
+        .iter()
+        .find(|node| node.present)
+        .map(|node| node.location.clone())
+        .unwrap_or_else(empty_source_location);
+    create_variable_declaration_statement_with_start(doc_string, variables, value, location)
+}
+
+fn create_variable_declaration_statement_with_start(
+    doc_string: ffi::WireString,
+    mut variables: Vec<ffi::WireAstNode>,
+    value: ffi::WireAstNode,
+    mut location: ffi::WireSourceLocation,
+) -> ffi::WireAstNode {
+    variables.push(value);
+    if let Some(end) = variables
+        .iter()
+        .rev()
+        .find(|node| node.present)
+        .map(|node| node.location.end)
+    {
+        location.end = end;
+    }
+
+    ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id(), &variables)),
+        kind: AST_NODE_KIND_VARIABLE_DECLARATION_STATEMENT,
+        location,
+        text: doc_string,
+    }
+}
+
+pub fn parse_expression_statement() -> ffi::WireStatementResult {
+    parse_expression_statement_with_partial(empty_string(), empty_ast_node())
+}
+
+fn parse_expression_statement_with_partial(
+    doc_string: ffi::WireString,
+    partial_parser_result: ffi::WireAstNode,
+) -> ffi::WireStatementResult {
+    parse_expression_statement_with_partial_result(
+        doc_string,
+        expression_result(partial_parser_result, Vec::new()),
+    )
+}
+
+fn parse_expression_statement_with_partial_result(
+    doc_string: ffi::WireString,
+    partial_parser_result: ffi::WireExpressionResult,
+) -> ffi::WireStatementResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let expression = parse_expression_with_partial_result(partial_parser_result);
+    if parser_errors_have_fatal(&expression.errors) {
+        return empty_statement_result(expression.errors);
+    }
+    let errors = expression.errors.clone();
+    let expression_detail = expression;
+    let expression = expression_detail.expression.clone();
+    if !expression.present {
+        return empty_statement_result(errors);
+    }
+
+    let statement = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(expression.node_id.max(current_node_id())),
+        kind: AST_NODE_KIND_EXPRESSION_STATEMENT,
+        location: expression.location.clone(),
+        text: doc_string,
+    };
+    let mut result = statement_result(statement, errors);
+    result.expression = expression;
+    result.expression_detail = expression_detail;
+    result
+}
+
+pub fn parse_expression() -> ffi::WireExpressionResult {
+    parse_expression_with_partial(empty_ast_node())
+}
+
+pub fn parse_binary_expression() -> ffi::WireExpressionResult {
+    parse_binary_expression_with_precedence_and_partial(4, empty_ast_node())
+}
+
+fn parse_expression_with_partial(
+    partial_parser_result: ffi::WireAstNode,
+) -> ffi::WireExpressionResult {
+    parse_expression_with_partial_result(expression_result(partial_parser_result, Vec::new()))
+}
+
+fn parse_expression_with_partial_result(
+    partial_parser_result: ffi::WireExpressionResult,
+) -> ffi::WireExpressionResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut errors = Vec::new();
+    let mut parsed_expression =
+        parse_binary_expression_with_precedence_and_partial_result(4, partial_parser_result);
+    if parser_errors_have_fatal(&parsed_expression.errors) {
+        return parsed_expression;
+    }
+    errors.extend(std::mem::take(&mut parsed_expression.errors));
+    let expression = parsed_expression.expression.clone();
+    if !expression.present {
+        return empty_expression_result(errors);
+    }
+    if is_assignment_operator(current_token()) {
+        let assignment_operator = current_token();
+        advance();
+        let right_hand_side = parse_expression();
+        if parser_errors_have_fatal(&right_hand_side.errors) {
+            errors.extend(right_hand_side.errors);
+            return empty_expression_result(errors);
+        }
+        errors.extend(right_hand_side.errors.clone());
+        let right_hand_side_node = right_hand_side.expression.clone();
+        if !right_hand_side_node.present {
+            return empty_expression_result(errors);
+        }
+        let mut location = expression.location.clone();
+        location.end = right_hand_side_node.location.end;
+        let nodes = [expression.clone(), right_hand_side_node.clone()];
+        let assignment = ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+            kind: AST_NODE_KIND_ASSIGNMENT,
+            location,
+            text: token_to_wire_string(assignment_operator),
+        };
+        let mut result = expression_result(assignment, errors);
+        result.left_expression = expression;
+        result.left_expression_detail.push(parsed_expression);
+        result.right_expression = right_hand_side_node;
+        result.right_expression_detail.push(right_hand_side);
+        result
+    } else if current_token() == token::TOKEN_CONDITIONAL {
+        advance();
+        let true_expression = parse_expression();
+        if parser_errors_have_fatal(&true_expression.errors) {
+            errors.extend(true_expression.errors);
+            return empty_expression_result(errors);
+        }
+        errors.extend(true_expression.errors.clone());
+        let true_expression_node = true_expression.expression.clone();
+        if !true_expression_node.present {
+            return empty_expression_result(errors);
+        }
+        let colon = expect_token(token::TOKEN_COLON);
+        if !colon.errors.is_empty() {
+            errors.extend(colon.errors);
+            return empty_expression_result(errors);
+        }
+        let false_expression = parse_expression();
+        if parser_errors_have_fatal(&false_expression.errors) {
+            errors.extend(false_expression.errors);
+            return empty_expression_result(errors);
+        }
+        errors.extend(false_expression.errors.clone());
+        let false_expression_node = false_expression.expression.clone();
+        if !false_expression_node.present {
+            return empty_expression_result(errors);
+        }
+        let mut location = expression.location.clone();
+        location.end = false_expression_node.location.end;
+        let nodes = [
+            expression.clone(),
+            true_expression_node.clone(),
+            false_expression_node.clone(),
+        ];
+        let conditional = ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+            kind: AST_NODE_KIND_CONDITIONAL,
+            location,
+            text: empty_string(),
+        };
+        let mut result = expression_result(conditional, errors);
+        result.condition_expression = expression;
+        result.condition_expression_detail.push(parsed_expression);
+        result.true_expression = true_expression_node;
+        result.true_expression_detail.push(true_expression);
+        result.false_expression = false_expression_node;
+        result.false_expression_detail.push(false_expression);
+        result
+    } else {
+        parsed_expression.errors = errors;
+        parsed_expression
+    }
+}
+
+fn parse_binary_expression_with_precedence_and_partial(
+    min_precedence: i32,
+    partial_parser_result: ffi::WireAstNode,
+) -> ffi::WireExpressionResult {
+    parse_binary_expression_with_precedence_and_partial_result(
+        min_precedence,
+        expression_result(partial_parser_result, Vec::new()),
+    )
+}
+
+fn parse_binary_expression_with_precedence_and_partial_result(
+    min_precedence: i32,
+    partial_parser_result: ffi::WireExpressionResult,
+) -> ffi::WireExpressionResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut errors = Vec::new();
+    let mut parsed_expression = parse_unary_expression_with_partial_result(partial_parser_result);
+    if parser_errors_have_fatal(&parsed_expression.errors) {
+        return parsed_expression;
+    }
+    errors.extend(std::mem::take(&mut parsed_expression.errors));
+    let mut expression = parsed_expression.expression.clone();
+    if !expression.present {
+        return empty_expression_result(errors);
+    }
+    let mut precedence = token_precedence(
+        current_token(),
+        experimental_solidity_enabled_in_current_source_unit(),
+    );
+    let mut result = parsed_expression;
+
+    while precedence >= min_precedence {
+        while token_precedence(
+            current_token(),
+            experimental_solidity_enabled_in_current_source_unit(),
+        ) == precedence
+        {
+            let operator = current_token();
+            let left_detail = result;
+            let left_expression = expression.clone();
+            advance();
+
+            let right = if operator == token::TOKEN_EXP {
+                parse_binary_expression_with_precedence_and_partial(precedence, empty_ast_node())
+            } else {
+                parse_binary_expression_with_precedence_and_partial(
+                    precedence + 1,
+                    empty_ast_node(),
+                )
+            };
+            if parser_errors_have_fatal(&right.errors) {
+                errors.extend(right.errors);
+                return empty_expression_result(errors);
+            }
+            errors.extend(right.errors.clone());
+            let right_expression = right.expression.clone();
+            if !right_expression.present {
+                return empty_expression_result(errors);
+            }
+
+            let mut location = expression.location.clone();
+            location.end = right_expression.location.end;
+            let nodes = [expression.clone(), right_expression.clone()];
+            let binary_operation = ffi::WireAstNode {
+                present: true,
+                node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+                kind: AST_NODE_KIND_BINARY_OPERATION,
+                location,
+                text: token_to_wire_string(operator),
+            };
+            result = expression_result(binary_operation.clone(), Vec::new());
+            result.left_expression = left_expression;
+            result.left_expression_detail.push(left_detail);
+            result.right_expression = right_expression;
+            result.right_expression_detail.push(right);
+            expression = binary_operation;
+        }
+        precedence -= 1;
+    }
+
+    result.errors = errors;
+    result
+}
+
+pub fn parse_unary_expression() -> ffi::WireExpressionResult {
+    parse_unary_expression_with_partial(empty_ast_node())
+}
+
+fn parse_unary_expression_with_partial(
+    partial_parser_result: ffi::WireAstNode,
+) -> ffi::WireExpressionResult {
+    parse_unary_expression_with_partial_result(expression_result(partial_parser_result, Vec::new()))
+}
+
+fn parse_unary_expression_with_partial_result(
+    partial_parser_result: ffi::WireExpressionResult,
+) -> ffi::WireExpressionResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut errors = Vec::new();
+    let token = current_token();
+    let has_partial = partial_parser_result.expression.present;
+
+    if !has_partial && token == token::TOKEN_ADD {
+        errors.push(fatal_parser_error(9636, "Use of unary + is disallowed."));
+        return empty_expression_result(errors);
+    }
+
+    if !has_partial && (is_unary_operator(token) || is_count_operator(token)) {
+        let mut location = current_location();
+        advance();
+        let sub_expression = parse_unary_expression();
+        if parser_errors_have_fatal(&sub_expression.errors) {
+            return sub_expression;
+        }
+        errors.extend(sub_expression.errors.clone());
+        let sub_expression_node = sub_expression.expression.clone();
+        if !sub_expression_node.present {
+            return empty_expression_result(errors);
+        }
+        location.end = sub_expression_node.location.end;
+
+        let unary_operation = ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(sub_expression_node.node_id.max(current_node_id())),
+            kind: AST_NODE_KIND_UNARY_OPERATION,
+            location,
+            text: token_to_wire_string(token),
+        };
+        let mut result = expression_result(unary_operation, errors);
+        result.sub_expression = sub_expression_node;
+        result.sub_expression_detail.push(sub_expression);
+        result.is_prefix_operation = true;
+        return result;
+    }
+
+    let mut parsed_sub_expression =
+        parse_left_hand_side_expression_with_partial_result(partial_parser_result);
+    if parser_errors_have_fatal(&parsed_sub_expression.errors) {
+        return parsed_sub_expression;
+    }
+    errors.extend(std::mem::take(&mut parsed_sub_expression.errors));
+    let sub_expression = parsed_sub_expression.expression.clone();
+    if !sub_expression.present {
+        return empty_expression_result(errors);
+    }
+    let token = current_token();
+    if !is_count_operator(token) {
+        parsed_sub_expression.errors = errors;
+        return parsed_sub_expression;
+    }
+
+    let mut location = sub_expression.location.clone();
+    location.end = current_location().end;
+    advance();
+    let unary_operation = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(sub_expression.node_id.max(current_node_id())),
+        kind: AST_NODE_KIND_UNARY_OPERATION,
+        location,
+        text: token_to_wire_string(token),
+    };
+    let mut result = expression_result(unary_operation, errors);
+    result.sub_expression = sub_expression;
+    result.sub_expression_detail.push(parsed_sub_expression);
+    result.is_prefix_operation = false;
+    result
+}
+
+pub fn parse_left_hand_side_expression() -> ffi::WireExpressionResult {
+    parse_left_hand_side_expression_with_partial(empty_ast_node())
+}
+
+fn parse_left_hand_side_expression_with_partial(
+    partial_parser_result: ffi::WireAstNode,
+) -> ffi::WireExpressionResult {
+    parse_left_hand_side_expression_with_partial_result(expression_result(
+        partial_parser_result,
+        Vec::new(),
+    ))
+}
+
+fn parse_left_hand_side_expression_with_partial_result(
+    partial_parser_result: ffi::WireExpressionResult,
+) -> ffi::WireExpressionResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut errors = Vec::new();
+    let mut result = if partial_parser_result.expression.present {
+        partial_parser_result
+    } else if current_token() == token::TOKEN_NEW {
+        let mut location = current_location();
+        let new = expect_token(token::TOKEN_NEW);
+        if !new.errors.is_empty() {
+            return empty_expression_result(new.errors);
+        }
+        let type_name_detail = parse_type_name();
+        if parser_errors_have_fatal(&type_name_detail.errors) {
+            return empty_expression_result(type_name_detail.errors);
+        }
+        errors.extend(type_name_detail.errors.clone());
+        let type_name = type_name_detail.type_name.clone();
+        if !type_name.present {
+            return empty_expression_result(errors);
+        }
+        location.end = type_name.location.end;
+        let new_expression = ffi::WireAstNode {
+            present: true,
+            node_id: allocate_node_id_after(type_name.node_id.max(current_node_id())),
+            kind: AST_NODE_KIND_NEW_EXPRESSION,
+            location,
+            text: empty_string(),
+        };
+        let mut result = expression_result(new_expression, Vec::new());
+        result.type_name = type_name;
+        result.type_name_detail = type_name_detail;
+        result
+    } else if current_token() == token::TOKEN_PAYABLE {
+        let mut location = current_location();
+        let payable = expect_token(token::TOKEN_PAYABLE);
+        if !payable.errors.is_empty() {
+            return empty_expression_result(payable.errors);
+        }
+        location.end = current_location().end;
+        let lparen = expect_token_no_advance(token::TOKEN_LPAREN);
+        if !lparen.errors.is_empty() {
+            return empty_expression_result(lparen.errors);
+        }
+
+        let node_id = allocate_node_id_after_reserving(current_node_id(), 2);
+        let expression_type = ffi::WireAstNode {
+            present: true,
+            node_id: node_id - 1,
+            kind: AST_NODE_KIND_ELEMENTARY_TYPE_NAME,
+            location: location.clone(),
+            text: ffi::WireString {
+                bytes: b"address payable".to_vec(),
+            },
+        };
+        let expression = ffi::WireAstNode {
+            present: true,
+            node_id,
+            kind: AST_NODE_KIND_ELEMENTARY_TYPE_NAME_EXPRESSION,
+            location,
+            text: expression_type.text.clone(),
+        };
+        let mut result = expression_result(expression, Vec::new());
+        result.expression_type = expression_type;
+        result
+    } else {
+        let mut primary_expression = parse_primary_expression();
+        if parser_errors_have_fatal(&primary_expression.errors) {
+            return primary_expression;
+        }
+        errors.extend(std::mem::take(&mut primary_expression.errors));
+        primary_expression
+    };
+    let mut expression = result.expression.clone();
+    if !expression.present {
+        return empty_expression_result(errors);
+    }
+
+    loop {
+        match current_token() {
+            token::TOKEN_LBRACK => {
+                let base_expression = expression.clone();
+                let base_expression_type = result.expression_type.clone();
+                let base_expression_detail = result;
+                let mut location = expression.location.clone();
+                advance();
+                let index = if current_token() != token::TOKEN_RBRACK
+                    && current_token() != token::TOKEN_COLON
+                {
+                    let index = parse_expression();
+                    if parser_errors_have_fatal(&index.errors) {
+                        errors.extend(index.errors);
+                        return empty_expression_result(errors);
+                    }
+                    errors.extend(index.errors.clone());
+                    let index_node = index.expression.clone();
+                    if !index_node.present {
+                        return empty_expression_result(errors);
+                    }
+                    (index_node, vec![index])
+                } else {
+                    (empty_ast_node(), Vec::new())
+                };
+
+                if current_token() == token::TOKEN_COLON {
+                    let colon = expect_token(token::TOKEN_COLON);
+                    if !colon.errors.is_empty() {
+                        errors.extend(colon.errors);
+                        return empty_expression_result(errors);
+                    }
+                    let end_index = if current_token() != token::TOKEN_RBRACK {
+                        let end_index = parse_expression();
+                        if parser_errors_have_fatal(&end_index.errors) {
+                            errors.extend(end_index.errors);
+                            return empty_expression_result(errors);
+                        }
+                        errors.extend(end_index.errors.clone());
+                        let end_index_node = end_index.expression.clone();
+                        if !end_index_node.present {
+                            return empty_expression_result(errors);
+                        }
+                        (end_index_node, vec![end_index])
+                    } else {
+                        (empty_ast_node(), Vec::new())
+                    };
+                    location.end = current_location().end;
+                    let rbrack = expect_token(token::TOKEN_RBRACK);
+                    if !rbrack.errors.is_empty() {
+                        errors.extend(rbrack.errors);
+                        return empty_expression_result(errors);
+                    }
+                    let nodes = [
+                        base_expression.clone(),
+                        index.0.clone(),
+                        end_index.0.clone(),
+                    ];
+                    let index_range_access = ffi::WireAstNode {
+                        present: true,
+                        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+                        kind: AST_NODE_KIND_INDEX_RANGE_ACCESS,
+                        location,
+                        text: empty_string(),
+                    };
+                    result = expression_result(index_range_access.clone(), Vec::new());
+                    result.base_expression = base_expression;
+                    result.base_expression_detail.push(base_expression_detail);
+                    result.base_expression_type = base_expression_type;
+                    result.index_expression = index.0;
+                    result.index_expression_detail = index.1;
+                    result.end_index_expression = end_index.0;
+                    result.end_index_expression_detail = end_index.1;
+                    expression = index_range_access;
+                } else {
+                    location.end = current_location().end;
+                    let rbrack = expect_token(token::TOKEN_RBRACK);
+                    if !rbrack.errors.is_empty() {
+                        errors.extend(rbrack.errors);
+                        return empty_expression_result(errors);
+                    }
+                    let nodes = [base_expression.clone(), index.0.clone()];
+                    let index_access = ffi::WireAstNode {
+                        present: true,
+                        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+                        kind: AST_NODE_KIND_INDEX_ACCESS,
+                        location,
+                        text: empty_string(),
+                    };
+                    result = expression_result(index_access.clone(), Vec::new());
+                    result.base_expression = base_expression;
+                    result.base_expression_detail.push(base_expression_detail);
+                    result.base_expression_type = base_expression_type;
+                    result.index_expression = index.0;
+                    result.index_expression_detail = index.1;
+                    expression = index_access;
+                }
+            }
+            token::TOKEN_PERIOD => {
+                let base_expression = expression.clone();
+                let base_expression_type = result.expression_type.clone();
+                let base_expression_detail = result;
+                advance();
+                let member_location = current_location();
+                let member_name = expect_identifier_token_or_address(
+                    current_token(),
+                    current_literal(),
+                    current_token_name(),
+                );
+                advance_by(member_name.tokens_consumed);
+                if !member_name.errors.is_empty() {
+                    errors.extend(member_name.errors);
+                    return empty_expression_result(errors);
+                }
+                let mut location = expression.location.clone();
+                location.end = member_location.end;
+                let member_access = ffi::WireAstNode {
+                    present: true,
+                    node_id: allocate_node_id_after(expression.node_id.max(current_node_id())),
+                    kind: AST_NODE_KIND_MEMBER_ACCESS,
+                    location,
+                    text: member_name.value,
+                };
+                result = expression_result(member_access.clone(), Vec::new());
+                result.base_expression = base_expression;
+                result.base_expression_detail.push(base_expression_detail);
+                result.base_expression_type = base_expression_type;
+                result.member_name_location = member_location;
+                expression = member_access;
+            }
+            token::TOKEN_LPAREN => {
+                let callee = expression.clone();
+                let callee_expression_type = result.expression_type.clone();
+                let callee_detail = result;
+                advance();
+                let mut function_call_arguments = parse_function_call_arguments();
+                if parser_errors_have_fatal(&function_call_arguments.errors) {
+                    errors.extend(std::mem::take(&mut function_call_arguments.errors));
+                    return empty_expression_result(errors);
+                }
+                errors.extend(std::mem::take(&mut function_call_arguments.errors));
+                let mut location = expression.location.clone();
+                location.end = current_location().end;
+                let rparen = expect_token(token::TOKEN_RPAREN);
+                if !rparen.errors.is_empty() {
+                    errors.extend(rparen.errors);
+                    return empty_expression_result(errors);
+                }
+                let mut nodes = function_call_arguments.arguments.clone();
+                nodes.push(callee.clone());
+                let function_call = ffi::WireAstNode {
+                    present: true,
+                    node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+                    kind: AST_NODE_KIND_FUNCTION_CALL,
+                    location,
+                    text: empty_string(),
+                };
+                result = expression_result(function_call.clone(), Vec::new());
+                result.base_expression = callee;
+                result.base_expression_detail.push(callee_detail);
+                result.base_expression_type = callee_expression_type;
+                result.arguments = function_call_arguments.arguments;
+                result.argument_details = function_call_arguments.argument_details;
+                result.parameter_names = function_call_arguments.parameter_names;
+                result.parameter_name_locations = function_call_arguments.parameter_name_locations;
+                expression = function_call;
+            }
+            token::TOKEN_LBRACE => {
+                if peek_next_token() != token::TOKEN_IDENTIFIER
+                    || peek_next_next_token() != token::TOKEN_COLON
+                {
+                    result.errors = errors;
+                    return result;
+                }
+
+                let callee = expression.clone();
+                let callee_expression_type = result.expression_type.clone();
+                let callee_detail = result;
+                let lbrace = expect_token(token::TOKEN_LBRACE);
+                if !lbrace.errors.is_empty() {
+                    errors.extend(lbrace.errors);
+                    return empty_expression_result(errors);
+                }
+                let mut option_list = parse_named_arguments();
+                if parser_errors_have_fatal(&option_list.errors) {
+                    errors.extend(std::mem::take(&mut option_list.errors));
+                    return empty_expression_result(errors);
+                }
+                errors.extend(std::mem::take(&mut option_list.errors));
+                let mut location = expression.location.clone();
+                location.end = current_location().end;
+                let rbrace = expect_token(token::TOKEN_RBRACE);
+                if !rbrace.errors.is_empty() {
+                    errors.extend(rbrace.errors);
+                    return empty_expression_result(errors);
+                }
+                let mut nodes = option_list.arguments.clone();
+                nodes.push(callee.clone());
+                let function_call_options = ffi::WireAstNode {
+                    present: true,
+                    node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+                    kind: AST_NODE_KIND_FUNCTION_CALL_OPTIONS,
+                    location,
+                    text: empty_string(),
+                };
+                result = expression_result(function_call_options.clone(), Vec::new());
+                result.base_expression = callee;
+                result.base_expression_detail.push(callee_detail);
+                result.base_expression_type = callee_expression_type;
+                result.arguments = option_list.arguments;
+                result.argument_details = option_list.argument_details;
+                result.parameter_names = option_list.parameter_names;
+                result.parameter_name_locations = option_list.parameter_name_locations;
+                expression = function_call_options;
+            }
+            _ => {
+                result.errors = errors;
+                return result;
+            }
+        }
+    }
+}
+
+fn is_unary_operator(token: u32) -> bool {
+    token::is_unary_op(token)
+}
+
+fn is_count_operator(token: u32) -> bool {
+    token::is_count_op(token)
+}
+
+fn is_assignment_operator(token: u32) -> bool {
+    token::is_assignment_op(token)
+}
+
+fn token_to_wire_string(token: u32) -> ffi::WireString {
+    ffi::WireString {
+        bytes: token_to_string(token)
+            .unwrap_or_default()
+            .as_bytes()
+            .to_vec(),
+    }
+}
+
+pub fn parse_literal() -> ffi::WireExpressionResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut errors = Vec::new();
+    let initial_token = current_token();
+    let mut location = current_location();
+    let mut value = current_literal().bytes;
+    let mut literal_subdenomination = token::TOKEN_ILLEGAL;
+
+    match initial_token {
+        token::TOKEN_TRUE_LITERAL | token::TOKEN_FALSE_LITERAL | token::TOKEN_NUMBER => {
+            location.end = current_location().end;
+            advance();
+        }
+        token::TOKEN_STRING_LITERAL
+        | token::TOKEN_UNICODE_STRING_LITERAL
+        | token::TOKEN_HEX_STRING_LITERAL => {
+            while peek_next_token() == initial_token {
+                advance();
+                value.extend(current_literal().bytes);
+            }
+            location.end = current_location().end;
+            advance();
+            if current_token() == token::TOKEN_ILLEGAL {
+                let message = current_error();
+                errors.push(fatal_parser_error(5428, &message));
+                return empty_expression_result(errors);
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    if initial_token == token::TOKEN_NUMBER && is_subdenomination(current_token()) {
+        literal_subdenomination = current_token();
+        location.end = current_location().end;
+        advance();
+    }
+
+    let literal = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(current_node_id()),
+        kind: AST_NODE_KIND_LITERAL,
+        location,
+        text: ffi::WireString { bytes: value },
+    };
+    let mut result = expression_result(literal, errors);
+    result.literal_token = initial_token;
+    result.literal_subdenomination = literal_subdenomination;
+    result
+}
+
+fn is_subdenomination(token: u32) -> bool {
+    token::is_ether_subdenomination(token) || token::is_time_subdenomination(token)
+}
+
+pub fn parse_primary_expression() -> ffi::WireExpressionResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut errors = Vec::new();
+    let token = current_token();
+    match token {
+        token::TOKEN_TRUE_LITERAL
+        | token::TOKEN_FALSE_LITERAL
+        | token::TOKEN_NUMBER
+        | token::TOKEN_STRING_LITERAL
+        | token::TOKEN_UNICODE_STRING_LITERAL
+        | token::TOKEN_HEX_STRING_LITERAL => parse_literal(),
+        token::TOKEN_IDENTIFIER => {
+            let location = current_location();
+            let literal = get_literal_and_advance(current_literal());
+            advance_by(literal.tokens_consumed);
+            expression_result(
+                ffi::WireAstNode {
+                    present: true,
+                    node_id: allocate_node_id_after(current_node_id()),
+                    kind: AST_NODE_KIND_IDENTIFIER,
+                    location,
+                    text: literal.value,
+                },
+                errors,
+            )
+        }
+        token::TOKEN_TYPE => {
+            let location = current_location();
+            advance();
+            expression_result(
+                ffi::WireAstNode {
+                    present: true,
+                    node_id: allocate_node_id_after(current_node_id()),
+                    kind: AST_NODE_KIND_IDENTIFIER,
+                    location,
+                    text: ffi::WireString {
+                        bytes: b"type".to_vec(),
+                    },
+                },
+                errors,
+            )
+        }
+        token::TOKEN_LPAREN | token::TOKEN_LBRACK => {
+            let mut location = current_location();
+            advance();
+            let mut components = Vec::new();
+            let mut component_details = Vec::new();
+            let opposite_token = if token == token::TOKEN_LPAREN {
+                token::TOKEN_RPAREN
+            } else {
+                token::TOKEN_RBRACK
+            };
+            let is_array = token == token::TOKEN_LBRACK;
+
+            if current_token() != opposite_token {
+                loop {
+                    if current_token() != token::TOKEN_COMMA && current_token() != opposite_token {
+                        let component = parse_expression();
+                        if parser_errors_have_fatal(&component.errors) {
+                            errors.extend(component.errors);
+                            return empty_expression_result(errors);
+                        }
+                        errors.extend(component.errors.clone());
+                        let component_node = component.expression.clone();
+                        if !component_node.present {
+                            return empty_expression_result(errors);
+                        }
+                        components.push(component_node);
+                        component_details.push(component);
+                    } else if is_array {
+                        errors.push(parser_error(
+                            4799,
+                            "Expected expression (inline array elements cannot be omitted).",
+                        ));
+                    } else {
+                        components.push(empty_ast_node());
+                        component_details.push(empty_expression_result(Vec::new()));
+                    }
+
+                    if current_token() == opposite_token {
+                        break;
+                    }
+
+                    let comma = expect_token(token::TOKEN_COMMA);
+                    if !comma.errors.is_empty() {
+                        errors.extend(comma.errors);
+                        return empty_expression_result(errors);
+                    }
+                }
+            }
+
+            location.end = current_location().end;
+            let close = expect_token(opposite_token);
+            if !close.errors.is_empty() {
+                errors.extend(close.errors);
+                return empty_expression_result(errors);
+            }
+
+            let tuple_expression = ffi::WireAstNode {
+                present: true,
+                node_id: allocate_node_id_after(max_node_id(current_node_id(), &components)),
+                kind: if is_array {
+                    AST_NODE_KIND_INLINE_ARRAY_EXPRESSION
+                } else {
+                    AST_NODE_KIND_TUPLE_EXPRESSION
+                },
+                location,
+                text: empty_string(),
+            };
+            let mut result = expression_result(tuple_expression, errors);
+            result.components = components;
+            result.component_details = component_details;
+            result.is_inline_array = is_array;
+            result
+        }
+        token::TOKEN_ILLEGAL => {
+            let message = current_error();
+            errors.push(fatal_parser_error(8936, &message));
+            empty_expression_result(errors)
+        }
+        _ if token::is_elementary_type_name(token) => {
+            let result = elementary_type_name_expression_result_from_current_token();
+            advance();
+            result
+        }
+        _ => {
+            errors.push(fatal_parser_error(6933, "Expected primary expression."));
+            empty_expression_result(errors)
+        }
+    }
+}
+
+pub fn parse_function_call_arguments() -> ffi::WireFunctionCallArguments {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut ret = empty_function_call_arguments();
+
+    let current = current_token();
+    if current == token::TOKEN_LBRACE {
+        let open_brace = expect_token(token::TOKEN_LBRACE);
+        ret.tokens_consumed += open_brace.tokens_consumed;
+        if !open_brace.errors.is_empty() {
+            ret.errors.extend(open_brace.errors);
+            return ret;
+        }
+
+        let mut named_arguments = parse_named_arguments();
+        named_arguments.tokens_consumed += open_brace.tokens_consumed;
+        ret = named_arguments;
+        if parser_errors_have_fatal(&ret.errors) {
+            return ret;
+        }
+
+        let close_brace = expect_token(token::TOKEN_RBRACE);
+        ret.tokens_consumed += close_brace.tokens_consumed;
+        ret.errors.extend(close_brace.errors);
+    } else {
+        ret = parse_function_call_list_arguments_with_errors();
+    }
+
+    ret
+}
+
+pub fn parse_named_arguments() -> ffi::WireFunctionCallArguments {
+    let start_cursor = parser_cursor();
+    let mut ret = empty_function_call_arguments();
+
+    let mut first = true;
+    while current_token() != token::TOKEN_RBRACE {
+        if !first {
+            let comma = expect_token(token::TOKEN_COMMA);
+            if !comma.errors.is_empty() {
+                ret.errors.extend(comma.errors);
+                return function_call_arguments_with_consumed(ret, start_cursor);
+            }
+        }
+
+        let identifier_with_location = expect_identifier_with_location(
+            current_token(),
+            current_literal(),
+            current_token_name(),
+            current_location(),
+        );
+        advance_by(identifier_with_location.tokens_consumed);
+        if !identifier_with_location.errors.is_empty() {
+            ret.errors.extend(identifier_with_location.errors);
+            return function_call_arguments_with_consumed(ret, start_cursor);
+        }
+
+        ret.parameter_names
+            .push(identifier_with_location.identifier);
+        ret.parameter_name_locations
+            .push(identifier_with_location.location);
+
+        let colon = expect_token(token::TOKEN_COLON);
+        if !colon.errors.is_empty() {
+            ret.errors.extend(colon.errors);
+            return function_call_arguments_with_consumed(ret, start_cursor);
+        }
+
+        let argument = parse_expression();
+        if parser_errors_have_fatal(&argument.errors) {
+            ret.errors.extend(argument.errors);
+            return function_call_arguments_with_consumed(ret, start_cursor);
+        }
+        ret.errors.extend(argument.errors.clone());
+        let argument_node = argument.expression.clone();
+        if !argument_node.present {
+            return function_call_arguments_with_consumed(ret, start_cursor);
+        }
+        ret.arguments.push(argument_node);
+        ret.argument_details.push(argument);
+
+        if current_token() == token::TOKEN_COMMA && peek_next_token() == token::TOKEN_RBRACE {
+            ret.errors
+                .push(parser_error(2074, "Unexpected trailing comma."));
+            advance();
+        }
+
+        first = false;
+    }
+
+    function_call_arguments_with_consumed(ret, start_cursor)
+}
+
+pub fn expect_identifier_with_location(
+    token: u32,
+    literal: ffi::WireString,
+    token_name: String,
+    location: ffi::WireSourceLocation,
+) -> ffi::WireIdentifierWithLocation {
+    let identifier = expect_identifier_token_at(token, literal, token_name, location.clone());
+    if !identifier.errors.is_empty() {
+        return ffi::WireIdentifierWithLocation {
+            identifier: empty_string(),
+            location,
+            tokens_consumed: identifier.tokens_consumed,
+            errors: identifier.errors,
+        };
+    }
+
+    ffi::WireIdentifierWithLocation {
+        identifier: identifier.value,
+        location,
+        tokens_consumed: identifier.tokens_consumed,
+        errors: Vec::new(),
+    }
+}
+
+pub fn variable_declaration_start(current_token: u32, next_token: u32) -> bool {
+    current_token == token::TOKEN_IDENTIFIER
+        || current_token == token::TOKEN_MAPPING
+        || token::is_elementary_type_name(current_token)
+        || (current_token == token::TOKEN_FUNCTION && next_token == token::TOKEN_LPAREN)
+}
+
+pub fn find_license_string(
+    source: ffi::WireString,
+    nodes: Vec<ffi::WireAstNode>,
+    source_id: i64,
+) -> ffi::WireLicenseStringResult {
+    let mut sequences_to_search = vec![(0usize, source.bytes.len())];
+    for node in nodes {
+        if node.present && source_location_has_text(&node.location) {
+            let start = node.location.start as usize;
+            let end = node.location.end as usize;
+            if let Some((_, sequence_end)) = sequences_to_search.last_mut() {
+                *sequence_end = start;
+            }
+            sequences_to_search.push((end, source.bytes.len()));
+        }
+    }
+
+    let mut license_names = Vec::new();
+    for (start, end) in sequences_to_search {
+        find_license_declarations(&source.bytes, start, end, &mut license_names);
+    }
+
+    let diagnostic_location = ffi::WireSourceLocation {
+        start: -1,
+        end: -1,
+        source_id,
+    };
+
+    if license_names.len() == 1 {
+        let license = license_names.remove(0);
+        if is_valid_license_name(&license) {
+            return ffi::WireLicenseStringResult {
+                license: ffi::WireOptionalString {
+                    has_value: true,
+                    value: ffi::WireString { bytes: license },
+                },
+                diagnostics: Vec::new(),
+            };
+        }
+
+        return ffi::WireLicenseStringResult {
+            license: empty_optional_string(),
+            diagnostics: vec![ffi::WireParserDiagnostic {
+                error_id: 1114,
+                message: "Invalid SPDX license identifier.".to_string(),
+                location: diagnostic_location,
+                fatal: false,
+                warning: false,
+            }],
+        };
+    }
+
+    if license_names.is_empty() {
+        return ffi::WireLicenseStringResult {
+            license: empty_optional_string(),
+            diagnostics: vec![ffi::WireParserDiagnostic {
+                error_id: 1878,
+                message: "SPDX license identifier not provided in source file. Before publishing, consider adding a comment containing \"SPDX-License-Identifier: <SPDX-License>\" to each source file. Use \"SPDX-License-Identifier: UNLICENSED\" for non-open-source code. Please see https://spdx.org for more information.".to_string(),
+                location: diagnostic_location,
+                fatal: false,
+                warning: true,
+            }],
+        };
+    }
+
+    ffi::WireLicenseStringResult {
+        license: empty_optional_string(),
+        diagnostics: vec![ffi::WireParserDiagnostic {
+            error_id: 3716,
+            message: "Multiple SPDX license identifiers found in source file. Use \"AND\" or \"OR\" to combine multiple licenses. Please see https://spdx.org for more information.".to_string(),
+            location: diagnostic_location,
+            fatal: false,
+            warning: false,
+        }],
+    }
+}
+
+pub fn try_parse_index_accessed_path(
+    current_token: u32,
+    next_token: u32,
+    experimental_solidity_enabled: bool,
+    parsed_path: ffi::WireIndexAccessedPath,
+    token_after_path: u32,
+) -> ffi::WireLookAheadResult {
+    let statement_type = peek_statement_type(current_token, next_token);
+    match statement_type {
+        LOOK_AHEAD_VARIABLE_DECLARATION | LOOK_AHEAD_EXPRESSION => {
+            let kind = if experimental_solidity_enabled {
+                LOOK_AHEAD_EXPRESSION
+            } else {
+                statement_type
+            };
+            ffi::WireLookAheadResult {
+                kind,
+                path: empty_index_accessed_path(),
+            }
+        }
+        _ => {
+            if experimental_solidity_enabled {
+                return ffi::WireLookAheadResult {
+                    kind: LOOK_AHEAD_EXPRESSION,
+                    path: parsed_path,
+                };
+            }
+
+            let kind = if token_after_path == token::TOKEN_IDENTIFIER
+                || token::is_location_specifier(token_after_path)
+            {
+                LOOK_AHEAD_VARIABLE_DECLARATION
+            } else {
+                LOOK_AHEAD_EXPRESSION
+            };
+            ffi::WireLookAheadResult {
+                kind,
+                path: parsed_path,
+            }
+        }
+    }
+}
+
+pub fn peek_statement_type(current_token: u32, next_token: u32) -> u8 {
+    let might_be_type_name =
+        token::is_elementary_type_name(current_token) || current_token == token::TOKEN_IDENTIFIER;
+
+    if current_token == token::TOKEN_MAPPING || current_token == token::TOKEN_FUNCTION {
+        return LOOK_AHEAD_VARIABLE_DECLARATION;
+    }
+
+    if might_be_type_name {
+        if token::is_elementary_type_name(current_token)
+            && token::is_state_mutability_specifier(next_token)
+        {
+            return LOOK_AHEAD_VARIABLE_DECLARATION;
+        }
+        if next_token == token::TOKEN_IDENTIFIER || token::is_location_specifier(next_token) {
+            return LOOK_AHEAD_VARIABLE_DECLARATION;
+        }
+        if next_token == token::TOKEN_LBRACK || next_token == token::TOKEN_PERIOD {
+            return LOOK_AHEAD_INDEX_ACCESS_STRUCTURE;
+        }
+    }
+
+    LOOK_AHEAD_EXPRESSION
+}
+
+pub fn parse_index_accessed_path() -> ffi::WireIndexAccessedPath {
+    let mut iap = empty_index_accessed_path();
+    let mut errors = Vec::new();
+    let mut node_id = current_node_id();
+
+    if current_token() == token::TOKEN_IDENTIFIER {
+        let identifier = parse_current_identifier_with_node_id(node_id);
+        if !identifier.errors.is_empty() || !identifier.identifier.present {
+            errors.extend(identifier.errors);
+            iap.errors = errors;
+            return iap;
+        }
+        node_id = identifier.current_node_id;
+        iap.path.push(identifier.identifier);
+        iap.path_expression_types.push(empty_ast_node());
+        while current_token() == token::TOKEN_PERIOD {
+            advance();
+            if experimental_solidity_enabled_in_current_source_unit()
+                && current_token() == token::TOKEN_NUMBER
+            {
+                let identifier = identifier_from_current_literal_and_advance_with_node_id(node_id);
+                node_id = identifier.current_node_id;
+                iap.path.push(identifier.identifier);
+                iap.path_expression_types.push(empty_ast_node());
+            } else {
+                let identifier = parse_current_identifier_or_address_with_node_id(node_id);
+                if !identifier.errors.is_empty() || !identifier.identifier.present {
+                    errors.extend(identifier.errors);
+                    iap.errors = errors;
+                    return iap;
+                }
+                node_id = identifier.current_node_id;
+                iap.path.push(identifier.identifier);
+                iap.path_expression_types.push(empty_ast_node());
+            }
+        }
+    } else if token::is_elementary_type_name(current_token()) {
+        let expression = elementary_type_name_expression_result_from_current_token();
+        iap.path.push(expression.expression);
+        iap.path_expression_types.push(expression.expression_type);
+        advance();
+    } else {
+        return iap;
+    }
+
+    while current_token() == token::TOKEN_LBRACK {
+        let lbrack = expect_token(token::TOKEN_LBRACK);
+        if !lbrack.errors.is_empty() {
+            errors.extend(lbrack.errors);
+            iap.errors = errors;
+            return iap;
+        }
+        let mut index = empty_ast_node();
+        let mut index_detail = empty_expression_result(Vec::new());
+        if current_token() != token::TOKEN_RBRACK && current_token() != token::TOKEN_COLON {
+            let parsed_index = parse_expression();
+            if parser_errors_have_fatal(&parsed_index.errors) {
+                errors.extend(parsed_index.errors);
+                iap.errors = errors;
+                return iap;
+            }
+            errors.extend(parsed_index.errors.clone());
+            index = parsed_index.expression.clone();
+            if !index.present {
+                iap.errors = errors;
+                return iap;
+            }
+            index_detail = parsed_index;
+        }
+
+        let mut index_location = iap
+            .path
+            .first()
+            .map(|node| node.location.clone())
+            .unwrap_or_else(empty_source_location);
+        if current_token() == token::TOKEN_COLON {
+            let colon = expect_token(token::TOKEN_COLON);
+            if !colon.errors.is_empty() {
+                errors.extend(colon.errors);
+                iap.errors = errors;
+                return iap;
+            }
+            let mut end_index = empty_ast_node();
+            let mut end_index_detail = empty_expression_result(Vec::new());
+            if current_token() != token::TOKEN_RBRACK {
+                let parsed_end_index = parse_expression();
+                if parser_errors_have_fatal(&parsed_end_index.errors) {
+                    errors.extend(parsed_end_index.errors);
+                    iap.errors = errors;
+                    return iap;
+                }
+                errors.extend(parsed_end_index.errors.clone());
+                end_index = parsed_end_index.expression.clone();
+                if !end_index.present {
+                    iap.errors = errors;
+                    return iap;
+                }
+                end_index_detail = parsed_end_index;
+            }
+            index_location.end = current_location().end;
+            iap.indices.push(ffi::WireIndexAccess {
+                start: index,
+                start_detail: index_detail,
+                has_end: true,
+                end: end_index,
+                end_detail: end_index_detail,
+                location: index_location,
+            });
+            let rbrack = expect_token(token::TOKEN_RBRACK);
+            if !rbrack.errors.is_empty() {
+                errors.extend(rbrack.errors);
+                iap.errors = errors;
+                return iap;
+            }
+        } else {
+            index_location.end = current_location().end;
+            iap.indices.push(ffi::WireIndexAccess {
+                start: index,
+                start_detail: index_detail,
+                has_end: false,
+                end: empty_ast_node(),
+                end_detail: empty_expression_result(Vec::new()),
+                location: index_location,
+            });
+            let rbrack = expect_token(token::TOKEN_RBRACK);
+            if !rbrack.errors.is_empty() {
+                errors.extend(rbrack.errors);
+                iap.errors = errors;
+                return iap;
+            }
+        }
+    }
+
+    iap.errors = errors;
+    iap
+}
+
+pub fn index_accessed_path_empty(path: ffi::WireIndexAccessedPath) -> bool {
+    if !path.indices.is_empty() {
+        assert!(!path.path.is_empty());
+    }
+
+    path.path.is_empty() && path.indices.is_empty()
+}
+
+pub fn type_name_from_index_access_structure(
+    path_and_indices: ffi::WireIndexAccessedPath,
+) -> ffi::WireTypeNameFromIndexAccessStructureResult {
+    if index_accessed_path_empty(path_and_indices.clone()) {
+        return ffi::WireTypeNameFromIndexAccessStructureResult {
+            type_name: empty_ast_node(),
+            array_base_type: empty_ast_node(),
+            array_length: empty_ast_node(),
+            array_base_types: Vec::new(),
+            array_lengths: Vec::new(),
+            array_length_details: Vec::new(),
+            elementary_type_token: token::TOKEN_ILLEGAL,
+            elementary_type_first_number: 0,
+            elementary_type_second_number: 0,
+            has_state_mutability: false,
+            state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+            user_defined_path_node: empty_ast_node(),
+            user_defined_path: Vec::new(),
+            user_defined_path_locations: Vec::new(),
+            errors: Vec::new(),
+        };
+    }
+
+    if path_and_indices.indices.len() > MAX_BRIDGE_ARRAY_TYPE_DEPTH {
+        let location = path_and_indices.indices[MAX_BRIDGE_ARRAY_TYPE_DEPTH]
+            .location
+            .clone();
+        return ffi::WireTypeNameFromIndexAccessStructureResult {
+            type_name: empty_ast_node(),
+            array_base_type: empty_ast_node(),
+            array_length: empty_ast_node(),
+            array_base_types: Vec::new(),
+            array_lengths: Vec::new(),
+            array_length_details: Vec::new(),
+            elementary_type_token: token::TOKEN_ILLEGAL,
+            elementary_type_first_number: 0,
+            elementary_type_second_number: 0,
+            has_state_mutability: false,
+            state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+            user_defined_path_node: empty_ast_node(),
+            user_defined_path: Vec::new(),
+            user_defined_path_locations: Vec::new(),
+            errors: vec![fatal_parser_error_at(
+                7319,
+                "Maximum recursion depth reached during parsing.",
+                location,
+            )],
+        };
+    }
+
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = path_and_indices.path[0].location.clone();
+    location.end = path_and_indices.path[path_and_indices.path.len() - 1]
+        .location
+        .end;
+
+    let mut next_node_id = max_node_id(
+        max_index_access_node_id(0, &path_and_indices.indices),
+        &path_and_indices.path,
+    );
+    let mut elementary_type_token = token::TOKEN_ILLEGAL;
+    let mut elementary_type_first_number = 0;
+    let mut elementary_type_second_number = 0;
+    let has_state_mutability = false;
+    let state_mutability = STATE_MUTABILITY_NON_PAYABLE;
+    let mut user_defined_path_node = empty_ast_node();
+    let mut user_defined_path = Vec::new();
+    let mut user_defined_path_locations = Vec::new();
+
+    let mut type_name =
+        if path_and_indices.path[0].kind == AST_NODE_KIND_ELEMENTARY_TYPE_NAME_EXPRESSION {
+            assert_eq!(path_and_indices.path.len(), 1, "");
+            let (parsed_token, first_number, second_number) =
+                token::from_identifier_or_keyword(&path_and_indices.path[0].text.bytes);
+            if token::is_elementary_type_name(parsed_token) {
+                elementary_type_token = parsed_token;
+                elementary_type_first_number = first_number;
+                elementary_type_second_number = second_number;
+            }
+            next_node_id = allocate_node_id_after(next_node_id);
+            ffi::WireAstNode {
+                present: true,
+                node_id: next_node_id,
+                kind: AST_NODE_KIND_ELEMENTARY_TYPE_NAME,
+                location,
+                text: path_and_indices.path[0].text.clone(),
+            }
+        } else {
+            assert!(path_and_indices
+                .path
+                .iter()
+                .all(|node| node.kind == AST_NODE_KIND_IDENTIFIER));
+            next_node_id = allocate_node_id_after_reserving(next_node_id, 2);
+            user_defined_path_node = ffi::WireAstNode {
+                present: true,
+                node_id: next_node_id - 1,
+                kind: AST_NODE_KIND_IDENTIFIER_PATH,
+                location: location.clone(),
+                text: join_ast_node_texts(&path_and_indices.path),
+            };
+            user_defined_path = path_and_indices
+                .path
+                .iter()
+                .map(|node| node.text.clone())
+                .collect();
+            user_defined_path_locations = path_and_indices
+                .path
+                .iter()
+                .map(|node| node.location.clone())
+                .collect();
+            ffi::WireAstNode {
+                present: true,
+                node_id: next_node_id,
+                kind: AST_NODE_KIND_USER_DEFINED_TYPE_NAME,
+                location,
+                text: join_ast_node_texts(&path_and_indices.path),
+            }
+        };
+
+    let mut errors = Vec::new();
+    let mut array_base_type = empty_ast_node();
+    let mut array_length = empty_ast_node();
+    let mut array_base_types = Vec::new();
+    let mut array_lengths = Vec::new();
+    let mut array_length_details = Vec::new();
+    for length_expression in path_and_indices.indices {
+        if length_expression.has_end {
+            errors.push(parser_error_at(
+                5464,
+                "Expected array length expression.",
+                length_expression.location.clone(),
+            ));
+        }
+
+        array_base_type = type_name.clone();
+        array_length = length_expression.start.clone();
+        array_base_types.push(array_base_type.clone());
+        array_lengths.push(array_length.clone());
+        if array_length.present {
+            array_length_details.push(length_expression.start_detail);
+        } else {
+            array_length_details.push(empty_expression_result(Vec::new()));
+        }
+        next_node_id = allocate_node_id_after(next_node_id);
+        type_name = ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_ARRAY_TYPE_NAME,
+            location: length_expression.location,
+            text: empty_string(),
+        };
+    }
+
+    ffi::WireTypeNameFromIndexAccessStructureResult {
+        type_name,
+        array_base_type,
+        array_length,
+        array_base_types,
+        array_lengths,
+        array_length_details,
+        elementary_type_token,
+        elementary_type_first_number,
+        elementary_type_second_number,
+        has_state_mutability,
+        state_mutability,
+        user_defined_path_node,
+        user_defined_path,
+        user_defined_path_locations,
+        errors,
+    }
+}
+
+pub fn expression_from_index_access_structure(
+    path_and_indices: ffi::WireIndexAccessedPath,
+) -> ffi::WireExpressionResult {
+    if index_accessed_path_empty(path_and_indices.clone()) {
+        return empty_expression_result(Vec::new());
+    }
+
+    if path_and_indices.indices.len() > MAX_BRIDGE_ARRAY_TYPE_DEPTH {
+        let location = path_and_indices.indices[MAX_BRIDGE_ARRAY_TYPE_DEPTH]
+            .location
+            .clone();
+        return empty_expression_result(vec![fatal_parser_error_at(
+            7319,
+            "Maximum recursion depth reached during parsing.",
+            location,
+        )]);
+    }
+
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut next_node_id = max_node_id(
+        max_index_access_node_id(0, &path_and_indices.indices),
+        &path_and_indices.path,
+    );
+    let mut expression = path_and_indices.path[0].clone();
+    let mut result = expression_result(expression.clone(), Vec::new());
+    if let Some(expression_type) = path_and_indices.path_expression_types.first() {
+        result.expression_type = expression_type.clone();
+    }
+    for i in 1..path_and_indices.path.len() {
+        assert_eq!(path_and_indices.path[i].kind, AST_NODE_KIND_IDENTIFIER);
+
+        let base_expression = expression.clone();
+        let base_expression_type = result.expression_type.clone();
+        let base_expression_detail = result;
+        let mut location = path_and_indices.path[0].location.clone();
+        location.end = path_and_indices.path[i].location.end;
+
+        next_node_id = allocate_node_id_after(next_node_id);
+        let member_access = ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_MEMBER_ACCESS,
+            location,
+            text: path_and_indices.path[i].text.clone(),
+        };
+        result = expression_result(member_access.clone(), Vec::new());
+        result.base_expression = base_expression;
+        result.base_expression_detail.push(base_expression_detail);
+        result.base_expression_type = base_expression_type;
+        result.member_name_location = path_and_indices.path[i].location.clone();
+        expression = member_access;
+    }
+
+    for index in path_and_indices.indices {
+        let base_expression = expression.clone();
+        let base_expression_type = result.expression_type.clone();
+        let base_expression_detail = result;
+        next_node_id = allocate_node_id_after(next_node_id);
+        let kind = if index.has_end {
+            AST_NODE_KIND_INDEX_RANGE_ACCESS
+        } else {
+            AST_NODE_KIND_INDEX_ACCESS
+        };
+        let indexed_expression = ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind,
+            location: index.location,
+            text: empty_string(),
+        };
+        result = expression_result(indexed_expression.clone(), Vec::new());
+        result.base_expression = base_expression;
+        result.base_expression_detail.push(base_expression_detail);
+        result.base_expression_type = base_expression_type;
+        result.index_expression = index.start;
+        if result.index_expression.present {
+            result.index_expression_detail.push(index.start_detail);
+        }
+        if index.has_end {
+            result.end_index_expression = index.end;
+            if result.end_index_expression.present {
+                result.end_index_expression_detail.push(index.end_detail);
+            }
+        }
+        expression = indexed_expression;
+    }
+
+    result
+}
+
+pub fn expect_identifier_token(
+    token: u32,
+    literal: ffi::WireString,
+    token_name: String,
+) -> ffi::WireIdentifierResult {
+    expect_identifier_token_at(token, literal, token_name, current_location())
+}
+
+fn expect_identifier_token_at(
+    token: u32,
+    literal: ffi::WireString,
+    token_name: String,
+    location: ffi::WireSourceLocation,
+) -> ffi::WireIdentifierResult {
+    if token != token::TOKEN_IDENTIFIER {
+        return ffi::WireIdentifierResult {
+            value: empty_string(),
+            tokens_consumed: 0,
+            errors: vec![expected_token_error_at(
+                "identifier",
+                token_name_or_computed(token, &literal, token_name),
+                location,
+            )],
+        };
+    }
+
+    ffi::WireIdentifierResult {
+        value: literal,
+        tokens_consumed: 1,
+        errors: Vec::new(),
+    }
+}
+
+pub fn expect_identifier_token_or_address(
+    token: u32,
+    literal: ffi::WireString,
+    token_name: String,
+) -> ffi::WireIdentifierResult {
+    expect_identifier_token_or_address_at(token, literal, token_name, current_location())
+}
+
+fn expect_identifier_token_or_address_at(
+    token: u32,
+    literal: ffi::WireString,
+    token_name: String,
+    location: ffi::WireSourceLocation,
+) -> ffi::WireIdentifierResult {
+    if token == token::TOKEN_ADDRESS {
+        return ffi::WireIdentifierResult {
+            value: ffi::WireString {
+                bytes: b"address".to_vec(),
+            },
+            tokens_consumed: 1,
+            errors: Vec::new(),
+        };
+    }
+
+    if token != token::TOKEN_IDENTIFIER {
+        return ffi::WireIdentifierResult {
+            value: empty_string(),
+            tokens_consumed: 0,
+            errors: vec![expected_token_error_at(
+                "identifier",
+                token_name_or_computed(token, &literal, token_name),
+                location,
+            )],
+        };
+    }
+
+    ffi::WireIdentifierResult {
+        value: literal,
+        tokens_consumed: 1,
+        errors: Vec::new(),
+    }
+}
+
+pub fn parse_identifier(
+    token: u32,
+    literal: ffi::WireString,
+    token_name: String,
+    location: ffi::WireSourceLocation,
+    current_node_id: i64,
+) -> ffi::WireIdentifierNodeResult {
+    let identifier = expect_identifier_token_at(token, literal, token_name, location.clone());
+    if !identifier.errors.is_empty() {
+        return ffi::WireIdentifierNodeResult {
+            identifier: empty_ast_node(),
+            name: empty_string(),
+            tokens_consumed: identifier.tokens_consumed,
+            current_node_id,
+            errors: identifier.errors,
+        };
+    }
+
+    let next_node_id = allocate_node_id_after(current_node_id);
+    ffi::WireIdentifierNodeResult {
+        identifier: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_IDENTIFIER,
+            location,
+            text: identifier.value.clone(),
+        },
+        name: identifier.value,
+        tokens_consumed: identifier.tokens_consumed,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+pub fn parse_identifier_or_address(
+    token: u32,
+    literal: ffi::WireString,
+    token_name: String,
+    location: ffi::WireSourceLocation,
+    current_node_id: i64,
+) -> ffi::WireIdentifierNodeResult {
+    let identifier =
+        expect_identifier_token_or_address_at(token, literal, token_name, location.clone());
+    if !identifier.errors.is_empty() {
+        return ffi::WireIdentifierNodeResult {
+            identifier: empty_ast_node(),
+            name: empty_string(),
+            tokens_consumed: identifier.tokens_consumed,
+            current_node_id,
+            errors: identifier.errors,
+        };
+    }
+
+    let next_node_id = allocate_node_id_after(current_node_id);
+    ffi::WireIdentifierNodeResult {
+        identifier: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_IDENTIFIER,
+            location,
+            text: identifier.value.clone(),
+        },
+        name: identifier.value,
+        tokens_consumed: identifier.tokens_consumed,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+pub fn parse_identifier_path(
+    tokens: Vec<ffi::WireLocatedToken>,
+    current_node_id: i64,
+) -> ffi::WireIdentifierPathResult {
+    if tokens.is_empty() {
+        return identifier_path_error(
+            0,
+            current_node_id,
+            expected_token_error_at(
+                "identifier",
+                token_name(token::TOKEN_EOS),
+                end_of_slice_location(&tokens),
+            ),
+        );
+    }
+
+    let mut cursor = 0usize;
+    let mut node_location = tokens[cursor].location.clone();
+    let mut path = Vec::new();
+    let mut path_locations = Vec::new();
+
+    let first = expect_identifier_token_at(
+        tokens[cursor].token,
+        tokens[cursor].literal.clone(),
+        tokens[cursor].token_name.clone(),
+        tokens[cursor].location.clone(),
+    );
+    if !first.errors.is_empty() {
+        return identifier_path_error(
+            first.tokens_consumed,
+            current_node_id,
+            first.errors[0].clone(),
+        );
+    }
+
+    path.push(first.value);
+    path_locations.push(tokens[cursor].location.clone());
+    cursor += first.tokens_consumed as usize;
+
+    while cursor < tokens.len() && tokens[cursor].token == token::TOKEN_PERIOD {
+        cursor += 1;
+        if cursor >= tokens.len() {
+            return identifier_path_error(
+                cursor as u64,
+                current_node_id,
+                expected_token_error_at(
+                    "identifier",
+                    token_name(token::TOKEN_EOS),
+                    end_of_slice_location(&tokens),
+                ),
+            );
+        }
+
+        node_location.end = tokens[cursor].location.end;
+        let identifier = expect_identifier_token_at(
+            tokens[cursor].token,
+            tokens[cursor].literal.clone(),
+            tokens[cursor].token_name.clone(),
+            tokens[cursor].location.clone(),
+        );
+        if !identifier.errors.is_empty() {
+            return identifier_path_error(
+                cursor as u64,
+                current_node_id,
+                identifier.errors[0].clone(),
+            );
+        }
+
+        path.push(identifier.value);
+        path_locations.push(tokens[cursor].location.clone());
+        cursor += identifier.tokens_consumed as usize;
+    }
+
+    let next_node_id = current_node_id + 1;
+    let path_text = join_identifier_path(&path);
+    ffi::WireIdentifierPathResult {
+        identifier_path: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_IDENTIFIER_PATH,
+            location: node_location,
+            text: path_text,
+        },
+        path,
+        path_locations,
+        tokens_consumed: cursor as u64,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+pub fn parse_user_defined_type_name(
+    tokens: Vec<ffi::WireLocatedToken>,
+    current_node_id: i64,
+) -> ffi::WireUserDefinedTypeNameResult {
+    let identifier_path = parse_identifier_path(tokens, current_node_id);
+    if !identifier_path.errors.is_empty() {
+        return ffi::WireUserDefinedTypeNameResult {
+            type_name: empty_ast_node(),
+            path_node: empty_ast_node(),
+            path: Vec::new(),
+            path_locations: Vec::new(),
+            tokens_consumed: identifier_path.tokens_consumed,
+            current_node_id,
+            errors: identifier_path.errors,
+        };
+    }
+
+    let next_node_id = allocate_node_id_after(identifier_path.current_node_id);
+    ffi::WireUserDefinedTypeNameResult {
+        type_name: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_USER_DEFINED_TYPE_NAME,
+            location: identifier_path.identifier_path.location.clone(),
+            text: identifier_path.identifier_path.text.clone(),
+        },
+        path_node: identifier_path.identifier_path,
+        path: identifier_path.path,
+        path_locations: identifier_path.path_locations,
+        tokens_consumed: identifier_path.tokens_consumed,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+pub fn parse_type_class_name(
+    tokens: Vec<ffi::WireLocatedToken>,
+    current_node_id: i64,
+) -> ffi::WireTypeClassNameResult {
+    if !tokens.is_empty() && token::is_builtin_type_class_name(tokens[0].token) {
+        let next_node_id = current_node_id + 1;
+        let text = token_to_string(tokens[0].token)
+            .map(|value| value.as_bytes().to_vec())
+            .unwrap_or_else(|| tokens[0].literal.bytes.clone());
+        return ffi::WireTypeClassNameResult {
+            type_class_name: ffi::WireAstNode {
+                present: true,
+                node_id: next_node_id,
+                kind: AST_NODE_KIND_TYPE_CLASS_NAME,
+                location: tokens[0].location.clone(),
+                text: ffi::WireString { bytes: text },
+            },
+            is_builtin: true,
+            builtin_token: tokens[0].token,
+            identifier_path: empty_ast_node(),
+            identifier_path_detail: empty_identifier_path_result(current_node_id),
+            tokens_consumed: 1,
+            current_node_id: next_node_id,
+            errors: Vec::new(),
+        };
+    }
+
+    let identifier_path = parse_identifier_path(tokens, current_node_id);
+    if !identifier_path.errors.is_empty() {
+        return ffi::WireTypeClassNameResult {
+            type_class_name: empty_ast_node(),
+            is_builtin: false,
+            builtin_token: 0,
+            identifier_path: empty_ast_node(),
+            identifier_path_detail: empty_identifier_path_result(current_node_id),
+            tokens_consumed: identifier_path.tokens_consumed,
+            current_node_id,
+            errors: identifier_path.errors,
+        };
+    }
+
+    let next_node_id = allocate_node_id_after(identifier_path.current_node_id);
+    ffi::WireTypeClassNameResult {
+        type_class_name: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_TYPE_CLASS_NAME,
+            location: identifier_path.identifier_path.location.clone(),
+            text: identifier_path.identifier_path.text.clone(),
+        },
+        is_builtin: false,
+        builtin_token: 0,
+        identifier_path: identifier_path.identifier_path.clone(),
+        identifier_path_detail: identifier_path.clone(),
+        tokens_consumed: identifier_path.tokens_consumed,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+pub fn get_literal_and_advance(literal: ffi::WireString) -> ffi::WireStringAndAdvanceResult {
+    ffi::WireStringAndAdvanceResult {
+        value: literal,
+        tokens_consumed: 1,
+    }
+}
+
+pub fn is_quoted_path(token: u32) -> bool {
+    token == token::TOKEN_STRING_LITERAL
+}
+
+pub fn is_stdlib_path(
+    token: u32,
+    literal: ffi::WireString,
+    experimental_solidity_enabled: bool,
+) -> bool {
+    experimental_solidity_enabled && token == token::TOKEN_IDENTIFIER && literal.bytes == b"std"
+}
+
+pub fn token_precedence(token: u32, experimental_solidity_enabled: bool) -> i32 {
+    if experimental_solidity_enabled {
+        match token {
+            token::TOKEN_COLON => return 1000,
+            token::TOKEN_RIGHT_ARROW => return 999,
+            _ => {}
+        }
+    }
+
+    token::precedence(token)
+}
+
+pub fn get_stdlib_import_path_and_advance(
+    current: ffi::WireToken,
+    after_current: ffi::WireToken,
+    after_period: ffi::WireToken,
+) -> ffi::WireIdentifierResult {
+    let first = expect_identifier_token(current.token, current.literal, current.token_name);
+    if !first.errors.is_empty() {
+        return first;
+    }
+
+    let mut tokens_consumed = first.tokens_consumed;
+    let library_token = if after_current.token == token::TOKEN_PERIOD {
+        tokens_consumed += 1;
+        after_period
+    } else {
+        after_current
+    };
+
+    let library = expect_identifier_token(
+        library_token.token,
+        library_token.literal,
+        library_token.token_name,
+    );
+    if !library.errors.is_empty() {
+        return ffi::WireIdentifierResult {
+            value: empty_string(),
+            tokens_consumed,
+            errors: library.errors,
+        };
+    }
+
+    let mut value = first.value.bytes;
+    value.push(b'.');
+    value.extend(library.value.bytes);
+
+    ffi::WireIdentifierResult {
+        value: ffi::WireString { bytes: value },
+        tokens_consumed: tokens_consumed + library.tokens_consumed,
+        errors: Vec::new(),
+    }
+}
+
+fn identifier_path_error(
+    tokens_consumed: u64,
+    current_node_id: i64,
+    error: ffi::WireParserError,
+) -> ffi::WireIdentifierPathResult {
+    ffi::WireIdentifierPathResult {
+        identifier_path: empty_ast_node(),
+        path: Vec::new(),
+        path_locations: Vec::new(),
+        tokens_consumed,
+        current_node_id,
+        errors: vec![error],
+    }
+}
+
+fn override_specifier_error(
+    overrides: Vec<ffi::WireAstNode>,
+    tokens_consumed: u64,
+    current_node_id: i64,
+    error: ffi::WireParserError,
+) -> ffi::WireOverrideSpecifierResult {
+    ffi::WireOverrideSpecifierResult {
+        override_specifier: empty_ast_node(),
+        overrides,
+        override_details: Vec::new(),
+        tokens_consumed,
+        current_node_id,
+        errors: vec![error],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inheritance_specifier_error(
+    base_name: ffi::WireAstNode,
+    base_name_path: Vec<ffi::WireString>,
+    base_name_path_locations: Vec<ffi::WireSourceLocation>,
+    has_arguments: bool,
+    arguments: Vec<ffi::WireAstNode>,
+    argument_details: Vec<ffi::WireExpressionResult>,
+    tokens_consumed: u64,
+    current_node_id: i64,
+    error: ffi::WireParserError,
+) -> ffi::WireInheritanceSpecifierResult {
+    ffi::WireInheritanceSpecifierResult {
+        inheritance_specifier: empty_ast_node(),
+        base_name,
+        base_name_path,
+        base_name_path_locations,
+        has_arguments,
+        arguments,
+        argument_details,
+        tokens_consumed,
+        current_node_id,
+        errors: vec![error],
+    }
+}
+
+fn empty_identifier_path_result(current_node_id: i64) -> ffi::WireIdentifierPathResult {
+    ffi::WireIdentifierPathResult {
+        identifier_path: empty_ast_node(),
+        path: Vec::new(),
+        path_locations: Vec::new(),
+        tokens_consumed: 0,
+        current_node_id,
+        errors: Vec::new(),
+    }
+}
+
+fn modifier_invocation_error(
+    modifier_name_detail: ffi::WireIdentifierPathResult,
+    has_arguments: bool,
+    arguments: Vec<ffi::WireAstNode>,
+    argument_details: Vec<ffi::WireExpressionResult>,
+    tokens_consumed: u64,
+    current_node_id: i64,
+    error: ffi::WireParserError,
+) -> ffi::WireModifierInvocationResult {
+    ffi::WireModifierInvocationResult {
+        modifier_invocation: empty_ast_node(),
+        modifier_name: modifier_name_detail.identifier_path.clone(),
+        modifier_name_detail,
+        has_arguments,
+        arguments,
+        argument_details,
+        tokens_consumed,
+        current_node_id,
+        errors: vec![error],
+    }
+}
+
+fn empty_modifier_invocation_result(
+    tokens_consumed: u64,
+    current_node_id: i64,
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireModifierInvocationResult {
+    ffi::WireModifierInvocationResult {
+        modifier_invocation: empty_ast_node(),
+        modifier_name: empty_ast_node(),
+        modifier_name_detail: empty_identifier_path_result(current_node_id),
+        has_arguments: false,
+        arguments: Vec::new(),
+        argument_details: Vec::new(),
+        tokens_consumed,
+        current_node_id,
+        errors,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn modifier_invocation_result(
+    modifier_invocation: ffi::WireAstNode,
+    modifier_name_detail: ffi::WireIdentifierPathResult,
+    has_arguments: bool,
+    arguments: Vec<ffi::WireAstNode>,
+    argument_details: Vec<ffi::WireExpressionResult>,
+    tokens_consumed: u64,
+    current_node_id: i64,
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireModifierInvocationResult {
+    ffi::WireModifierInvocationResult {
+        modifier_invocation,
+        modifier_name: modifier_name_detail.identifier_path.clone(),
+        modifier_name_detail,
+        has_arguments,
+        arguments,
+        argument_details,
+        tokens_consumed,
+        current_node_id,
+        errors,
+    }
+}
+
+fn pragma_directive_result(
+    pragma_directive: ffi::WireAstNode,
+    tokens: Vec<u32>,
+    literals: Vec<ffi::WireString>,
+    experimental_solidity_enabled: bool,
+    tokens_consumed: u64,
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WirePragmaDirectiveResult {
+    ffi::WirePragmaDirectiveResult {
+        pragma_directive,
+        tokens,
+        literals,
+        experimental_solidity_enabled,
+        tokens_consumed,
+        errors,
+    }
+}
+
+fn import_directive_result(
+    import_directive: ffi::WireAstNode,
+    path: ffi::WireString,
+    unit_alias: ffi::WireString,
+    unit_alias_location: ffi::WireSourceLocation,
+    symbol_aliases: Vec<ffi::WireImportSymbolAlias>,
+    tokens_consumed: u64,
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireImportDirectiveResult {
+    ffi::WireImportDirectiveResult {
+        import_directive,
+        path,
+        unit_alias,
+        unit_alias_location,
+        symbol_aliases,
+        tokens_consumed,
+        errors,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn contract_definition_result(
+    contract_definition: ffi::WireAstNode,
+    name: ffi::WireString,
+    name_location: ffi::WireSourceLocation,
+    documentation: ffi::WireAstNode,
+    base_contracts: Vec<ffi::WireAstNode>,
+    sub_nodes: Vec<ffi::WireAstNode>,
+    contract_kind: u8,
+    is_abstract: bool,
+    storage_layout_specifier: ffi::WireAstNode,
+    tokens_consumed: u64,
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireContractDefinitionResult {
+    contract_definition_result_with_details(
+        contract_definition,
+        name,
+        name_location,
+        documentation,
+        base_contracts,
+        Vec::new(),
+        sub_nodes,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        contract_kind,
+        is_abstract,
+        storage_layout_specifier,
+        empty_ast_node(),
+        empty_expression_result(Vec::new()),
+        tokens_consumed,
+        errors,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn contract_definition_result_with_details(
+    contract_definition: ffi::WireAstNode,
+    name: ffi::WireString,
+    name_location: ffi::WireSourceLocation,
+    documentation: ffi::WireAstNode,
+    base_contracts: Vec<ffi::WireAstNode>,
+    base_contract_details: Vec<ffi::WireInheritanceSpecifierResult>,
+    sub_nodes: Vec<ffi::WireAstNode>,
+    sub_node_structs: Vec<ffi::WireStructDefinitionResult>,
+    sub_node_enums: Vec<ffi::WireEnumDefinitionResult>,
+    sub_node_user_defined_value_types: Vec<ffi::WireUserDefinedValueTypeDefinitionResult>,
+    sub_node_events: Vec<ffi::WireEventDefinitionResult>,
+    sub_node_errors: Vec<ffi::WireErrorDefinitionResult>,
+    sub_node_functions: Vec<ffi::WireFunctionDefinitionResult>,
+    sub_node_modifiers: Vec<ffi::WireModifierDefinitionResult>,
+    sub_node_using_directives: Vec<ffi::WireUsingDirectiveResult>,
+    sub_node_variable_declarations: Vec<ffi::WireVariableDeclarationResult>,
+    contract_kind: u8,
+    is_abstract: bool,
+    storage_layout_specifier: ffi::WireAstNode,
+    storage_layout_base_slot_expression: ffi::WireAstNode,
+    storage_layout_base_slot_expression_detail: ffi::WireExpressionResult,
+    tokens_consumed: u64,
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireContractDefinitionResult {
+    ffi::WireContractDefinitionResult {
+        contract_definition,
+        name,
+        name_location,
+        documentation,
+        base_contracts,
+        base_contract_details,
+        sub_nodes,
+        sub_node_structs,
+        sub_node_enums,
+        sub_node_user_defined_value_types,
+        sub_node_events,
+        sub_node_errors,
+        sub_node_functions,
+        sub_node_modifiers,
+        sub_node_using_directives,
+        sub_node_variable_declarations,
+        contract_kind,
+        is_abstract,
+        storage_layout_specifier,
+        storage_layout_base_slot_expression,
+        storage_layout_base_slot_expression_detail,
+        tokens_consumed,
+        errors,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn for_all_quantifier_result(
+    for_all_quantifier: ffi::WireAstNode,
+    type_variable_declarations: ffi::WireAstNode,
+    type_variable_declaration_parameters: Vec<ffi::WireAstNode>,
+    type_variable_declaration_details: Vec<ffi::WireVariableDeclarationResult>,
+    quantified_function: ffi::WireAstNode,
+    quantified_function_detail: ffi::WireFunctionDefinitionResult,
+    tokens_consumed: u64,
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireForAllQuantifierResult {
+    ffi::WireForAllQuantifierResult {
+        for_all_quantifier,
+        type_variable_declarations,
+        type_variable_declaration_parameters,
+        type_variable_declaration_details,
+        quantified_function,
+        quantified_function_detail,
+        tokens_consumed,
+        errors,
+    }
+}
+
+fn empty_function_definition_result(
+    errors: Vec<ffi::WireParserError>,
+    warnings: Vec<ffi::WireParserError>,
+) -> ffi::WireFunctionDefinitionResult {
+    function_definition_result(
+        empty_ast_node(),
+        empty_string(),
+        empty_source_location(),
+        VISIBILITY_DEFAULT,
+        STATE_MUTABILITY_NON_PAYABLE,
+        false,
+        token::TOKEN_ILLEGAL,
+        false,
+        empty_ast_node(),
+        Vec::new(),
+        Vec::new(),
+        empty_ast_node(),
+        empty_ast_node(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        empty_ast_node(),
+        Vec::new(),
+        Vec::new(),
+        empty_ast_node(),
+        false,
+        Vec::new(),
+        Vec::new(),
+        empty_ast_node(),
+        empty_expression_result(Vec::new()),
+        0,
+        errors,
+        warnings,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn function_definition_result(
+    function_definition: ffi::WireAstNode,
+    name: ffi::WireString,
+    name_location: ffi::WireSourceLocation,
+    visibility: u8,
+    state_mutability: u8,
+    is_free_function: bool,
+    kind: u32,
+    is_virtual: bool,
+    overrides: ffi::WireAstNode,
+    override_paths: Vec<ffi::WireAstNode>,
+    override_path_details: Vec<ffi::WireIdentifierPathResult>,
+    documentation: ffi::WireAstNode,
+    parameters: ffi::WireAstNode,
+    parameter_declarations: Vec<ffi::WireAstNode>,
+    parameter_details: Vec<ffi::WireVariableDeclarationResult>,
+    modifiers: Vec<ffi::WireAstNode>,
+    modifier_details: Vec<ffi::WireModifierInvocationResult>,
+    return_parameters: ffi::WireAstNode,
+    return_parameter_declarations: Vec<ffi::WireAstNode>,
+    return_parameter_details: Vec<ffi::WireVariableDeclarationResult>,
+    block: ffi::WireAstNode,
+    block_unchecked: bool,
+    block_statements: Vec<ffi::WireAstNode>,
+    block_statement_details: Vec<ffi::WireStatementResult>,
+    experimental_return_expression: ffi::WireAstNode,
+    experimental_return_expression_detail: ffi::WireExpressionResult,
+    tokens_consumed: u64,
+    errors: Vec<ffi::WireParserError>,
+    warnings: Vec<ffi::WireParserError>,
+) -> ffi::WireFunctionDefinitionResult {
+    ffi::WireFunctionDefinitionResult {
+        function_definition,
+        name,
+        name_location,
+        visibility,
+        state_mutability,
+        is_free_function,
+        kind,
+        is_virtual,
+        overrides,
+        override_paths,
+        override_path_details,
+        documentation,
+        parameters,
+        parameter_declarations,
+        parameter_details,
+        modifiers,
+        modifier_details,
+        return_parameters,
+        return_parameter_declarations,
+        return_parameter_details,
+        block,
+        block_unchecked,
+        block_statements,
+        block_statement_details,
+        experimental_return_expression,
+        experimental_return_expression_detail,
+        tokens_consumed,
+        errors,
+        warnings,
+    }
+}
+
+fn parser_result_from_errors(errors: Vec<ffi::WireParserError>) -> ffi::WireParserResult {
+    let first_fatal = errors.iter().find(|error| error.fatal);
+    let message = first_fatal
+        .or_else(|| errors.first())
+        .map(|error| error.message.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let mut reported_errors = reported_parser_errors();
+    reported_errors.extend(errors);
+    parser_result_error_with_diagnostics(&message, reported_errors, reported_parser_warnings())
+}
+
+fn parser_result_error(message: &str) -> ffi::WireParserResult {
+    parser_result_error_with_diagnostics(
+        message,
+        reported_parser_errors(),
+        reported_parser_warnings(),
+    )
+}
+
+fn parser_result_error_with_diagnostics(
+    message: &str,
+    errors: Vec<ffi::WireParserError>,
+    warnings: Vec<ffi::WireParserError>,
+) -> ffi::WireParserResult {
+    ffi::WireParserResult {
+        ok: false,
+        error_code: 1,
+        error_message: message.to_string(),
+        source_unit: empty_ast_node(),
+        source_unit_nodes: Vec::new(),
+        source_unit_pragmas: Vec::new(),
+        source_unit_imports: Vec::new(),
+        source_unit_user_defined_value_types: Vec::new(),
+        source_unit_enums: Vec::new(),
+        source_unit_structs: Vec::new(),
+        source_unit_events: Vec::new(),
+        source_unit_errors: Vec::new(),
+        source_unit_contracts: Vec::new(),
+        source_unit_functions: Vec::new(),
+        source_unit_for_all_quantifiers: Vec::new(),
+        source_unit_type_definitions: Vec::new(),
+        source_unit_type_class_definitions: Vec::new(),
+        source_unit_type_class_instantiations: Vec::new(),
+        source_unit_using_directives: Vec::new(),
+        source_unit_variable_declarations: Vec::new(),
+        errors,
+        warnings,
+        has_license: false,
+        license: empty_string(),
+        experimental_solidity: experimental_solidity_enabled_in_current_source_unit(),
+        max_id: current_node_id(),
+    }
+}
+
+fn expected_token_error_at(
+    expected: &str,
+    actual: String,
+    location: ffi::WireSourceLocation,
+) -> ffi::WireParserError {
+    ffi::WireParserError {
+        error_id: 2314,
+        message: format!("Expected {expected} but got {actual}"),
+        location,
+        secondary_locations: Vec::new(),
+        syntax: false,
+        fatal: true,
+    }
+}
+
+fn expected_token_error(expected: &str, actual: String) -> ffi::WireParserError {
+    expected_token_error_at(expected, actual, current_location())
+}
+
+fn expected_token_error_for_token_slice(
+    expected: &str,
+    tokens: &[ffi::WireLocatedToken],
+    cursor: usize,
+) -> ffi::WireParserError {
+    if let Some(token) = tokens.get(cursor) {
+        return expected_token_error_at(
+            expected,
+            located_token_name(token),
+            token.location.clone(),
+        );
+    }
+
+    expected_token_error_at(
+        expected,
+        token_name(token::TOKEN_EOS),
+        end_of_slice_location(tokens),
+    )
+}
+
+fn located_token_name(token: &ffi::WireLocatedToken) -> String {
+    if !token.token_name.is_empty() {
+        return token.token_name.clone();
+    }
+
+    if token::is_elementary_type_name(token.token)
+        && token.literal.bytes.is_empty()
+        && (token.first_number != 0 || token.second_number != 0)
+    {
+        return format!(
+            "'{}'",
+            token::elementary_type_name_token_to_string(
+                token.token,
+                token.first_number,
+                token.second_number,
+                false,
+            )
+        );
+    }
+
+    token_name_for_current_token(token.token, token.literal.clone())
+}
+
+fn token_name_or_computed(token: u32, literal: &ffi::WireString, token_name: String) -> String {
+    if !token_name.is_empty() {
+        return token_name;
+    }
+
+    token_name_for_current_token(token, literal.clone())
+}
+
+fn end_of_slice_location(tokens: &[ffi::WireLocatedToken]) -> ffi::WireSourceLocation {
+    if let Some(last) = tokens.last() {
+        return ffi::WireSourceLocation {
+            start: last.location.end,
+            end: last.location.end,
+            source_id: last.location.source_id,
+        };
+    }
+
+    empty_source_location()
+}
+
+fn parser_error_at(
+    error_id: u32,
+    message: &str,
+    location: ffi::WireSourceLocation,
+) -> ffi::WireParserError {
+    ffi::WireParserError {
+        error_id,
+        message: message.to_string(),
+        location,
+        secondary_locations: Vec::new(),
+        syntax: false,
+        fatal: false,
+    }
+}
+
+fn parser_error(error_id: u32, message: &str) -> ffi::WireParserError {
+    parser_error_at(error_id, message, current_location())
+}
+
+fn syntax_error_at(
+    error_id: u32,
+    message: &str,
+    location: ffi::WireSourceLocation,
+) -> ffi::WireParserError {
+    ffi::WireParserError {
+        error_id,
+        message: message.to_string(),
+        location,
+        secondary_locations: Vec::new(),
+        syntax: true,
+        fatal: false,
+    }
+}
+
+fn syntax_error(error_id: u32, message: &str) -> ffi::WireParserError {
+    syntax_error_at(error_id, message, current_location())
+}
+
+fn parser_error_at_with_secondary(
+    error_id: u32,
+    message: &str,
+    location: ffi::WireSourceLocation,
+    secondary_message: &str,
+    secondary_location: ffi::WireSourceLocation,
+) -> ffi::WireParserError {
+    let mut error = parser_error_at(error_id, message, location);
+    error
+        .secondary_locations
+        .push(ffi::WireSecondarySourceLocation {
+            message: secondary_message.to_string(),
+            location: secondary_location,
+        });
+    error
+}
+
+fn parser_warning_at(
+    error_id: u32,
+    message: &str,
+    location: ffi::WireSourceLocation,
+) -> ffi::WireParserError {
+    ffi::WireParserError {
+        error_id,
+        message: message.to_string(),
+        location,
+        secondary_locations: Vec::new(),
+        syntax: false,
+        fatal: false,
+    }
+}
+
+fn parser_warning(error_id: u32, message: &str) -> ffi::WireParserError {
+    parser_warning_at(error_id, message, current_location())
+}
+
+fn fatal_parser_error_at(
+    error_id: u32,
+    message: &str,
+    location: ffi::WireSourceLocation,
+) -> ffi::WireParserError {
+    ffi::WireParserError {
+        error_id,
+        message: message.to_string(),
+        location,
+        secondary_locations: Vec::new(),
+        syntax: false,
+        fatal: true,
+    }
+}
+
+fn fatal_parser_error(error_id: u32, message: &str) -> ffi::WireParserError {
+    fatal_parser_error_at(error_id, message, current_location())
+}
+
+fn reset_recursion_depth() {
+    RECURSION_DEPTH.with(|depth| depth.set(0));
+}
+
+fn rewind_parser_input() {
+    PARSER_STATE.with(|state| {
+        state.borrow_mut().cursor = 0;
+    });
+}
+
+fn clear_reported_parser_diagnostics() {
+    PARSER_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.reported_errors.clear();
+        state.reported_warnings.clear();
+    });
+}
+
+fn reported_parser_errors() -> Vec<ffi::WireParserError> {
+    PARSER_STATE.with(|state| state.borrow().reported_errors.clone())
+}
+
+fn reported_parser_warnings() -> Vec<ffi::WireParserError> {
+    PARSER_STATE.with(|state| state.borrow().reported_warnings.clone())
+}
+
+fn record_parser_error(error: ffi::WireParserError) {
+    PARSER_STATE.with(|state| {
+        state.borrow_mut().reported_errors.push(error);
+    });
+}
+
+fn record_parser_warning(warning: ffi::WireParserError) {
+    PARSER_STATE.with(|state| {
+        state.borrow_mut().reported_warnings.push(warning);
+    });
+}
+
+fn increase_recursion_depth() {
+    RECURSION_DEPTH.with(|depth| {
+        let next_depth = depth.get() + 1;
+        depth.set(next_depth);
+        if next_depth >= RECURSION_LIMIT {
+            panic_any(RecursionLimitExceeded);
+        }
+    });
+}
+
+fn decrease_recursion_depth() {
+    RECURSION_DEPTH.with(|depth| {
+        let current_depth = depth.get();
+        assert!(current_depth > 0, "");
+        depth.set(current_depth - 1);
+    });
+}
+
+fn parser_errors_have_fatal(errors: &[ffi::WireParserError]) -> bool {
+    errors.iter().any(|error| error.fatal)
+}
+
+fn function_call_arguments_with_consumed(
+    mut arguments: ffi::WireFunctionCallArguments,
+    start_cursor: usize,
+) -> ffi::WireFunctionCallArguments {
+    arguments.tokens_consumed = tokens_consumed_since(start_cursor);
+    arguments
+}
+
+fn function_header_with_consumed(
+    mut header: ffi::WireFunctionHeaderParserResult,
+    start_cursor: usize,
+) -> ffi::WireFunctionHeaderParserResult {
+    header.tokens_consumed = tokens_consumed_since(start_cursor);
+    header
+}
+
+fn report_nonfatal_parser_errors(errors: &[ffi::WireParserError]) {
+    for error in errors {
+        if !error.fatal {
+            record_parser_error(error.clone());
+        }
+    }
+}
+
+fn report_parser_errors(errors: &[ffi::WireParserError]) {
+    for error in errors {
+        record_parser_error(error.clone());
+    }
+}
+
+fn report_parser_warnings(warnings: &[ffi::WireParserError]) {
+    for warning in warnings {
+        record_parser_warning(warning.clone());
+    }
+}
+
+fn report_parser_diagnostics(diagnostics: &[ffi::WireParserDiagnostic]) {
+    for diagnostic in diagnostics {
+        if diagnostic.warning {
+            record_parser_warning(parser_warning_at(
+                diagnostic.error_id,
+                &diagnostic.message,
+                diagnostic.location.clone(),
+            ));
+        } else if diagnostic.fatal {
+            record_parser_error(fatal_parser_error_at(
+                diagnostic.error_id,
+                &diagnostic.message,
+                diagnostic.location.clone(),
+            ));
+        } else {
+            record_parser_error(parser_error_at(
+                diagnostic.error_id,
+                &diagnostic.message,
+                diagnostic.location.clone(),
+            ));
+        }
+    }
+}
+
+fn is_visibility_specifier(token: u32) -> bool {
+    token::is_visibility_specifier(token)
+}
+
+fn is_variable_visibility_specifier(token: u32) -> bool {
+    token::is_variable_visibility_specifier(token)
+}
+
+fn visibility_to_string(visibility: u8) -> &'static str {
+    match visibility {
+        VISIBILITY_PRIVATE => "private",
+        VISIBILITY_INTERNAL => "internal",
+        VISIBILITY_PUBLIC => "public",
+        VISIBILITY_EXTERNAL => "external",
+        _ => "default",
+    }
+}
+
+fn variable_declaration_mutability_to_string(mutability: u8) -> &'static str {
+    match mutability {
+        VARIABLE_DECLARATION_MUTABILITY_CONSTANT => "constant",
+        VARIABLE_DECLARATION_MUTABILITY_IMMUTABLE => "immutable",
+        _ => "mutable",
+    }
+}
+
+fn is_function_type_name(node: &ffi::WireAstNode) -> bool {
+    node.kind == AST_NODE_KIND_FUNCTION_TYPE_NAME
+}
+
+fn state_mutability_to_string(state_mutability: u8) -> &'static str {
+    match state_mutability {
+        STATE_MUTABILITY_PURE => "pure",
+        STATE_MUTABILITY_VIEW => "view",
+        STATE_MUTABILITY_PAYABLE => "payable",
+        _ => "nonpayable",
+    }
+}
+
+fn expected_function_kind_name(token: u32) -> &'static str {
+    match token {
+        token::TOKEN_CONSTRUCTOR => "constructor",
+        token::TOKEN_FALLBACK => "fallback function",
+        token::TOKEN_RECEIVE => "receive function",
+        _ => "",
+    }
+}
+
+fn expect_token(expected: u32) -> ParserActionResult {
+    if current_token() != expected {
+        return ParserActionResult {
+            tokens_consumed: 0,
+            errors: vec![expected_token_error(
+                &token_name(expected),
+                current_token_name(),
+            )],
+        };
+    }
+
+    ParserActionResult {
+        tokens_consumed: advance(),
+        errors: Vec::new(),
+    }
+}
+
+fn expect_token_no_advance(expected: u32) -> ParserActionResult {
+    if current_token() != expected {
+        return ParserActionResult {
+            tokens_consumed: 0,
+            errors: vec![expected_token_error(
+                &token_name(expected),
+                current_token_name(),
+            )],
+        };
+    }
+
+    ParserActionResult {
+        tokens_consumed: 0,
+        errors: Vec::new(),
+    }
+}
+
+fn current_token() -> u32 {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .tokens
+            .get(state.cursor)
+            .map(|token| token.token)
+            .unwrap_or(token::TOKEN_EOS)
+    })
+}
+
+fn parser_cursor() -> usize {
+    PARSER_STATE.with(|state| state.borrow().cursor)
+}
+
+fn tokens_consumed_since(start_cursor: usize) -> u64 {
+    parser_cursor().saturating_sub(start_cursor) as u64
+}
+
+fn peek_next_token() -> u32 {
+    peek_nth_token(1)
+}
+
+fn peek_next_location() -> ffi::WireSourceLocation {
+    peek_nth_location(1)
+}
+
+fn peek_nth_token(offset: usize) -> u32 {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .tokens
+            .get(state.cursor + offset)
+            .map(|token| token.token)
+            .unwrap_or(token::TOKEN_EOS)
+    })
+}
+
+fn peek_nth_location(offset: usize) -> ffi::WireSourceLocation {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .tokens
+            .get(state.cursor + offset)
+            .map(|token| token.location.clone())
+            .unwrap_or_else(empty_source_location)
+    })
+}
+
+fn peek_next_next_token() -> u32 {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .tokens
+            .get(state.cursor + 2)
+            .map(|token| token.token)
+            .unwrap_or(token::TOKEN_EOS)
+    })
+}
+
+fn current_literal() -> ffi::WireString {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .tokens
+            .get(state.cursor)
+            .map(|token| token.literal.clone())
+            .unwrap_or_else(empty_string)
+    })
+}
+
+fn current_error() -> String {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .tokens
+            .get(state.cursor)
+            .and_then(|token| {
+                if token.error.is_empty() {
+                    None
+                } else {
+                    Some(token.error.clone())
+                }
+            })
+            .unwrap_or_else(|| state.current_error.clone())
+    })
+}
+
+fn current_source() -> ffi::WireString {
+    PARSER_STATE.with(|state| state.borrow().source.clone())
+}
+
+fn current_comment_literal() -> ffi::WireString {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .comments
+            .get(state.cursor)
+            .map(|comment| comment.literal.clone())
+            .unwrap_or_else(empty_string)
+    })
+}
+
+fn current_comment_location() -> ffi::WireSourceLocation {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .comments
+            .get(state.cursor)
+            .map(|comment| comment.location.clone())
+            .unwrap_or_else(empty_source_location)
+    })
+}
+
+fn current_token_name() -> String {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        if let Some(token) = state.tokens.get(state.cursor) {
+            if !token.token_name.is_empty() {
+                return token.token_name.clone();
+            }
+            let literal =
+                if token::is_elementary_type_name(token.token) && token.literal.bytes.is_empty() {
+                    let bytes = if token.first_number != 0 || token.second_number != 0 {
+                        token::elementary_type_name_token_to_string(
+                            token.token,
+                            token.first_number,
+                            token.second_number,
+                            false,
+                        )
+                        .into_bytes()
+                    } else {
+                        token_literal_or_source_text(token, &state.source.bytes)
+                    };
+                    ffi::WireString { bytes }
+                } else {
+                    token.literal.clone()
+                };
+            token_name_for_current_token(token.token, literal)
+        } else {
+            token_name(token::TOKEN_EOS)
+        }
+    })
+}
+
+fn current_location() -> ffi::WireSourceLocation {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .tokens
+            .get(state.cursor)
+            .map(|token| token.location.clone())
+            .unwrap_or_else(empty_source_location)
+    })
+}
+
+fn current_node_id() -> i64 {
+    PARSER_STATE.with(|state| state.borrow().current_node_id)
+}
+
+fn experimental_solidity_enabled_in_current_source_unit() -> bool {
+    PARSER_STATE.with(|state| state.borrow().experimental_solidity_enabled)
+}
+
+fn set_experimental_solidity_enabled_in_current_source_unit(enabled: bool) {
+    PARSER_STATE.with(|state| {
+        state.borrow_mut().experimental_solidity_enabled = enabled;
+    });
+}
+
+fn set_scanner_mode_experimental_solidity() {
+    PARSER_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.experimental_solidity_enabled = true;
+        let source = state.source.bytes.clone();
+
+        let tokens_len = state.tokens.len();
+        if state.comments.len() < tokens_len {
+            state.comments.resize_with(tokens_len, empty_parser_comment);
+        }
+
+        let mut index = state.cursor;
+        while index < state.tokens.len() {
+            if recover_prefixed_identifier_for_scanner_mode(
+                &mut state.tokens[index],
+                &source,
+                b"hex",
+            ) || recover_prefixed_identifier_for_scanner_mode(
+                &mut state.tokens[index],
+                &source,
+                b"unicode",
+            ) {
+                index += 1;
+            } else if split_experimental_solidity_hex_string_literal_for_scanner_mode(
+                &mut state, index, &source,
+            ) || split_experimental_solidity_unicode_string_literal_for_scanner_mode(
+                &mut state, index, &source,
+            ) || split_leading_dot_number_for_experimental_solidity(&mut state, index)
+            {
+                index += 2;
+            } else {
+                reclassify_token_for_experimental_solidity(&mut state.tokens[index], &source);
+                index += 1;
+            }
+        }
+    });
+}
+
+fn recover_prefixed_identifier_for_scanner_mode(
+    located_token: &mut ffi::WireLocatedToken,
+    source: &[u8],
+    literal: &[u8],
+) -> bool {
+    if located_token.token != token::TOKEN_ILLEGAL
+        || located_token.location.start < 0
+        || located_token.location.end < located_token.location.start
+    {
+        return false;
+    }
+
+    let start = located_token.location.start as usize;
+    let end = located_token.location.end as usize;
+    if source.get(start..end) != Some(literal) {
+        return false;
+    }
+
+    if source
+        .get(end)
+        .is_some_and(|byte| is_identifier_part_byte(*byte) || matches!(*byte, b'"' | b'\''))
+    {
+        return false;
+    }
+
+    located_token.token = token::TOKEN_IDENTIFIER;
+    located_token.literal.bytes = literal.to_vec();
+    located_token.token_name.clear();
+    located_token.first_number = 0;
+    located_token.second_number = 0;
+    located_token.error.clear();
+    true
+}
+
+fn split_experimental_solidity_hex_string_literal_for_scanner_mode(
+    state: &mut ParserState,
+    index: usize,
+    source: &[u8],
+) -> bool {
+    let Some(original) = state.tokens.get(index).cloned() else {
+        return false;
+    };
+    if original.token != token::TOKEN_HEX_STRING_LITERAL
+        && !(original.token == token::TOKEN_ILLEGAL
+            && source_has_prefixed_string_at_token(&original, source, b"hex"))
+    {
+        return false;
+    }
+
+    split_prefixed_string_literal_for_scanner_mode(
+        state,
+        index,
+        source,
+        original,
+        b"hex",
+        "Invalid character in string. If you are trying to use Unicode characters, use a unicode\"...\" string literal.",
+    )
+}
+
+fn split_experimental_solidity_unicode_string_literal_for_scanner_mode(
+    state: &mut ParserState,
+    index: usize,
+    source: &[u8],
+) -> bool {
+    split_unicode_string_literal_for_scanner_mode(
+        state,
+        index,
+        source,
+        "Invalid character in string. If you are trying to use Unicode characters, use a unicode\"...\" string literal.",
+    )
+}
+
+fn set_scanner_mode_yul_for_current_inline_block() {
+    PARSER_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let source = state.source.bytes.clone();
+        let tokens_len = state.tokens.len();
+        if state.comments.len() < tokens_len {
+            state.comments.resize_with(tokens_len, empty_parser_comment);
+        }
+
+        let mut index = state.cursor;
+        let mut block_depth = 0i32;
+
+        while index < state.tokens.len() {
+            recover_prefixed_identifier_for_scanner_mode(
+                &mut state.tokens[index],
+                &source,
+                b"unicode",
+            );
+            split_yul_unicode_string_literal_for_scanner_mode(&mut state, index, &source);
+            merge_yul_leading_dot_number_for_scanner_mode(&mut state, index, &source);
+            merge_yul_dotted_identifier_for_scanner_mode(&mut state, index, &source);
+            normalize_yul_illegal_token_for_scanner_mode(&mut state.tokens[index]);
+            reclassify_token_for_yul_scanner_mode(&mut state.tokens[index], &source);
+
+            match state.tokens[index].token {
+                token::TOKEN_LBRACE => block_depth += 1,
+                token::TOKEN_RBRACE => {
+                    block_depth -= 1;
+                    if block_depth <= 0 {
+                        break;
+                    }
+                }
+                token::TOKEN_EOS => break,
+                _ => {}
+            }
+
+            index += 1;
+        }
+    });
+}
+
+fn split_yul_unicode_string_literal_for_scanner_mode(
+    state: &mut ParserState,
+    index: usize,
+    source: &[u8],
+) -> bool {
+    split_unicode_string_literal_for_scanner_mode(
+        state,
+        index,
+        source,
+        "Invalid character in string.",
+    )
+}
+
+fn split_unicode_string_literal_for_scanner_mode(
+    state: &mut ParserState,
+    index: usize,
+    source: &[u8],
+    invalid_string_error: &str,
+) -> bool {
+    let Some(original) = state.tokens.get(index).cloned() else {
+        return false;
+    };
+    if original.token != token::TOKEN_UNICODE_STRING_LITERAL
+        && !(original.token == token::TOKEN_ILLEGAL
+            && source_has_prefixed_string_at_token(&original, source, b"unicode"))
+    {
+        return false;
+    }
+
+    split_prefixed_string_literal_for_scanner_mode(
+        state,
+        index,
+        source,
+        original,
+        b"unicode",
+        invalid_string_error,
+    )
+}
+
+fn split_prefixed_string_literal_for_scanner_mode(
+    state: &mut ParserState,
+    index: usize,
+    source: &[u8],
+    original: ffi::WireLocatedToken,
+    prefix: &[u8],
+    invalid_string_error: &str,
+) -> bool {
+    let identifier_end = original.location.start.saturating_add(prefix.len() as i64);
+    if original.location.start < 0 || identifier_end > original.location.end {
+        return false;
+    }
+
+    let mut identifier = original.clone();
+    identifier.token = token::TOKEN_IDENTIFIER;
+    identifier.literal.bytes = prefix.to_vec();
+    identifier.token_name.clear();
+    identifier.first_number = 0;
+    identifier.second_number = 0;
+    identifier.location.end = identifier_end;
+
+    let original_was_illegal = original.token == token::TOKEN_ILLEGAL;
+    let mut string_literal = original;
+    let scan_limit = if original_was_illegal {
+        source.len()
+    } else {
+        string_literal.location.end as usize
+    };
+    if let Some(scan_result) = scan_non_unicode_string_literal_for_scanner_mode(
+        source,
+        identifier_end as usize,
+        scan_limit,
+    ) {
+        match scan_result {
+            ScannedStringLiteral::String { literal, end } => {
+                string_literal.token = token::TOKEN_STRING_LITERAL;
+                string_literal.literal.bytes = literal;
+                string_literal.error.clear();
+                string_literal.location.end = end as i64;
+            }
+            ScannedStringLiteral::Illegal { error, end } => {
+                string_literal.token = token::TOKEN_ILLEGAL;
+                string_literal.literal.bytes.clear();
+                string_literal.error = if error == ScannerStringError::UnicodeCharacter {
+                    invalid_string_error.to_string()
+                } else {
+                    error.message().to_string()
+                };
+                string_literal.location.end = end as i64;
+            }
+        }
+    } else {
+        string_literal.token = token::TOKEN_STRING_LITERAL;
+    }
+    string_literal.token_name.clear();
+    string_literal.first_number = 0;
+    string_literal.second_number = 0;
+    string_literal.location.start = identifier_end;
+
+    state.tokens[index] = identifier;
+    state.tokens.insert(index + 1, string_literal);
+    state.comments.insert(index + 1, empty_parser_comment());
+
+    true
+}
+
+fn source_has_prefixed_string_at_token(
+    token: &ffi::WireLocatedToken,
+    source: &[u8],
+    prefix: &[u8],
+) -> bool {
+    if token.location.start < 0 {
+        return false;
+    }
+
+    let start = token.location.start as usize;
+    let quote_index = start + prefix.len();
+    quote_index < source.len()
+        && source
+            .get(start..quote_index)
+            .is_some_and(|slice| slice == prefix)
+        && matches!(source[quote_index], b'"' | b'\'')
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScannerStringError {
+    IllegalEscapeSequence,
+    UnicodeCharacter,
+    IllegalStringEndQuote,
+}
+
+impl ScannerStringError {
+    fn message(self) -> &'static str {
+        match self {
+            ScannerStringError::IllegalEscapeSequence => "Invalid escape sequence.",
+            ScannerStringError::UnicodeCharacter => {
+                "Invalid character in string. If you are trying to use Unicode characters, use a unicode\"...\" string literal."
+            }
+            ScannerStringError::IllegalStringEndQuote => "Expected string end-quote.",
+        }
+    }
+}
+
+enum ScannedStringLiteral {
+    String {
+        literal: Vec<u8>,
+        end: usize,
+    },
+    Illegal {
+        error: ScannerStringError,
+        end: usize,
+    },
+}
+
+fn scan_non_unicode_string_literal_for_scanner_mode(
+    source: &[u8],
+    start: usize,
+    end_limit: usize,
+) -> Option<ScannedStringLiteral> {
+    if start >= source.len() {
+        return None;
+    }
+
+    let quote = source[start];
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+
+    let end_limit = end_limit.min(source.len());
+    let mut literal = Vec::new();
+    let mut index = start + 1;
+    while index < end_limit {
+        if is_unicode_linebreak_at(source, index, end_limit) {
+            return Some(ScannedStringLiteral::Illegal {
+                error: ScannerStringError::IllegalStringEndQuote,
+                end: index,
+            });
+        }
+
+        let byte = source[index];
+        if byte == quote {
+            return Some(ScannedStringLiteral::String {
+                literal,
+                end: index + 1,
+            });
+        }
+
+        index += 1;
+        if byte == b'\\' {
+            if try_scan_end_of_line(source, &mut index, end_limit) {
+                continue;
+            }
+
+            if index >= end_limit {
+                return Some(ScannedStringLiteral::Illegal {
+                    error: ScannerStringError::IllegalEscapeSequence,
+                    end: index,
+                });
+            }
+
+            let escape = source[index];
+            index += 1;
+            match escape {
+                b'\'' => literal.push(b'\''),
+                b'"' => literal.push(b'"'),
+                b'\\' => literal.push(b'\\'),
+                b'n' => literal.push(b'\n'),
+                b'r' => literal.push(b'\r'),
+                b't' => literal.push(b'\t'),
+                b'x' => {
+                    let Some(hex_byte) = scan_fixed_hex_byte(source, &mut index, 2) else {
+                        return Some(ScannedStringLiteral::Illegal {
+                            error: ScannerStringError::IllegalEscapeSequence,
+                            end: index,
+                        });
+                    };
+                    literal.push(hex_byte as u8);
+                }
+                b'u' => {
+                    let Some(codepoint) = scan_fixed_hex_byte(source, &mut index, 4) else {
+                        return Some(ScannedStringLiteral::Illegal {
+                            error: ScannerStringError::IllegalEscapeSequence,
+                            end: index,
+                        });
+                    };
+                    append_codepoint_as_utf8(&mut literal, codepoint);
+                }
+                _ => {
+                    return Some(ScannedStringLiteral::Illegal {
+                        error: ScannerStringError::IllegalEscapeSequence,
+                        end: index,
+                    });
+                }
+            }
+        } else if byte <= 0x1f || byte >= 0x7f {
+            return Some(ScannedStringLiteral::Illegal {
+                error: ScannerStringError::UnicodeCharacter,
+                end: index,
+            });
+        } else {
+            literal.push(byte);
+        }
+    }
+
+    Some(ScannedStringLiteral::Illegal {
+        error: ScannerStringError::IllegalStringEndQuote,
+        end: end_limit,
+    })
+}
+
+fn is_unicode_linebreak_at(source: &[u8], index: usize, end_limit: usize) -> bool {
+    if index >= end_limit {
+        return false;
+    }
+
+    let byte = source[index];
+    if (0x0a..=0x0d).contains(&byte) {
+        return true;
+    }
+    if index + 1 < end_limit && source[index] == 0xc2 && source[index + 1] == 0x85 {
+        return true;
+    }
+    index + 2 < end_limit
+        && source[index] == 0xe2
+        && source[index + 1] == 0x80
+        && matches!(source[index + 2], 0xa8 | 0xa9)
+}
+
+fn try_scan_end_of_line(source: &[u8], index: &mut usize, end_limit: usize) -> bool {
+    match source.get(*index).copied() {
+        Some(b'\n') if *index < end_limit => {
+            *index += 1;
+            true
+        }
+        Some(b'\r') if *index < end_limit => {
+            *index += 1;
+            if *index < end_limit && source.get(*index) == Some(&b'\n') {
+                *index += 1;
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn scan_fixed_hex_byte(source: &[u8], index: &mut usize, digits: usize) -> Option<u32> {
+    let start = *index;
+    let mut value = 0u32;
+    for _ in 0..digits {
+        let Some(digit) = source.get(*index).and_then(|byte| hex_value(*byte)) else {
+            *index = start;
+            return None;
+        };
+        value = value * 16 + digit;
+        *index += 1;
+    }
+    Some(value)
+}
+
+fn hex_value(byte: u8) -> Option<u32> {
+    match byte {
+        b'0'..=b'9' => Some(u32::from(byte - b'0')),
+        b'a'..=b'f' => Some(u32::from(byte - b'a' + 10)),
+        b'A'..=b'F' => Some(u32::from(byte - b'A' + 10)),
+        _ => None,
+    }
+}
+
+fn append_codepoint_as_utf8(output: &mut Vec<u8>, codepoint: u32) {
+    if codepoint <= 0x7f {
+        output.push(codepoint as u8);
+    } else if codepoint <= 0x7ff {
+        output.push((0xc0 | (codepoint >> 6)) as u8);
+        output.push((0x80 | (codepoint & 0x3f)) as u8);
+    } else {
+        output.push((0xe0 | (codepoint >> 12)) as u8);
+        output.push((0x80 | ((codepoint >> 6) & 0x3f)) as u8);
+        output.push((0x80 | (codepoint & 0x3f)) as u8);
+    }
+}
+
+fn normalize_yul_illegal_token_for_scanner_mode(located_token: &mut ffi::WireLocatedToken) {
+    if located_token.token == token::TOKEN_ILLEGAL
+        && located_token.error
+            == "Invalid character in string. If you are trying to use Unicode characters, use a unicode\"...\" string literal."
+    {
+        located_token.error = "Invalid character in string.".to_string();
+    }
+}
+
+fn merge_yul_leading_dot_number_for_scanner_mode(
+    state: &mut ParserState,
+    index: usize,
+    source: &[u8],
+) -> bool {
+    if index + 1 >= state.tokens.len() {
+        return false;
+    }
+
+    let current = &state.tokens[index];
+    let next = &state.tokens[index + 1];
+    if current.token != token::TOKEN_PERIOD
+        || next.token != token::TOKEN_NUMBER
+        || current.location.end != next.location.start
+    {
+        return false;
+    }
+
+    let mut literal = token_literal_or_source_text(current, source);
+    let number_literal = token_literal_or_source_text(next, source);
+    if literal != b"." || number_literal.is_empty() {
+        return false;
+    }
+    literal.extend(number_literal);
+
+    let next_location_end = next.location.end;
+    let token = &mut state.tokens[index];
+    token.token = token::TOKEN_NUMBER;
+    token.literal.bytes = literal;
+    token.token_name.clear();
+    token.first_number = 0;
+    token.second_number = 0;
+    token.location.end = next_location_end;
+
+    state.tokens.drain(index + 1..=index + 1);
+    if state.comments.len() > index + 1 {
+        state.comments.drain(index + 1..=index + 1);
+    }
+
+    true
+}
+
+fn merge_yul_dotted_identifier_for_scanner_mode(
+    state: &mut ParserState,
+    index: usize,
+    source: &[u8],
+) -> bool {
+    let Some(first_token) = state.tokens.get(index) else {
+        return false;
+    };
+    if !token_can_come_from_identifier_or_keyword(first_token.token) {
+        return false;
+    }
+
+    let first_literal = token_literal_or_source_text(first_token, source);
+    if !first_literal
+        .first()
+        .is_some_and(|byte| is_identifier_start_byte(*byte))
+    {
+        return false;
+    }
+
+    let mut merged_literal = first_literal;
+    let mut end_index = index;
+    let mut end_location = state.tokens[index].location.end;
+    let mut saw_dot = false;
+
+    while end_index + 1 < state.tokens.len() {
+        let next = &state.tokens[end_index + 1];
+        if end_location != next.location.start {
+            break;
+        }
+
+        let next_literal = token_literal_or_source_text(next, source);
+        if next_literal.is_empty()
+            || !next_literal
+                .iter()
+                .all(|byte| is_identifier_part_byte(*byte) || *byte == b'.')
+        {
+            break;
+        }
+
+        let next_has_dot = next_literal.contains(&b'.');
+        if !saw_dot && !next_has_dot {
+            break;
+        }
+
+        saw_dot |= next_has_dot;
+        merged_literal.extend(next_literal);
+        end_index += 1;
+        end_location = state.tokens[end_index].location.end;
+    }
+
+    if end_index == index || !saw_dot {
+        return false;
+    }
+
+    let token = &mut state.tokens[index];
+    token.token = token::TOKEN_IDENTIFIER;
+    token.literal.bytes = merged_literal;
+    token.token_name.clear();
+    token.first_number = 0;
+    token.second_number = 0;
+    token.location.end = end_location;
+
+    state.tokens.drain(index + 1..=end_index);
+    if state.comments.len() > index + 1 {
+        let comments_end = (end_index + 1).min(state.comments.len());
+        state.comments.drain(index + 1..comments_end);
+    }
+
+    true
+}
+
+fn normalize_tokens_for_solidity_scanner_mode(tokens: &mut [ffi::WireLocatedToken], source: &[u8]) {
+    for located_token in tokens {
+        reclassify_token_for_solidity_scanner_mode(located_token, source);
+    }
+}
+
+fn reclassify_token_for_solidity_scanner_mode(
+    located_token: &mut ffi::WireLocatedToken,
+    source: &[u8],
+) {
+    if !token::is_experimental_solidity_only_keyword(located_token.token) {
+        return;
+    }
+
+    if located_token.literal.bytes.is_empty() {
+        located_token.literal.bytes = token_literal_or_source_text(located_token, source);
+    }
+    located_token.token = token::TOKEN_IDENTIFIER;
+    located_token.token_name.clear();
+    located_token.first_number = 0;
+    located_token.second_number = 0;
+}
+
+fn split_leading_dot_number_for_experimental_solidity(
+    state: &mut ParserState,
+    index: usize,
+) -> bool {
+    let Some(original) = state.tokens.get(index).cloned() else {
+        return false;
+    };
+    if original.token != token::TOKEN_NUMBER
+        || original.literal.bytes.len() < 2
+        || original.literal.bytes[0] != b'.'
+        || !original.literal.bytes[1].is_ascii_digit()
+    {
+        return false;
+    }
+
+    let split_position = original.location.start.saturating_add(1);
+
+    let mut period = original.clone();
+    period.token = token::TOKEN_PERIOD;
+    period.literal.bytes.clear();
+    period.token_name.clear();
+    period.first_number = 0;
+    period.second_number = 0;
+    period.location.end = split_position;
+
+    let mut number = original;
+    number.literal.bytes.remove(0);
+    number.token_name.clear();
+    number.first_number = 0;
+    number.second_number = 0;
+    number.location.start = split_position;
+
+    state.tokens[index] = period;
+    state.tokens.insert(index + 1, number);
+    state.comments.insert(index + 1, empty_parser_comment());
+
+    true
+}
+
+fn reclassify_token_for_experimental_solidity(
+    located_token: &mut ffi::WireLocatedToken,
+    source: &[u8],
+) {
+    let literal = if located_token.literal.bytes.is_empty() {
+        token_literal_or_source_text(located_token, source)
+    } else {
+        located_token.literal.bytes.clone()
+    };
+
+    let keyword = if literal.is_empty() {
+        located_token.token
+    } else {
+        token::from_identifier_or_keyword(&literal).0
+    };
+    let identifier_or_keyword_token = located_token.token == token::TOKEN_IDENTIFIER
+        || keyword == located_token.token
+        || (located_token.literal.bytes.is_empty()
+            && token_can_come_from_identifier_or_keyword(located_token.token));
+    if !identifier_or_keyword_token {
+        return;
+    }
+
+    if located_token.literal.bytes.is_empty() && !literal.is_empty() {
+        located_token.literal.bytes = literal.clone();
+    }
+
+    let reclassified = if token::is_experimental_solidity_keyword(keyword) {
+        keyword
+    } else {
+        token::TOKEN_IDENTIFIER
+    };
+
+    if located_token.token != reclassified {
+        located_token.token = reclassified;
+        located_token.token_name.clear();
+        located_token.first_number = 0;
+        located_token.second_number = 0;
+    }
+}
+
+fn reclassify_token_for_yul_scanner_mode(located_token: &mut ffi::WireLocatedToken, source: &[u8]) {
+    let literal = if located_token.literal.bytes.is_empty() {
+        token_literal_or_source_text(located_token, source)
+    } else {
+        located_token.literal.bytes.clone()
+    };
+
+    if located_token.token == token::TOKEN_IDENTIFIER && literal == b"leave" {
+        located_token.token = token::TOKEN_LEAVE;
+        located_token.literal.bytes = literal;
+        located_token.token_name.clear();
+        located_token.first_number = 0;
+        located_token.second_number = 0;
+        return;
+    }
+
+    if located_token.token != token::TOKEN_IDENTIFIER
+        && is_yul_evm_builtin_identifier_name(&literal)
+    {
+        located_token.token = token::TOKEN_IDENTIFIER;
+        located_token.literal.bytes = literal;
+        located_token.token_name.clear();
+        located_token.first_number = 0;
+        located_token.second_number = 0;
+        return;
+    }
+
+    let keyword = if literal.is_empty() {
+        located_token.token
+    } else {
+        token::from_identifier_or_keyword(&literal).0
+    };
+    let identifier_or_keyword_token = located_token.token == token::TOKEN_IDENTIFIER
+        || keyword == located_token.token
+        || (located_token.literal.bytes.is_empty()
+            && token_can_come_from_identifier_or_keyword(located_token.token));
+    if !identifier_or_keyword_token {
+        return;
+    }
+
+    if located_token.literal.bytes.is_empty() && !literal.is_empty() {
+        located_token.literal.bytes = literal;
+    }
+
+    let reclassified = if token::is_yul_keyword_token(keyword) {
+        keyword
+    } else {
+        token::TOKEN_IDENTIFIER
+    };
+
+    if located_token.token != reclassified {
+        located_token.token = reclassified;
+        located_token.token_name.clear();
+    }
+    located_token.first_number = 0;
+    located_token.second_number = 0;
+}
+
+fn token_can_come_from_identifier_or_keyword(token_id: u32) -> bool {
+    token_id == token::TOKEN_IDENTIFIER
+        || token_id == token::TOKEN_DELETE
+        || (token::TOKEN_ABSTRACT..=token::TOKEN_SUB_YEAR).contains(&token_id)
+        || (token::TOKEN_INT..token::TOKEN_TYPES_END).contains(&token_id)
+        || matches!(
+            token_id,
+            token::TOKEN_TRUE_LITERAL | token::TOKEN_FALSE_LITERAL
+        )
+        || (token::TOKEN_AFTER..=token::TOKEN_VAR).contains(&token_id)
+        || token::is_experimental_solidity_only_keyword(token_id)
+}
+
+fn exact_keyword_literal(token_id: u32) -> Option<Vec<u8>> {
+    if matches!(
+        token_id,
+        token::TOKEN_INT_M
+            | token::TOKEN_UINT_M
+            | token::TOKEN_BYTES_M
+            | token::TOKEN_FIXED_MXN
+            | token::TOKEN_UFIXED_MXN
+    ) {
+        return None;
+    }
+
+    token_to_string(token_id).map(|text| text.as_bytes().to_vec())
+}
+
+fn token_literal_or_source_text(located_token: &ffi::WireLocatedToken, source: &[u8]) -> Vec<u8> {
+    if !located_token.literal.bytes.is_empty() {
+        return located_token.literal.bytes.clone();
+    }
+
+    let start = located_token.location.start;
+    let end = located_token.location.end;
+    if start >= 0 && start < end {
+        let start = start as usize;
+        let end = end as usize;
+        if end <= source.len() {
+            return source[start..end].to_vec();
+        }
+    }
+
+    exact_keyword_literal(located_token.token).unwrap_or_default()
+}
+
+fn is_identifier_start_byte(byte: u8) -> bool {
+    byte == b'_' || byte == b'$' || byte.is_ascii_alphabetic()
+}
+
+fn is_identifier_part_byte(byte: u8) -> bool {
+    is_identifier_start_byte(byte) || byte.is_ascii_digit()
+}
+
+fn evm_version() -> EvmVersion {
+    PARSER_STATE.with(|state| state.borrow().evm_version)
+}
+
+fn evm_version_at_least(version: EvmVersion) -> bool {
+    evm_version() >= version
+}
+
+fn evm_version_at_least_constantinople() -> bool {
+    evm_version_at_least(EvmVersion::Constantinople)
+}
+
+fn current_compiler_version() -> String {
+    PARSER_STATE.with(|state| state.borrow().current_compiler_version.clone())
+}
+
+fn inside_modifier() -> bool {
+    PARSER_STATE.with(|state| state.borrow().inside_modifier)
+}
+
+fn set_inside_modifier(enabled: bool) {
+    PARSER_STATE.with(|state| {
+        state.borrow_mut().inside_modifier = enabled;
+    });
+}
+
+struct InsideModifierGuard;
+
+impl InsideModifierGuard {
+    fn new() -> Self {
+        set_inside_modifier(true);
+        Self
+    }
+}
+
+impl Drop for InsideModifierGuard {
+    fn drop(&mut self) {
+        set_inside_modifier(false);
+    }
+}
+
+fn is_current_stdlib_path() -> bool {
+    is_stdlib_path(
+        current_token(),
+        current_literal(),
+        experimental_solidity_enabled_in_current_source_unit(),
+    )
+}
+
+fn get_current_stdlib_import_path_and_advance() -> ffi::WireIdentifierResult {
+    let first = expect_identifier_token(current_token(), current_literal(), current_token_name());
+    if !first.errors.is_empty() {
+        return first;
+    }
+
+    let mut tokens_consumed = first.tokens_consumed;
+    advance_by(first.tokens_consumed);
+
+    if current_token() == token::TOKEN_PERIOD {
+        tokens_consumed += advance();
+    }
+
+    let library = expect_identifier_token(current_token(), current_literal(), current_token_name());
+    if !library.errors.is_empty() {
+        return ffi::WireIdentifierResult {
+            value: empty_string(),
+            tokens_consumed,
+            errors: library.errors,
+        };
+    }
+    tokens_consumed += library.tokens_consumed;
+    advance_by(library.tokens_consumed);
+
+    let mut value = first.value.bytes;
+    value.push(b'.');
+    value.extend(library.value.bytes);
+
+    ffi::WireIdentifierResult {
+        value: ffi::WireString { bytes: value },
+        tokens_consumed,
+        errors: Vec::new(),
+    }
+}
+
+fn advance() -> u64 {
+    PARSER_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.cursor < state.tokens.len() {
+            state.cursor += 1;
+            1
+        } else {
+            0
+        }
+    })
+}
+
+fn advance_by(tokens: u64) {
+    for _ in 0..tokens {
+        advance();
+    }
+}
+
+fn token_name(token_id: u32) -> String {
+    if token_id == token::TOKEN_IDENTIFIER {
+        "identifier".to_string()
+    } else if token_id == token::TOKEN_EOS {
+        "end of source".to_string()
+    } else if token::is_reserved_keyword(token_id) {
+        format!("reserved keyword '{}'", token::friendly_name(token_id))
+    } else {
+        format!("'{}'", token::friendly_name(token_id))
+    }
+}
+
+fn token_name_for_current_token(token_id: u32, literal: ffi::WireString) -> String {
+    if token::is_elementary_type_name(token_id) && !literal.bytes.is_empty() {
+        return format!("'{}'", String::from_utf8_lossy(&literal.bytes));
+    }
+
+    token_name(token_id)
+}
+
+fn token_to_string(token_id: u32) -> Option<&'static str> {
+    token::to_string(token_id)
+}
+
+fn current_token_numbers() -> (u32, u32) {
+    PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .tokens
+            .get(state.cursor)
+            .map(|token| (token.first_number, token.second_number))
+            .unwrap_or((0, 0))
+    })
+}
+
+fn current_elementary_type_text(token_id: u32) -> Vec<u8> {
+    let literal = current_literal().bytes;
+    if !literal.is_empty() {
+        return literal;
+    }
+
+    let token_info_text = PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .tokens
+            .get(state.cursor)
+            .and_then(|token| {
+                if token.first_number == 0 && token.second_number == 0 {
+                    None
+                } else {
+                    Some(token::elementary_type_name_token_to_string(
+                        token_id,
+                        token.first_number,
+                        token.second_number,
+                        false,
+                    ))
+                }
+            })
+            .unwrap_or_default()
+    });
+    if !token_info_text.is_empty() {
+        return token_info_text.into_bytes();
+    }
+
+    let source_text = PARSER_STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .tokens
+            .get(state.cursor)
+            .map(|token| token_literal_or_source_text(token, &state.source.bytes))
+            .unwrap_or_default()
+    });
+    if !source_text.is_empty() {
+        return source_text;
+    }
+
+    token_to_string(token_id)
+        .unwrap_or_default()
+        .as_bytes()
+        .to_vec()
+}
+
+fn is_user_definable_operator(token: u32) -> bool {
+    matches!(
+        token,
+        token::TOKEN_BIT_OR
+            | token::TOKEN_BIT_AND
+            | token::TOKEN_BIT_XOR
+            | token::TOKEN_BIT_NOT
+            | token::TOKEN_ADD
+            | token::TOKEN_SUB
+            | token::TOKEN_MUL
+            | token::TOKEN_DIV
+            | token::TOKEN_MOD
+            | token::TOKEN_EQUAL
+            | token::TOKEN_NOT_EQUAL
+            | token::TOKEN_LESS_THAN
+            | token::TOKEN_GREATER_THAN
+            | token::TOKEN_LESS_THAN_OR_EQUAL
+            | token::TOKEN_GREATER_THAN_OR_EQUAL
+    )
+}
+
+fn user_definable_operator_list() -> &'static str {
+    "|, &, ^, ~, +, -, *, /, %, ==, !=, <, >, <=, >="
+}
+
+fn parse_current_identifier() -> ffi::WireIdentifierNodeResult {
+    parse_current_identifier_with_node_id(current_node_id())
+}
+
+fn parse_current_identifier_with_node_id(current_node_id: i64) -> ffi::WireIdentifierNodeResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let identifier = parse_identifier(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+        current_node_id,
+    );
+    advance_by(identifier.tokens_consumed);
+    identifier
+}
+
+fn parse_current_identifier_or_address() -> ffi::WireIdentifierNodeResult {
+    parse_current_identifier_or_address_with_node_id(current_node_id())
+}
+
+fn parse_current_identifier_or_address_with_node_id(
+    current_node_id: i64,
+) -> ffi::WireIdentifierNodeResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let identifier = parse_identifier_or_address(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+        current_node_id,
+    );
+    advance_by(identifier.tokens_consumed);
+    identifier
+}
+
+fn parse_current_inheritance_specifier() -> ffi::WireInheritanceSpecifierResult {
+    parse_current_inheritance_specifier_with_node_id(current_node_id())
+}
+
+fn parse_current_inheritance_specifier_with_node_id(
+    current_node_id: i64,
+) -> ffi::WireInheritanceSpecifierResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let name = parse_current_identifier_path_with_node_id(current_node_id);
+    if !name.errors.is_empty() {
+        return ffi::WireInheritanceSpecifierResult {
+            inheritance_specifier: empty_ast_node(),
+            base_name: empty_ast_node(),
+            base_name_path: Vec::new(),
+            base_name_path_locations: Vec::new(),
+            has_arguments: false,
+            arguments: Vec::new(),
+            argument_details: Vec::new(),
+            tokens_consumed: name.tokens_consumed,
+            current_node_id,
+            errors: name.errors,
+        };
+    }
+
+    let mut tokens_consumed = name.tokens_consumed;
+    let base_name_path = name.path;
+    let base_name_path_locations = name.path_locations;
+    let base_name = name.identifier_path;
+    let mut node_location = base_name.location.clone();
+    let mut has_arguments = false;
+    let mut arguments = Vec::new();
+    let mut argument_details = Vec::new();
+    let mut node_id = name.current_node_id;
+    let mut errors = Vec::new();
+
+    if current_token() == token::TOKEN_LPAREN {
+        has_arguments = true;
+        tokens_consumed += advance();
+
+        let parsed_arguments = parse_function_call_list_arguments_with_errors();
+        tokens_consumed += parsed_arguments.tokens_consumed;
+        if parser_errors_have_fatal(&parsed_arguments.errors) {
+            return ffi::WireInheritanceSpecifierResult {
+                inheritance_specifier: empty_ast_node(),
+                base_name,
+                base_name_path,
+                base_name_path_locations,
+                has_arguments: true,
+                arguments: parsed_arguments.arguments,
+                argument_details: parsed_arguments.argument_details,
+                tokens_consumed,
+                current_node_id: node_id,
+                errors: parsed_arguments.errors,
+            };
+        }
+        errors.extend(parsed_arguments.errors);
+        arguments = parsed_arguments.arguments;
+        argument_details = parsed_arguments.argument_details;
+        node_id = max_node_id(node_id, &arguments);
+
+        node_location.end = current_location().end;
+        let rparen = expect_token(token::TOKEN_RPAREN);
+        tokens_consumed += rparen.tokens_consumed;
+        if !rparen.errors.is_empty() {
+            errors.extend(rparen.errors);
+            return ffi::WireInheritanceSpecifierResult {
+                inheritance_specifier: empty_ast_node(),
+                base_name,
+                base_name_path,
+                base_name_path_locations,
+                has_arguments: true,
+                arguments,
+                argument_details,
+                tokens_consumed,
+                current_node_id: node_id,
+                errors,
+            };
+        }
+    }
+
+    node_id = allocate_node_id_after(node_id);
+    ffi::WireInheritanceSpecifierResult {
+        inheritance_specifier: ffi::WireAstNode {
+            present: true,
+            node_id,
+            kind: AST_NODE_KIND_INHERITANCE_SPECIFIER,
+            location: node_location,
+            text: base_name.text.clone(),
+        },
+        base_name,
+        base_name_path,
+        base_name_path_locations,
+        has_arguments,
+        arguments,
+        argument_details,
+        tokens_consumed,
+        current_node_id: node_id,
+        errors,
+    }
+}
+
+fn parse_current_identifier_path() -> ffi::WireIdentifierPathResult {
+    parse_current_identifier_path_with_node_id(current_node_id())
+}
+
+fn parse_current_identifier_path_with_node_id(
+    current_node_id: i64,
+) -> ffi::WireIdentifierPathResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut node_location = current_location();
+    let mut tokens_consumed = 0;
+    let mut path = Vec::new();
+    let mut path_locations = Vec::new();
+
+    let first = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(first.tokens_consumed);
+    tokens_consumed += first.tokens_consumed;
+    if !first.errors.is_empty() {
+        return identifier_path_error(tokens_consumed, current_node_id, first.errors[0].clone());
+    }
+
+    path.push(first.identifier);
+    path_locations.push(first.location);
+
+    while current_token() == token::TOKEN_PERIOD {
+        tokens_consumed += advance();
+        node_location.end = current_location().end;
+
+        let identifier = expect_identifier_with_location(
+            current_token(),
+            current_literal(),
+            current_token_name(),
+            current_location(),
+        );
+        advance_by(identifier.tokens_consumed);
+        tokens_consumed += identifier.tokens_consumed;
+        if !identifier.errors.is_empty() {
+            return identifier_path_error(
+                tokens_consumed,
+                current_node_id,
+                identifier.errors[0].clone(),
+            );
+        }
+        node_location.end = identifier.location.end;
+
+        path.push(identifier.identifier);
+        path_locations.push(identifier.location);
+    }
+
+    let next_node_id = allocate_node_id_after(current_node_id);
+    let path_text = join_identifier_path(&path);
+    ffi::WireIdentifierPathResult {
+        identifier_path: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_IDENTIFIER_PATH,
+            location: node_location,
+            text: path_text,
+        },
+        path,
+        path_locations,
+        tokens_consumed,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+fn parse_current_user_defined_type_name() -> ffi::WireUserDefinedTypeNameResult {
+    parse_current_user_defined_type_name_with_node_id(current_node_id())
+}
+
+fn parse_current_user_defined_type_name_with_node_id(
+    current_node_id: i64,
+) -> ffi::WireUserDefinedTypeNameResult {
+    let identifier_path = parse_current_identifier_path_with_node_id(current_node_id);
+    if !identifier_path.errors.is_empty() {
+        return ffi::WireUserDefinedTypeNameResult {
+            type_name: empty_ast_node(),
+            path_node: empty_ast_node(),
+            path: Vec::new(),
+            path_locations: Vec::new(),
+            tokens_consumed: identifier_path.tokens_consumed,
+            current_node_id,
+            errors: identifier_path.errors,
+        };
+    }
+
+    let next_node_id = allocate_node_id_after(identifier_path.current_node_id);
+    ffi::WireUserDefinedTypeNameResult {
+        type_name: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_USER_DEFINED_TYPE_NAME,
+            location: identifier_path.identifier_path.location.clone(),
+            text: identifier_path.identifier_path.text.clone(),
+        },
+        path_node: identifier_path.identifier_path,
+        path: identifier_path.path,
+        path_locations: identifier_path.path_locations,
+        tokens_consumed: identifier_path.tokens_consumed,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+fn parse_current_type_class_name() -> ffi::WireTypeClassNameResult {
+    parse_current_type_class_name_with_node_id(current_node_id())
+}
+
+fn empty_type_class_name_result(current_node_id: i64) -> ffi::WireTypeClassNameResult {
+    ffi::WireTypeClassNameResult {
+        type_class_name: empty_ast_node(),
+        is_builtin: false,
+        builtin_token: 0,
+        identifier_path: empty_ast_node(),
+        identifier_path_detail: empty_identifier_path_result(current_node_id),
+        tokens_consumed: 0,
+        current_node_id,
+        errors: Vec::new(),
+    }
+}
+
+fn parse_current_type_class_name_with_node_id(
+    current_node_id: i64,
+) -> ffi::WireTypeClassNameResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    if token::is_builtin_type_class_name(current_token()) {
+        let location = current_location();
+        let builtin_token = current_token();
+        let text = token_to_string(current_token())
+            .map(|value| value.as_bytes().to_vec())
+            .unwrap_or_else(|| current_literal().bytes);
+        advance();
+        let next_node_id = allocate_node_id_after(current_node_id);
+        return ffi::WireTypeClassNameResult {
+            type_class_name: ffi::WireAstNode {
+                present: true,
+                node_id: next_node_id,
+                kind: AST_NODE_KIND_TYPE_CLASS_NAME,
+                location,
+                text: ffi::WireString { bytes: text },
+            },
+            is_builtin: true,
+            builtin_token,
+            identifier_path: empty_ast_node(),
+            identifier_path_detail: empty_identifier_path_result(current_node_id),
+            tokens_consumed: 1,
+            current_node_id: next_node_id,
+            errors: Vec::new(),
+        };
+    }
+
+    let identifier_path = parse_current_identifier_path_with_node_id(current_node_id);
+    if !identifier_path.errors.is_empty() {
+        return ffi::WireTypeClassNameResult {
+            type_class_name: empty_ast_node(),
+            is_builtin: false,
+            builtin_token: 0,
+            identifier_path: empty_ast_node(),
+            identifier_path_detail: empty_identifier_path_result(current_node_id),
+            tokens_consumed: identifier_path.tokens_consumed,
+            current_node_id,
+            errors: identifier_path.errors,
+        };
+    }
+
+    let next_node_id = allocate_node_id_after(identifier_path.current_node_id);
+    ffi::WireTypeClassNameResult {
+        type_class_name: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_TYPE_CLASS_NAME,
+            location: identifier_path.identifier_path.location.clone(),
+            text: identifier_path.identifier_path.text.clone(),
+        },
+        is_builtin: false,
+        builtin_token: 0,
+        identifier_path: identifier_path.identifier_path.clone(),
+        identifier_path_detail: identifier_path.clone(),
+        tokens_consumed: identifier_path.tokens_consumed,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+fn parse_current_modifier_invocation() -> ffi::WireModifierInvocationResult {
+    parse_current_modifier_invocation_with_node_id(current_node_id())
+}
+
+fn parse_current_modifier_invocation_with_node_id(
+    current_node_id: i64,
+) -> ffi::WireModifierInvocationResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let name = parse_current_identifier_path_with_node_id(current_node_id);
+    if !name.errors.is_empty() {
+        return empty_modifier_invocation_result(
+            name.tokens_consumed,
+            current_node_id,
+            name.errors,
+        );
+    }
+
+    let mut tokens_consumed = name.tokens_consumed;
+    let modifier_name_detail = name;
+    let modifier_name = modifier_name_detail.identifier_path.clone();
+    let mut node_location = modifier_name.location.clone();
+    let mut has_arguments = false;
+    let mut arguments = Vec::new();
+    let mut argument_details = Vec::new();
+    let mut node_id = modifier_name_detail.current_node_id;
+    let mut errors = Vec::new();
+
+    if current_token() == token::TOKEN_LPAREN {
+        has_arguments = true;
+        tokens_consumed += advance();
+
+        let parsed_arguments = parse_function_call_list_arguments_with_errors();
+        tokens_consumed += parsed_arguments.tokens_consumed;
+        if parser_errors_have_fatal(&parsed_arguments.errors) {
+            return modifier_invocation_result(
+                empty_ast_node(),
+                modifier_name_detail,
+                true,
+                parsed_arguments.arguments,
+                parsed_arguments.argument_details,
+                tokens_consumed,
+                node_id,
+                parsed_arguments.errors,
+            );
+        }
+        errors.extend(parsed_arguments.errors);
+        arguments = parsed_arguments.arguments;
+        argument_details = parsed_arguments.argument_details;
+        node_id = max_node_id(node_id, &arguments);
+
+        node_location.end = current_location().end;
+        let rparen = expect_token(token::TOKEN_RPAREN);
+        tokens_consumed += rparen.tokens_consumed;
+        if !rparen.errors.is_empty() {
+            errors.extend(rparen.errors);
+            return modifier_invocation_result(
+                empty_ast_node(),
+                modifier_name_detail,
+                true,
+                arguments,
+                argument_details,
+                tokens_consumed,
+                node_id,
+                errors,
+            );
+        }
+    }
+
+    node_id = allocate_node_id_after(node_id);
+    modifier_invocation_result(
+        ffi::WireAstNode {
+            present: true,
+            node_id,
+            kind: AST_NODE_KIND_MODIFIER_INVOCATION,
+            location: node_location,
+            text: modifier_name.text.clone(),
+        },
+        modifier_name_detail,
+        has_arguments,
+        arguments,
+        argument_details,
+        tokens_consumed,
+        node_id,
+        errors,
+    )
+}
+
+fn parse_current_override_specifier() -> ffi::WireOverrideSpecifierResult {
+    parse_current_override_specifier_with_node_id(current_node_id())
+}
+
+fn parse_current_override_specifier_with_node_id(
+    current_node_id: i64,
+) -> ffi::WireOverrideSpecifierResult {
+    assert!(current_token() == token::TOKEN_OVERRIDE);
+
+    let mut node_location = current_location();
+    let mut node_id = current_node_id;
+    let mut tokens_consumed = advance();
+    let mut overrides = Vec::new();
+    let mut override_details = Vec::new();
+
+    if current_token() == token::TOKEN_LPAREN {
+        tokens_consumed += advance();
+
+        loop {
+            let parsed_path = parse_current_identifier_path_with_node_id(node_id);
+            tokens_consumed += parsed_path.tokens_consumed;
+            if !parsed_path.errors.is_empty() {
+                return override_specifier_error(
+                    overrides,
+                    tokens_consumed,
+                    parsed_path.current_node_id,
+                    parsed_path.errors[0].clone(),
+                );
+            }
+
+            node_id = parsed_path.current_node_id;
+            overrides.push(parsed_path.identifier_path.clone());
+            override_details.push(parsed_path);
+
+            if current_token() == token::TOKEN_RPAREN {
+                break;
+            }
+
+            let comma = expect_token(token::TOKEN_COMMA);
+            tokens_consumed += comma.tokens_consumed;
+            if !comma.errors.is_empty() {
+                return override_specifier_error(
+                    overrides,
+                    tokens_consumed,
+                    node_id,
+                    comma.errors[0].clone(),
+                );
+            }
+        }
+
+        node_location.end = current_location().end;
+        let rparen = expect_token(token::TOKEN_RPAREN);
+        tokens_consumed += rparen.tokens_consumed;
+        if !rparen.errors.is_empty() {
+            return override_specifier_error(
+                overrides,
+                tokens_consumed,
+                node_id,
+                rparen.errors[0].clone(),
+            );
+        }
+    }
+
+    let next_node_id = allocate_node_id_after(node_id);
+    ffi::WireOverrideSpecifierResult {
+        override_specifier: ffi::WireAstNode {
+            present: true,
+            node_id: next_node_id,
+            kind: AST_NODE_KIND_OVERRIDE_SPECIFIER,
+            location: node_location,
+            text: empty_string(),
+        },
+        overrides,
+        override_details,
+        tokens_consumed,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+fn identifier_from_current_literal_and_advance() -> ffi::WireAstNode {
+    identifier_from_current_literal_and_advance_with_node_id(current_node_id()).identifier
+}
+
+fn identifier_from_current_literal_and_advance_with_node_id(
+    current_node_id: i64,
+) -> ffi::WireIdentifierNodeResult {
+    let location = current_location();
+    let literal = get_literal_and_advance(current_literal());
+    advance_by(literal.tokens_consumed);
+    let next_node_id = current_node_id + 1;
+    let identifier = ffi::WireAstNode {
+        present: true,
+        node_id: next_node_id,
+        kind: AST_NODE_KIND_IDENTIFIER,
+        location,
+        text: literal.value.clone(),
+    };
+    ffi::WireIdentifierNodeResult {
+        identifier,
+        name: literal.value,
+        tokens_consumed: literal.tokens_consumed,
+        current_node_id: next_node_id,
+        errors: Vec::new(),
+    }
+}
+
+fn elementary_type_name_expression_result_from_current_token() -> ffi::WireExpressionResult {
+    let location = current_location();
+    let text = current_elementary_type_text(current_token());
+    let node_id = allocate_node_id_after_reserving(current_node_id(), 2);
+
+    let expression_type = ffi::WireAstNode {
+        present: true,
+        node_id: node_id - 1,
+        kind: AST_NODE_KIND_ELEMENTARY_TYPE_NAME,
+        location: location.clone(),
+        text: ffi::WireString { bytes: text },
+    };
+    let expression = ffi::WireAstNode {
+        present: true,
+        node_id,
+        kind: AST_NODE_KIND_ELEMENTARY_TYPE_NAME_EXPRESSION,
+        location,
+        text: expression_type.text.clone(),
+    };
+    let mut result = expression_result(expression, Vec::new());
+    result.expression_type = expression_type;
+    result
+}
+
+fn max_node_id(current_node_id: i64, nodes: &[ffi::WireAstNode]) -> i64 {
+    nodes
+        .iter()
+        .fold(current_node_id, |max_id, node| max_id.max(node.node_id))
+}
+
+fn allocate_node_id_after(previous_max: i64) -> i64 {
+    allocate_node_id_after_reserving(previous_max, 1)
+}
+
+fn allocate_node_id_after_reserving(previous_max: i64, count: i64) -> i64 {
+    PARSER_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let next_node_id = state.current_node_id.max(previous_max) + count;
+        state.current_node_id = state.current_node_id.max(next_node_id);
+        next_node_id
+    })
+}
+
+fn max_index_access_node_id(current_node_id: i64, indices: &[ffi::WireIndexAccess]) -> i64 {
+    indices.iter().fold(current_node_id, |max_id, index| {
+        max_id
+            .max(index.start.node_id)
+            .max(if index.has_end { index.end.node_id } else { 0 })
+    })
+}
+
+fn source_locations_intersect(
+    first: &ffi::WireSourceLocation,
+    second: &ffi::WireSourceLocation,
+) -> bool {
+    source_location_has_text(first)
+        && source_location_has_text(second)
+        && first.source_id == second.source_id
+        && first.start < second.end
+        && second.start < first.end
+}
+
+fn find_license_declarations(
+    source: &[u8],
+    start: usize,
+    end: usize,
+    license_names: &mut Vec<Vec<u8>>,
+) {
+    let needle = b"SPDX-License-Identifier:";
+    let mut cursor = start;
+    while cursor < end {
+        let Some(relative_pos) = find_subslice(&source[cursor..end], needle) else {
+            break;
+        };
+        let marker_start = cursor + relative_pos;
+        let declaration_start = marker_start + needle.len();
+        if let Some((license_start, license_end, match_end)) =
+            find_license_declaration_match(source, declaration_start, end)
+        {
+            license_names.push(trim_ascii_whitespace(&source[license_start..license_end]).to_vec());
+            cursor = match_end;
+        } else {
+            cursor = marker_start + 1;
+        }
+    }
+}
+
+fn find_license_declaration_match(
+    source: &[u8],
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize, usize)> {
+    let whitespace_end = skip_ascii_whitespace(source, start, end);
+    let mut license_start = whitespace_end;
+    loop {
+        if let Some(result) = find_license_capture_match(source, license_start, end) {
+            return Some(result);
+        }
+        if license_start == start {
+            break;
+        }
+        license_start -= 1;
+    }
+    None
+}
+
+fn find_license_capture_match(
+    source: &[u8],
+    license_start: usize,
+    end: usize,
+) -> Option<(usize, usize, usize)> {
+    let mut license_end = license_start;
+    if license_end >= end || !license_capture_char_matches(source[license_end]) {
+        return None;
+    }
+    license_end += 1;
+
+    loop {
+        if let Some(delimiter_len) = license_declaration_delimiter_len(source, license_end, end) {
+            return Some((license_start, license_end, license_end + delimiter_len));
+        }
+        if license_end >= end || !license_capture_char_matches(source[license_end]) {
+            return None;
+        }
+        license_end += 1;
+    }
+}
+
+fn license_declaration_delimiter_len(
+    source: &[u8],
+    delimiter_start: usize,
+    end: usize,
+) -> Option<usize> {
+    if delimiter_start < end
+        && (source[delimiter_start] == b'\n' || source[delimiter_start] == b'\r')
+    {
+        return Some(1);
+    }
+    if delimiter_start + 1 < end
+        && source[delimiter_start] == b'*'
+        && source[delimiter_start + 1] == b'/'
+    {
+        return Some(2);
+    }
+    None
+}
+
+fn license_capture_char_matches(byte: u8) -> bool {
+    byte != b'\n' && byte != b'\r'
+}
+
+fn is_valid_license_name(license: &[u8]) -> bool {
+    !license.is_empty()
+        && license.iter().all(|&byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'(' | b')' | b'+' | b'.' | b'-')
+        })
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn source_location_has_text(location: &ffi::WireSourceLocation) -> bool {
+    0 <= location.source_id && 0 <= location.start && location.start <= location.end
+}
+
+fn skip_ascii_whitespace(source: &[u8], mut cursor: usize, end: usize) -> usize {
+    while cursor < end && matches!(source[cursor], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn trim_ascii_whitespace(source: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = source.len();
+    while start < end && source[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while start < end && source[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &source[start..end]
+}
+
+fn join_identifier_path(path: &[ffi::WireString]) -> ffi::WireString {
+    let mut bytes = Vec::new();
+    for (index, segment) in path.iter().enumerate() {
+        if index != 0 {
+            bytes.push(b'.');
+        }
+        bytes.extend_from_slice(&segment.bytes);
+    }
+    ffi::WireString { bytes }
+}
+
+fn join_ast_node_texts(path: &[ffi::WireAstNode]) -> ffi::WireString {
+    let mut bytes = Vec::new();
+    for (index, segment) in path.iter().enumerate() {
+        if index != 0 {
+            bytes.push(b'.');
+        }
+        bytes.extend_from_slice(&segment.text.bytes);
+    }
+    ffi::WireString { bytes }
+}
+
+fn join_wire_strings(strings: &[ffi::WireString]) -> ffi::WireString {
+    let mut bytes = Vec::new();
+    for (index, string) in strings.iter().enumerate() {
+        if index != 0 {
+            bytes.push(b' ');
+        }
+        bytes.extend_from_slice(&string.bytes);
+    }
+    ffi::WireString { bytes }
+}
+
+fn empty_ast_node() -> ffi::WireAstNode {
+    ffi::WireAstNode {
+        present: false,
+        node_id: 0,
+        kind: AST_NODE_KIND_NONE,
+        location: empty_source_location(),
+        text: empty_string(),
+    }
+}
+
+fn expression_result(
+    expression: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireExpressionResult {
+    ffi::WireExpressionResult {
+        expression,
+        left_expression: empty_ast_node(),
+        left_expression_detail: Vec::new(),
+        right_expression: empty_ast_node(),
+        right_expression_detail: Vec::new(),
+        condition_expression: empty_ast_node(),
+        condition_expression_detail: Vec::new(),
+        true_expression: empty_ast_node(),
+        true_expression_detail: Vec::new(),
+        false_expression: empty_ast_node(),
+        false_expression_detail: Vec::new(),
+        sub_expression: empty_ast_node(),
+        sub_expression_detail: Vec::new(),
+        is_prefix_operation: false,
+        base_expression: empty_ast_node(),
+        base_expression_detail: Vec::new(),
+        base_expression_type: empty_ast_node(),
+        index_expression: empty_ast_node(),
+        index_expression_detail: Vec::new(),
+        end_index_expression: empty_ast_node(),
+        end_index_expression_detail: Vec::new(),
+        type_name: empty_ast_node(),
+        type_name_detail: empty_type_name_result(Vec::new()),
+        expression_type: empty_ast_node(),
+        member_name_location: empty_source_location(),
+        arguments: Vec::new(),
+        argument_details: Vec::new(),
+        parameter_names: Vec::new(),
+        parameter_name_locations: Vec::new(),
+        components: Vec::new(),
+        component_details: Vec::new(),
+        is_inline_array: false,
+        literal_token: token::TOKEN_ILLEGAL,
+        literal_subdenomination: token::TOKEN_ILLEGAL,
+        errors,
+    }
+}
+
+fn empty_expression_result(errors: Vec<ffi::WireParserError>) -> ffi::WireExpressionResult {
+    expression_result(empty_ast_node(), errors)
+}
+
+fn statement_result(
+    statement: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> ffi::WireStatementResult {
+    ffi::WireStatementResult {
+        statement,
+        block_unchecked: false,
+        block_statements: Vec::new(),
+        block_statement_details: Vec::new(),
+        inline_assembly_flags: Vec::new(),
+        inline_assembly_block_location: empty_source_location(),
+        condition_expression: empty_ast_node(),
+        condition_expression_detail: empty_expression_result(Vec::new()),
+        true_body: empty_ast_node(),
+        true_body_detail: Vec::new(),
+        false_body: empty_ast_node(),
+        false_body_detail: Vec::new(),
+        body: empty_ast_node(),
+        body_detail: Vec::new(),
+        is_do_while: false,
+        external_call: empty_ast_node(),
+        external_call_detail: empty_expression_result(Vec::new()),
+        clauses: Vec::new(),
+        clause_details: Vec::new(),
+        clause_block_statement_details: Vec::new(),
+        clause_error_names: Vec::new(),
+        clause_error_parameters: Vec::new(),
+        clause_blocks: Vec::new(),
+        init_expression: empty_ast_node(),
+        init_expression_detail: Vec::new(),
+        loop_expression: empty_ast_node(),
+        loop_expression_detail: Vec::new(),
+        event_call: empty_ast_node(),
+        event_call_callee: empty_ast_node(),
+        event_call_callee_detail: empty_expression_result(Vec::new()),
+        event_call_arguments: Vec::new(),
+        event_call_argument_details: Vec::new(),
+        event_call_parameter_names: Vec::new(),
+        event_call_parameter_name_locations: Vec::new(),
+        error_call: empty_ast_node(),
+        error_call_callee: empty_ast_node(),
+        error_call_callee_detail: empty_expression_result(Vec::new()),
+        error_call_arguments: Vec::new(),
+        error_call_argument_details: Vec::new(),
+        error_call_parameter_names: Vec::new(),
+        error_call_parameter_name_locations: Vec::new(),
+        expression: empty_ast_node(),
+        expression_detail: empty_expression_result(Vec::new()),
+        variables: Vec::new(),
+        variable_details: Vec::new(),
+        initial_value: empty_ast_node(),
+        initial_value_detail: empty_expression_result(Vec::new()),
+        errors,
+    }
+}
+
+fn empty_statement_result(errors: Vec<ffi::WireParserError>) -> ffi::WireStatementResult {
+    statement_result(empty_ast_node(), errors)
+}
+
+fn empty_function_call_arguments() -> ffi::WireFunctionCallArguments {
+    ffi::WireFunctionCallArguments {
+        arguments: Vec::new(),
+        argument_details: Vec::new(),
+        parameter_names: Vec::new(),
+        parameter_name_locations: Vec::new(),
+        tokens_consumed: 0,
+        errors: Vec::new(),
+    }
+}
+
+fn empty_index_accessed_path() -> ffi::WireIndexAccessedPath {
+    ffi::WireIndexAccessedPath {
+        path: Vec::new(),
+        path_expression_types: Vec::new(),
+        indices: Vec::new(),
+        errors: Vec::new(),
+    }
+}
+
+fn empty_source_location() -> ffi::WireSourceLocation {
+    ffi::WireSourceLocation {
+        start: -1,
+        end: -1,
+        source_id: -1,
+    }
+}
+
+fn empty_parser_comment() -> ParserComment {
+    ParserComment {
+        literal: empty_string(),
+        location: empty_source_location(),
+    }
+}
+
+fn empty_string() -> ffi::WireString {
+    ffi::WireString { bytes: Vec::new() }
+}
+
+fn empty_optional_string() -> ffi::WireOptionalString {
+    ffi::WireOptionalString {
+        has_value: false,
+        value: empty_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_location(index: i64) -> ffi::WireSourceLocation {
+        ffi::WireSourceLocation {
+            start: index,
+            end: index + 1,
+            source_id: 0,
+        }
+    }
+
+    fn test_token(index: i64, token: u32, literal: &[u8]) -> ffi::WireLocatedToken {
+        ffi::WireLocatedToken {
+            token,
+            literal: ffi::WireString {
+                bytes: literal.to_vec(),
+            },
+            token_name: String::new(),
+            first_number: 0,
+            second_number: 0,
+            error: String::new(),
+            location: test_location(index),
+        }
+    }
+
+    fn test_token_with_span(
+        start: i64,
+        end: i64,
+        token: u32,
+        literal: &[u8],
+    ) -> ffi::WireLocatedToken {
+        let mut located_token = test_token(start, token, literal);
+        located_token.location.end = end;
+        located_token
+    }
+
+    fn assert_location_span(location: &ffi::WireSourceLocation, start: i64, end: i64) {
+        assert_eq!(location.start, start);
+        assert_eq!(location.end, end);
+        assert_eq!(location.source_id, 0);
+    }
+
+    #[test]
+    fn recursion_guard_uses_dedicated_limit_payload() {
+        reset_recursion_depth();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut guards = Vec::new();
+            for _ in 0..RECURSION_LIMIT {
+                guards.push(RecursionGuard::new());
+            }
+        }));
+        reset_recursion_depth();
+
+        let payload = result.expect_err("recursion guard should panic at depth limit");
+        assert!(payload.is::<RecursionLimitExceeded>());
+    }
+
+    fn set_tokens_with_evm_version(tokens: Vec<ffi::WireLocatedToken>, evm_version_name: &str) {
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input_with_evm_version(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            evm_version_name.to_string(),
+        );
+    }
+
+    fn yul_assignment_rhs_identifier_tokens(identifier: &[u8]) -> Vec<ffi::WireLocatedToken> {
+        vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, identifier),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ]
+    }
+
+    fn yul_let_name_tokens(identifier: &[u8]) -> Vec<ffi::WireLocatedToken> {
+        vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, identifier),
+            test_token(4, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(5, token::TOKEN_NUMBER, b"1"),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ]
+    }
+
+    #[test]
+    fn report_parser_diagnostics_preserves_locations() {
+        reset_parser_input();
+        clear_reported_parser_diagnostics();
+        let error_location = test_location(12);
+        let warning_location = test_location(34);
+
+        report_parser_diagnostics(&[
+            ffi::WireParserDiagnostic {
+                error_id: 1114,
+                message: "error".to_string(),
+                location: error_location.clone(),
+                fatal: false,
+                warning: false,
+            },
+            ffi::WireParserDiagnostic {
+                error_id: 1878,
+                message: "warning".to_string(),
+                location: warning_location.clone(),
+                fatal: false,
+                warning: true,
+            },
+        ]);
+
+        let errors = reported_parser_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].error_id, 1114);
+        assert_eq!(errors[0].location.start, error_location.start);
+        assert_eq!(errors[0].location.end, error_location.end);
+        assert_eq!(errors[0].location.source_id, error_location.source_id);
+
+        let warnings = reported_parser_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].error_id, 1878);
+        assert_eq!(warnings[0].location.start, warning_location.start);
+        assert_eq!(warnings[0].location.end, warning_location.end);
+        assert_eq!(warnings[0].location.source_id, warning_location.source_id);
+    }
+
+    #[test]
+    fn find_license_string_accepts_carriage_return_delimiter() {
+        let result = find_license_string(
+            ffi::WireString {
+                bytes: b"// SPDX-License-Identifier: MIT\rcontract C {}".to_vec(),
+            },
+            Vec::new(),
+            0,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.license.has_value);
+        assert_eq!(result.license.value.bytes, b"MIT");
+    }
+
+    #[test]
+    fn parse_pragma_version_handles_large_u32_component_without_overflow() {
+        let result = parse_pragma_version(
+            test_location(0),
+            vec![token::TOKEN_GREATER_THAN_OR_EQUAL, token::TOKEN_NUMBER],
+            vec![
+                empty_string(),
+                ffi::WireString {
+                    bytes: b"2147483648.0.0".to_vec(),
+                },
+            ],
+            "0.0.0".to_string(),
+        );
+
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 5333);
+    }
+
+    #[test]
+    fn expect_identifier_with_location_reports_explicit_error_location() {
+        reset_parser_input();
+        let location = test_location(42);
+
+        let result = expect_identifier_with_location(
+            token::TOKEN_LBRACE,
+            empty_string(),
+            "'{'".to_string(),
+            location.clone(),
+        );
+
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].location.start, location.start);
+        assert_eq!(result.errors[0].location.end, location.end);
+        assert_eq!(result.errors[0].location.source_id, location.source_id);
+    }
+
+    #[test]
+    fn expected_token_errors_use_scanner_token_info_for_sized_elementary_type() {
+        reset_parser_input();
+        let mut uint256 = test_token(0, token::TOKEN_UINT_M, b"");
+        uint256.first_number = 256;
+        let tokens = vec![uint256, test_token(1, token::TOKEN_EOS, b"")];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result =
+            expect_identifier_token(current_token(), current_literal(), current_token_name());
+
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(
+            result.errors[0].message,
+            "Expected identifier but got 'uint256'"
+        );
+    }
+
+    #[test]
+    fn token_slice_expected_errors_use_scanner_token_info_for_sized_elementary_type() {
+        let mut uint256 = test_token(0, token::TOKEN_UINT_M, b"");
+        uint256.first_number = 256;
+
+        let error = expected_token_error_for_token_slice("identifier", &[uint256], 0);
+
+        assert_eq!(error.message, "Expected identifier but got 'uint256'");
+    }
+
+    #[test]
+    fn parse_enum_value_reports_explicit_error_location() {
+        reset_parser_input();
+        let location = test_location(52);
+
+        let result = parse_enum_value(
+            empty_string(),
+            empty_source_location(),
+            token::TOKEN_LBRACE,
+            empty_string(),
+            "'{'".to_string(),
+            location.clone(),
+            0,
+        );
+
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].location.start, location.start);
+        assert_eq!(result.errors[0].location.end, location.end);
+        assert_eq!(result.errors[0].location.source_id, location.source_id);
+    }
+
+    #[test]
+    fn parse_returns_empty_success() {
+        reset_parser_input();
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.error_code, 0);
+        assert_eq!(result.max_id, 1);
+        assert!(result.source_unit.present);
+        assert_eq!(result.source_unit.kind, AST_NODE_KIND_SOURCE_UNIT);
+    }
+
+    #[test]
+    fn parse_source_unit_preserves_user_defined_value_type_metadata() {
+        reset_parser_input();
+        let mut uint256 = test_token(3, token::TOKEN_UINT_M, b"");
+        uint256.first_number = 256;
+        let tokens = vec![
+            test_token(0, token::TOKEN_TYPE, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"MyInt"),
+            test_token(2, token::TOKEN_IS, b""),
+            uint256,
+            test_token(4, token::TOKEN_SEMICOLON, b""),
+            test_token(5, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_nodes.len(), 1);
+        assert_eq!(result.source_unit_user_defined_value_types.len(), 1);
+        let definition = &result.source_unit_user_defined_value_types[0];
+        assert_eq!(
+            definition.user_defined_value_type_definition.node_id,
+            result.source_unit_nodes[0].node_id
+        );
+        assert_eq!(definition.name.bytes, b"MyInt");
+        assert_eq!(
+            definition.type_name.kind,
+            AST_NODE_KIND_ELEMENTARY_TYPE_NAME
+        );
+        assert_eq!(definition.type_name_elementary_token, token::TOKEN_UINT_M);
+        assert_eq!(definition.type_name_elementary_first_number, 256);
+        assert_eq!(definition.type_name_elementary_second_number, 0);
+        assert!(!definition.type_name_has_state_mutability);
+        assert_eq!(
+            definition.type_name_state_mutability,
+            STATE_MUTABILITY_NON_PAYABLE
+        );
+    }
+
+    #[test]
+    fn parse_source_unit_preserves_experimental_type_definition_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_PRAGMA, b"pragma"),
+            test_token(1, token::TOKEN_IDENTIFIER, b"experimental"),
+            test_token(2, token::TOKEN_IDENTIFIER, b"solidity"),
+            test_token(3, token::TOKEN_SEMICOLON, b""),
+            test_token(4, token::TOKEN_TYPE, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"fun"),
+            test_token(6, token::TOKEN_LPAREN, b""),
+            test_token(7, token::TOKEN_IDENTIFIER, b"T"),
+            test_token(8, token::TOKEN_COMMA, b""),
+            test_token(9, token::TOKEN_IDENTIFIER, b"U"),
+            test_token(10, token::TOKEN_RPAREN, b""),
+            test_token(11, token::TOKEN_ASSIGN, b""),
+            test_token(12, token::TOKEN_BUILTIN, b"__builtin"),
+            test_token(13, token::TOKEN_LPAREN, b""),
+            test_token(14, token::TOKEN_STRING_LITERAL, b"fun"),
+            test_token(15, token::TOKEN_RPAREN, b""),
+            test_token(16, token::TOKEN_SEMICOLON, b""),
+            test_token(17, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_nodes.len(), 2);
+        assert_eq!(result.source_unit_type_definitions.len(), 1);
+        let definition = &result.source_unit_type_definitions[0];
+        assert_eq!(
+            definition.type_definition.node_id,
+            result.source_unit_nodes[1].node_id
+        );
+        assert_eq!(definition.name.bytes, b"fun");
+        assert_eq!(definition.arguments.kind, AST_NODE_KIND_PARAMETER_LIST);
+        assert_eq!(definition.argument_parameters.len(), 2);
+        assert_eq!(definition.argument_details.len(), 2);
+        assert_eq!(
+            definition.argument_parameters[0].node_id,
+            definition.argument_details[0].variable_declaration.node_id
+        );
+        assert_eq!(definition.expression.kind, AST_NODE_KIND_BUILTIN);
+        assert!(!definition.expression_detail.expression.present);
+        assert!(definition.has_builtin_name_parameter);
+        assert_eq!(definition.builtin_name_parameter.bytes, b"fun");
+        assert_eq!(definition.builtin_name_parameter_location.start, 14);
+    }
+
+    #[test]
+    fn parse_source_unit_preserves_type_class_definition_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_PRAGMA, b"pragma"),
+            test_token(1, token::TOKEN_IDENTIFIER, b"experimental"),
+            test_token(2, token::TOKEN_IDENTIFIER, b"solidity"),
+            test_token(3, token::TOKEN_SEMICOLON, b""),
+            test_token(4, token::TOKEN_CLASS, b"class"),
+            test_token(5, token::TOKEN_IDENTIFIER, b"T"),
+            test_token(6, token::TOKEN_COLON, b""),
+            test_token(7, token::TOKEN_IDENTIFIER, b"Eq"),
+            test_token(8, token::TOKEN_LBRACE, b""),
+            test_token(9, token::TOKEN_FUNCTION, b""),
+            test_token(10, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(11, token::TOKEN_LPAREN, b""),
+            test_token(12, token::TOKEN_RPAREN, b""),
+            test_token(13, token::TOKEN_SEMICOLON, b""),
+            test_token(14, token::TOKEN_RBRACE, b""),
+            test_token(15, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_nodes.len(), 2);
+        assert_eq!(result.source_unit_type_class_definitions.len(), 1);
+        let definition = &result.source_unit_type_class_definitions[0];
+        assert_eq!(
+            definition.type_class_definition.node_id,
+            result.source_unit_nodes[1].node_id
+        );
+        assert_eq!(
+            definition.type_variable.kind,
+            AST_NODE_KIND_VARIABLE_DECLARATION
+        );
+        assert_eq!(definition.type_variable_name.bytes, b"T");
+        assert_eq!(definition.name.bytes, b"Eq");
+        assert_eq!(definition.sub_nodes.len(), 1);
+        assert_eq!(definition.sub_node_function_details.len(), 1);
+        assert_eq!(
+            definition.sub_nodes[0].node_id,
+            definition.sub_node_function_details[0]
+                .function_definition
+                .node_id
+        );
+    }
+
+    #[test]
+    fn parse_source_unit_preserves_type_class_instantiation_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_PRAGMA, b"pragma"),
+            test_token(1, token::TOKEN_IDENTIFIER, b"experimental"),
+            test_token(2, token::TOKEN_IDENTIFIER, b"solidity"),
+            test_token(3, token::TOKEN_SEMICOLON, b""),
+            test_token(4, token::TOKEN_TYPE, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"T"),
+            test_token(6, token::TOKEN_SEMICOLON, b""),
+            test_token(7, token::TOKEN_INSTANTIATION, b"instantiation"),
+            test_token(8, token::TOKEN_IDENTIFIER, b"T"),
+            test_token(9, token::TOKEN_COLON, b""),
+            test_token(10, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(11, token::TOKEN_LBRACE, b""),
+            test_token(12, token::TOKEN_FUNCTION, b""),
+            test_token(13, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(14, token::TOKEN_LPAREN, b""),
+            test_token(15, token::TOKEN_RPAREN, b""),
+            test_token(16, token::TOKEN_LBRACE, b""),
+            test_token(17, token::TOKEN_RBRACE, b""),
+            test_token(18, token::TOKEN_RBRACE, b""),
+            test_token(19, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_nodes.len(), 3);
+        assert_eq!(result.source_unit_type_class_instantiations.len(), 1);
+        let instantiation = &result.source_unit_type_class_instantiations[0];
+        assert_eq!(
+            instantiation.type_class_instantiation.node_id,
+            result.source_unit_nodes[2].node_id
+        );
+        assert_eq!(
+            instantiation.type_constructor.kind,
+            AST_NODE_KIND_USER_DEFINED_TYPE_NAME
+        );
+        assert_eq!(
+            instantiation.type_constructor_detail.type_name.node_id,
+            instantiation.type_constructor.node_id
+        );
+        assert!(!instantiation.argument_sorts.present);
+        assert_eq!(
+            instantiation.type_class_name.kind,
+            AST_NODE_KIND_TYPE_CLASS_NAME
+        );
+        assert_eq!(
+            instantiation
+                .type_class_name_detail
+                .identifier_path_detail
+                .path[0]
+                .bytes,
+            b"C"
+        );
+        assert_eq!(instantiation.sub_nodes.len(), 1);
+        assert_eq!(instantiation.sub_node_function_details.len(), 1);
+        assert_eq!(
+            instantiation.sub_nodes[0].node_id,
+            instantiation.sub_node_function_details[0]
+                .function_definition
+                .node_id
+        );
+    }
+
+    #[test]
+    fn parse_type_class_instantiation_argument_sorts_do_not_reuse_constructor_node_id() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_INSTANTIATION, b"instantiation"),
+            test_token(1, token::TOKEN_IDENTIFIER, b"T"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"A"),
+            test_token(4, token::TOKEN_COLON, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"P1"),
+            test_token(6, token::TOKEN_RPAREN, b""),
+            test_token(7, token::TOKEN_COLON, b""),
+            test_token(8, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(9, token::TOKEN_LBRACE, b""),
+            test_token(10, token::TOKEN_RBRACE, b""),
+            test_token(11, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+        set_scanner_mode_experimental_solidity();
+
+        let result = parse_type_class_instantiation();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.type_constructor.kind,
+            AST_NODE_KIND_USER_DEFINED_TYPE_NAME
+        );
+        assert_eq!(result.type_constructor.location.start, 1);
+        assert_eq!(result.argument_sorts.location.start, 2);
+        assert_eq!(result.argument_sort_details.len(), 1);
+        let argument_sort = &result.argument_sort_details[0];
+        assert_eq!(argument_sort.variable_declaration.location.start, 3);
+        assert_eq!(argument_sort.type_expression.location.start, 5);
+        assert_ne!(
+            result.type_constructor.node_id,
+            argument_sort.variable_declaration.node_id
+        );
+        assert_ne!(
+            result.type_constructor.node_id,
+            argument_sort.type_expression.node_id
+        );
+    }
+
+    #[test]
+    fn parse_source_unit_preserves_enum_definition_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ENUM, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"Choice"),
+            test_token(2, token::TOKEN_LBRACE, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"Yes"),
+            test_token(4, token::TOKEN_COMMA, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"No"),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_nodes.len(), 1);
+        assert_eq!(result.source_unit_enums.len(), 1);
+        let definition = &result.source_unit_enums[0];
+        assert_eq!(definition.name.bytes, b"Choice");
+        assert_eq!(
+            definition.enum_definition.node_id,
+            result.source_unit_nodes[0].node_id
+        );
+        assert_eq!(definition.members.len(), 2);
+        assert_eq!(definition.member_details.len(), 2);
+        assert_eq!(definition.member_details[0].name.bytes, b"Yes");
+        assert_eq!(
+            definition.member_details[0].enum_value.node_id,
+            definition.members[0].node_id
+        );
+        assert_eq!(definition.member_details[1].name.bytes, b"No");
+    }
+
+    #[test]
+    fn parse_source_unit_preserves_empty_struct_definition_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_STRUCT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"Point"),
+            test_token(2, token::TOKEN_LBRACE, b""),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_nodes.len(), 1);
+        assert_eq!(result.source_unit_structs.len(), 1);
+        let definition = &result.source_unit_structs[0];
+        assert_eq!(definition.name.bytes, b"Point");
+        assert_eq!(
+            definition.struct_definition.node_id,
+            result.source_unit_nodes[0].node_id
+        );
+        assert!(definition.members.is_empty());
+    }
+
+    #[test]
+    fn parse_source_unit_preserves_empty_event_and_error_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_EVENT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"Ping"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_RPAREN, b""),
+            test_token(4, token::TOKEN_ANONYMOUS, b""),
+            test_token(5, token::TOKEN_SEMICOLON, b""),
+            test_token(6, token::TOKEN_IDENTIFIER, b"error"),
+            test_token(7, token::TOKEN_IDENTIFIER, b"Failure"),
+            test_token(8, token::TOKEN_LPAREN, b""),
+            test_token(9, token::TOKEN_RPAREN, b""),
+            test_token(10, token::TOKEN_SEMICOLON, b""),
+            test_token(11, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_nodes.len(), 2);
+        assert_eq!(result.source_unit_events.len(), 1);
+        assert_eq!(result.source_unit_errors.len(), 1);
+        let event = &result.source_unit_events[0];
+        assert_eq!(event.name.bytes, b"Ping");
+        assert_eq!(
+            event.event_definition.node_id,
+            result.source_unit_nodes[0].node_id
+        );
+        assert_eq!(event.parameters.kind, AST_NODE_KIND_PARAMETER_LIST);
+        assert!(event.parameter_declarations.is_empty());
+        assert!(event.parameter_details.is_empty());
+        assert!(event.anonymous);
+        let error = &result.source_unit_errors[0];
+        assert_eq!(error.name.bytes, b"Failure");
+        assert_eq!(
+            error.error_definition.node_id,
+            result.source_unit_nodes[1].node_id
+        );
+        assert_eq!(error.parameters.kind, AST_NODE_KIND_PARAMETER_LIST);
+        assert!(error.parameter_declarations.is_empty());
+        assert!(error.parameter_details.is_empty());
+    }
+
+    #[test]
+    fn parse_source_unit_preserves_event_and_error_parameter_details() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_EVENT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"Ping"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_UINT, b"uint"),
+            test_token(4, token::TOKEN_INDEXED, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"value"),
+            test_token(6, token::TOKEN_RPAREN, b""),
+            test_token(7, token::TOKEN_SEMICOLON, b""),
+            test_token(8, token::TOKEN_IDENTIFIER, b"error"),
+            test_token(9, token::TOKEN_IDENTIFIER, b"Failure"),
+            test_token(10, token::TOKEN_LPAREN, b""),
+            test_token(11, token::TOKEN_UINT, b"uint"),
+            test_token(12, token::TOKEN_IDENTIFIER, b"code"),
+            test_token(13, token::TOKEN_RPAREN, b""),
+            test_token(14, token::TOKEN_SEMICOLON, b""),
+            test_token(15, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_events.len(), 1);
+        let event = &result.source_unit_events[0];
+        assert_eq!(event.parameter_declarations.len(), 1);
+        assert_eq!(event.parameter_details.len(), 1);
+        assert_eq!(
+            event.parameter_details[0].variable_declaration.node_id,
+            event.parameter_declarations[0].node_id
+        );
+        assert_eq!(event.parameter_details[0].name.bytes, b"value");
+        assert_eq!(
+            event.parameter_details[0].type_name_elementary_token,
+            token::TOKEN_UINT
+        );
+        assert!(event.parameter_details[0].indexed);
+
+        assert_eq!(result.source_unit_errors.len(), 1);
+        let error = &result.source_unit_errors[0];
+        assert_eq!(error.parameter_declarations.len(), 1);
+        assert_eq!(error.parameter_details.len(), 1);
+        assert_eq!(
+            error.parameter_details[0].variable_declaration.node_id,
+            error.parameter_declarations[0].node_id
+        );
+        assert_eq!(error.parameter_details[0].name.bytes, b"code");
+        assert_eq!(
+            error.parameter_details[0].type_name_elementary_token,
+            token::TOKEN_UINT
+        );
+        assert!(!error.parameter_details[0].indexed);
+    }
+
+    #[test]
+    fn parse_source_unit_preserves_file_level_variable_details() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_UINT, b"uint"),
+            test_token(1, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(2, token::TOKEN_SEMICOLON, b""),
+            test_token(3, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_nodes.len(), 1);
+        assert_eq!(
+            result.source_unit_nodes[0].kind,
+            AST_NODE_KIND_VARIABLE_DECLARATION
+        );
+        assert_eq!(result.source_unit_variable_declarations.len(), 1);
+        assert_eq!(
+            result.source_unit_variable_declarations[0]
+                .variable_declaration
+                .node_id,
+            result.source_unit_nodes[0].node_id
+        );
+        assert_eq!(result.source_unit_variable_declarations[0].name.bytes, b"x");
+        assert_eq!(
+            result.source_unit_variable_declarations[0].type_name_elementary_token,
+            token::TOKEN_UINT
+        );
+    }
+
+    #[test]
+    fn parse_source_unit_preserves_free_function_details() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FUNCTION, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_UINT, b"uint"),
+            test_token(4, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(5, token::TOKEN_RPAREN, b""),
+            test_token(6, token::TOKEN_RETURNS, b""),
+            test_token(7, token::TOKEN_LPAREN, b""),
+            test_token(8, token::TOKEN_BOOL, b"bool"),
+            test_token(9, token::TOKEN_IDENTIFIER, b"ok"),
+            test_token(10, token::TOKEN_RPAREN, b""),
+            test_token(11, token::TOKEN_LBRACE, b""),
+            test_token(12, token::TOKEN_RBRACE, b""),
+            test_token(13, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_nodes.len(), 1);
+        assert_eq!(
+            result.source_unit_nodes[0].kind,
+            AST_NODE_KIND_FUNCTION_DEFINITION
+        );
+        assert_eq!(result.source_unit_functions.len(), 1);
+        let function = &result.source_unit_functions[0];
+        assert_eq!(
+            function.function_definition.node_id,
+            result.source_unit_nodes[0].node_id
+        );
+        assert_eq!(function.name.bytes, b"f");
+        assert_eq!(function.parameter_details.len(), 1);
+        assert_eq!(function.parameter_details[0].name.bytes, b"x");
+        assert_eq!(function.return_parameter_details.len(), 1);
+        assert_eq!(function.return_parameter_details[0].name.bytes, b"ok");
+        assert_eq!(function.block.kind, AST_NODE_KIND_BLOCK);
+        assert!(function.block_statements.is_empty());
+    }
+
+    #[test]
+    fn parse_source_unit_preserves_empty_contract_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ABSTRACT, b""),
+            test_token(1, token::TOKEN_CONTRACT, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(3, token::TOKEN_LBRACE, b""),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_INTERFACE, b""),
+            test_token(6, token::TOKEN_IDENTIFIER, b"I"),
+            test_token(7, token::TOKEN_LBRACE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_LIBRARY, b""),
+            test_token(10, token::TOKEN_IDENTIFIER, b"L"),
+            test_token(11, token::TOKEN_LBRACE, b""),
+            test_token(12, token::TOKEN_RBRACE, b""),
+            test_token(13, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_nodes.len(), 3);
+        assert_eq!(result.source_unit_contracts.len(), 3);
+        let contract = &result.source_unit_contracts[0];
+        assert_eq!(contract.name.bytes, b"C");
+        assert_eq!(contract.contract_kind, CONTRACT_KIND_CONTRACT);
+        assert!(contract.is_abstract);
+        assert!(contract.base_contracts.is_empty());
+        assert!(contract.sub_nodes.is_empty());
+        assert!(!contract.storage_layout_specifier.present);
+        assert_eq!(
+            contract.contract_definition.node_id,
+            result.source_unit_nodes[0].node_id
+        );
+        assert_eq!(
+            result.source_unit_contracts[1].contract_kind,
+            CONTRACT_KIND_INTERFACE
+        );
+        assert_eq!(
+            result.source_unit_contracts[2].contract_kind,
+            CONTRACT_KIND_LIBRARY
+        );
+    }
+
+    #[test]
+    fn parse_preserves_function_keyword_warning_before_later_fatal_error() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FUNCTION, b""),
+            test_token(1, token::TOKEN_FALLBACK, b"fallback"),
+            test_token(2, token::TOKEN_SEMICOLON, b""),
+            test_token(3, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(!result.ok);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].error_id, 3445);
+        assert_eq!(
+            result.warnings[0].message,
+            "This function is named \"fallback\" but is not the fallback function of the contract. If you intend this to be a fallback function, use \"fallback(...) { ... }\" without the \"function\" keyword to define it."
+        );
+    }
+
+    #[test]
+    fn set_parser_input_solidity_mode_reclassifies_experimental_only_keywords() {
+        reset_parser_input();
+        let mut class = test_token(0, token::TOKEN_CLASS, b"");
+        class.first_number = 1;
+        class.second_number = 2;
+        let mut forall = test_token(1, token::TOKEN_FORALL, b"");
+        forall.first_number = 3;
+        forall.second_number = 4;
+        let tokens = vec![class, forall, test_token(2, token::TOKEN_EOS, b"")];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"class");
+            assert_eq!(state.tokens[0].first_number, 0);
+            assert_eq!(state.tokens[0].second_number, 0);
+            assert_eq!(state.tokens[1].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[1].literal.bytes, b"forall");
+            assert_eq!(state.tokens[1].first_number, 0);
+            assert_eq!(state.tokens[1].second_number, 0);
+        });
+    }
+
+    #[test]
+    fn parse_solidity_mode_treats_experimental_only_keyword_as_identifier() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_CLASS, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(2, token::TOKEN_SEMICOLON, b""),
+            test_token(3, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_nodes.len(), 1);
+        assert_eq!(
+            result.source_unit_nodes[0].kind,
+            AST_NODE_KIND_VARIABLE_DECLARATION
+        );
+    }
+
+    #[test]
+    fn scanner_mode_experimental_reclassifies_remaining_identifier_tokens() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_PUBLIC, b"public"),
+            test_token(1, token::TOKEN_IDENTIFIER, b"let"),
+            test_token(2, token::TOKEN_PUBLIC, b"public"),
+            test_token(3, token::TOKEN_CONTRACT, b"contract"),
+            test_token(4, token::TOKEN_CLASS, b"class"),
+            test_token(5, token::TOKEN_ADD, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        advance();
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_PUBLIC);
+            assert_eq!(state.tokens[1].token, token::TOKEN_LET);
+            assert_eq!(state.tokens[2].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[2].literal.bytes, b"public");
+            assert_eq!(state.tokens[3].token, token::TOKEN_CONTRACT);
+            assert_eq!(state.tokens[4].token, token::TOKEN_CLASS);
+            assert_eq!(state.tokens[5].token, token::TOKEN_ADD);
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_reclassifies_empty_literal_legacy_keywords() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_EXTERNAL, b""),
+            test_token(1, token::TOKEN_ADDRESS, b""),
+            test_token(2, token::TOKEN_TRUE_LITERAL, b""),
+            test_token(3, token::TOKEN_UINT_M, b""),
+            test_token(4, token::TOKEN_ADD, b""),
+            test_token(5, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_EXTERNAL);
+            assert_eq!(state.tokens[1].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[1].literal.bytes, b"address");
+            assert_eq!(state.tokens[2].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[2].literal.bytes, b"true");
+            assert_eq!(state.tokens[3].token, token::TOKEN_IDENTIFIER);
+            assert!(state.tokens[3].literal.bytes.is_empty());
+            assert_eq!(state.tokens[4].token, token::TOKEN_ADD);
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_clears_sized_keyword_metadata_for_identifier() {
+        reset_parser_input();
+        let mut uint256 = test_token(0, token::TOKEN_UINT_M, b"uint256");
+        uint256.first_number = 256;
+        let tokens = vec![uint256, test_token(7, token::TOKEN_EOS, b"")];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"uint256");
+            assert_eq!(state.tokens[0].first_number, 0);
+            assert_eq!(state.tokens[0].second_number, 0);
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_recovers_bare_prefixed_string_keywords_as_identifiers() {
+        reset_parser_input();
+        let mut unicode = test_token(0, token::TOKEN_ILLEGAL, b"");
+        unicode.location.end = 7;
+        unicode.error = "Invalid token.".to_string();
+        let mut first_semicolon = test_token(7, token::TOKEN_SEMICOLON, b"");
+        first_semicolon.location.end = 8;
+        let mut hex = test_token(9, token::TOKEN_ILLEGAL, b"");
+        hex.location.end = 12;
+        hex.error = "Invalid token.".to_string();
+        let mut second_semicolon = test_token(12, token::TOKEN_SEMICOLON, b"");
+        second_semicolon.location.end = 13;
+        let mut eos = test_token(13, token::TOKEN_EOS, b"");
+        eos.location.end = 13;
+        let tokens = vec![unicode, first_semicolon, hex, second_semicolon, eos];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"unicode; hex;".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"unicode");
+            assert!(state.tokens[0].error.is_empty());
+            assert_eq!(state.tokens[1].token, token::TOKEN_SEMICOLON);
+            assert_eq!(state.tokens[2].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[2].literal.bytes, b"hex");
+            assert!(state.tokens[2].error.is_empty());
+            assert_eq!(state.tokens[3].token, token::TOKEN_SEMICOLON);
+            assert_eq!(state.tokens[4].token, token::TOKEN_EOS);
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_recovers_missing_literals_from_source() {
+        reset_parser_input();
+        let mut uint256 = test_token(0, token::TOKEN_UINT_M, b"");
+        uint256.location = ffi::WireSourceLocation {
+            start: 0,
+            end: 7,
+            source_id: 0,
+        };
+        let mut external = test_token(1, token::TOKEN_EXTERNAL, b"");
+        external.location = ffi::WireSourceLocation {
+            start: 8,
+            end: 16,
+            source_id: 0,
+        };
+        let tokens = vec![uint256, external, test_token(16, token::TOKEN_EOS, b"")];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"uint256 external".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"uint256");
+            assert_eq!(state.tokens[1].token, token::TOKEN_EXTERNAL);
+            assert_eq!(state.tokens[1].literal.bytes, b"external");
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_splits_remaining_leading_dot_numbers() {
+        reset_parser_input();
+        let mut leading_dot_number = test_token(10, token::TOKEN_NUMBER, b".5e10");
+        leading_dot_number.location.end = 15;
+        leading_dot_number.first_number = 1;
+        leading_dot_number.second_number = 2;
+        let tokens = vec![
+            test_token(0, token::TOKEN_NUMBER, b".1"),
+            leading_dot_number,
+            test_token(15, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        advance();
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_NUMBER);
+            assert_eq!(state.tokens[0].literal.bytes, b".1");
+            assert_eq!(state.tokens[1].token, token::TOKEN_PERIOD);
+            assert!(state.tokens[1].literal.bytes.is_empty());
+            assert_eq!(state.tokens[1].first_number, 0);
+            assert_eq!(state.tokens[1].second_number, 0);
+            assert_eq!(state.tokens[1].location.start, 10);
+            assert_eq!(state.tokens[1].location.end, 11);
+            assert_eq!(state.tokens[2].token, token::TOKEN_NUMBER);
+            assert_eq!(state.tokens[2].literal.bytes, b"5e10");
+            assert_eq!(state.tokens[2].first_number, 0);
+            assert_eq!(state.tokens[2].second_number, 0);
+            assert_eq!(state.tokens[2].location.start, 11);
+            assert_eq!(state.tokens[2].location.end, 15);
+            assert_eq!(state.tokens[3].token, token::TOKEN_EOS);
+            assert_eq!(state.comments.len(), state.tokens.len());
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_splits_unicode_string_literal_prefix() {
+        reset_parser_input();
+        let mut unicode_string = test_token(0, token::TOKEN_UNICODE_STRING_LITERAL, b"abc");
+        unicode_string.location.end = 12;
+        let mut eos = test_token(12, token::TOKEN_EOS, b"");
+        eos.location.end = 12;
+        let tokens = vec![unicode_string, eos];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"unicode\"abc\"".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"unicode");
+            assert_eq!(state.tokens[0].location.start, 0);
+            assert_eq!(state.tokens[0].location.end, 7);
+            assert_eq!(state.tokens[1].token, token::TOKEN_STRING_LITERAL);
+            assert_eq!(state.tokens[1].literal.bytes, b"abc");
+            assert_eq!(state.tokens[1].location.start, 7);
+            assert_eq!(state.tokens[1].location.end, 12);
+            assert_eq!(state.tokens[2].token, token::TOKEN_EOS);
+            assert_eq!(state.comments.len(), state.tokens.len());
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_splits_hex_string_literal_prefix() {
+        reset_parser_input();
+        let mut hex_string = test_token(0, token::TOKEN_HEX_STRING_LITERAL, b"\x12\x34");
+        hex_string.location.end = 9;
+        let mut eos = test_token(9, token::TOKEN_EOS, b"");
+        eos.location.end = 9;
+        let tokens = vec![hex_string, eos];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"hex\"1234\"".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"hex");
+            assert_eq!(state.tokens[0].location.start, 0);
+            assert_eq!(state.tokens[0].location.end, 3);
+            assert_eq!(state.tokens[1].token, token::TOKEN_STRING_LITERAL);
+            assert_eq!(state.tokens[1].literal.bytes, b"1234");
+            assert_eq!(state.tokens[1].location.start, 3);
+            assert_eq!(state.tokens[1].location.end, 9);
+            assert_eq!(state.tokens[2].token, token::TOKEN_EOS);
+            assert_eq!(state.comments.len(), state.tokens.len());
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_recovers_malformed_hex_string_as_regular_string() {
+        reset_parser_input();
+        let mut illegal_hex_string = test_token(0, token::TOKEN_ILLEGAL, b"");
+        illegal_hex_string.location.end = 4;
+        illegal_hex_string.error = "Expected even number of hex-nibbles.".to_string();
+        let mut eos = test_token(7, token::TOKEN_EOS, b"");
+        eos.location.end = 7;
+        let tokens = vec![illegal_hex_string, eos];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"hex\"zz\"".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"hex");
+            assert_eq!(state.tokens[0].location.start, 0);
+            assert_eq!(state.tokens[0].location.end, 3);
+            assert_eq!(state.tokens[1].token, token::TOKEN_STRING_LITERAL);
+            assert_eq!(state.tokens[1].literal.bytes, b"zz");
+            assert_eq!(state.tokens[1].location.start, 3);
+            assert_eq!(state.tokens[1].location.end, 7);
+            assert!(state.tokens[1].error.is_empty());
+            assert_eq!(state.tokens[2].token, token::TOKEN_EOS);
+            assert_eq!(state.comments.len(), state.tokens.len());
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_recovers_hex_string_with_escaped_newline() {
+        reset_parser_input();
+        let mut illegal_hex_string = test_token(0, token::TOKEN_ILLEGAL, b"");
+        illegal_hex_string.location.end = 4;
+        illegal_hex_string.error = "Expected even number of hex-nibbles.".to_string();
+        let mut eos = test_token(9, token::TOKEN_EOS, b"");
+        eos.location.end = 9;
+        let tokens = vec![illegal_hex_string, eos];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"hex\"\\\nzz\"".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"hex");
+            assert_eq!(state.tokens[0].location.start, 0);
+            assert_eq!(state.tokens[0].location.end, 3);
+            assert_eq!(state.tokens[1].token, token::TOKEN_STRING_LITERAL);
+            assert_eq!(state.tokens[1].literal.bytes, b"zz");
+            assert_eq!(state.tokens[1].location.start, 3);
+            assert_eq!(state.tokens[1].location.end, 9);
+            assert!(state.tokens[1].error.is_empty());
+            assert_eq!(state.tokens[2].token, token::TOKEN_EOS);
+            assert_eq!(state.comments.len(), state.tokens.len());
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_recovers_hex_string_invalid_hex_escape_span() {
+        reset_parser_input();
+        let mut illegal_hex_string = test_token(0, token::TOKEN_ILLEGAL, b"");
+        illegal_hex_string.location.end = 4;
+        illegal_hex_string.error = "Expected even number of hex-nibbles.".to_string();
+        let mut eos = test_token(9, token::TOKEN_EOS, b"");
+        eos.location.end = 9;
+        let tokens = vec![illegal_hex_string, eos];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"hex\"\\x1q\"".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"hex");
+            assert_eq!(state.tokens[0].location.start, 0);
+            assert_eq!(state.tokens[0].location.end, 3);
+            assert_eq!(state.tokens[1].token, token::TOKEN_ILLEGAL);
+            assert_eq!(state.tokens[1].error, "Invalid escape sequence.");
+            assert_eq!(state.tokens[1].location.start, 3);
+            assert_eq!(state.tokens[1].location.end, 6);
+            assert_eq!(state.tokens[2].token, token::TOKEN_EOS);
+            assert_eq!(state.comments.len(), state.tokens.len());
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_recovers_hex_string_invalid_unicode_escape_span() {
+        reset_parser_input();
+        let mut illegal_hex_string = test_token(0, token::TOKEN_ILLEGAL, b"");
+        illegal_hex_string.location.end = 4;
+        illegal_hex_string.error = "Expected even number of hex-nibbles.".to_string();
+        let mut eos = test_token(11, token::TOKEN_EOS, b"");
+        eos.location.end = 11;
+        let tokens = vec![illegal_hex_string, eos];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"hex\"\\u000q\"".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"hex");
+            assert_eq!(state.tokens[0].location.start, 0);
+            assert_eq!(state.tokens[0].location.end, 3);
+            assert_eq!(state.tokens[1].token, token::TOKEN_ILLEGAL);
+            assert_eq!(state.tokens[1].error, "Invalid escape sequence.");
+            assert_eq!(state.tokens[1].location.start, 3);
+            assert_eq!(state.tokens[1].location.end, 6);
+            assert_eq!(state.tokens[2].token, token::TOKEN_EOS);
+            assert_eq!(state.comments.len(), state.tokens.len());
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_recovers_hex_string_with_unicode_linebreak_as_unterminated() {
+        reset_parser_input();
+        let mut illegal_hex_string = test_token(0, token::TOKEN_ILLEGAL, b"");
+        illegal_hex_string.location.end = 4;
+        illegal_hex_string.error = "Expected even number of hex-nibbles.".to_string();
+        let mut eos = test_token(10, token::TOKEN_EOS, b"");
+        eos.location.end = 10;
+        let tokens = vec![illegal_hex_string, eos];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"hex\"\xe2\x80\xa8zz\"".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"hex");
+            assert_eq!(state.tokens[0].location.start, 0);
+            assert_eq!(state.tokens[0].location.end, 3);
+            assert_eq!(state.tokens[1].token, token::TOKEN_ILLEGAL);
+            assert_eq!(state.tokens[1].error, "Expected string end-quote.");
+            assert_eq!(state.tokens[1].location.start, 3);
+            assert_eq!(state.tokens[1].location.end, 4);
+            assert_eq!(state.tokens[2].token, token::TOKEN_EOS);
+            assert_eq!(state.comments.len(), state.tokens.len());
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_splits_raw_unicode_string_literal_to_illegal_string() {
+        reset_parser_input();
+        let mut unicode_string = test_token(0, token::TOKEN_UNICODE_STRING_LITERAL, b"\xc3\xa9");
+        unicode_string.location.end = 11;
+        let mut eos = test_token(11, token::TOKEN_EOS, b"");
+        eos.location.end = 11;
+        let tokens = vec![unicode_string, eos];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"unicode\"\xc3\xa9\"".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"unicode");
+            assert_eq!(state.tokens[0].location.start, 0);
+            assert_eq!(state.tokens[0].location.end, 7);
+            assert_eq!(state.tokens[1].token, token::TOKEN_ILLEGAL);
+            assert_eq!(
+                state.tokens[1].error,
+                "Invalid character in string. If you are trying to use Unicode characters, use a unicode\"...\" string literal."
+            );
+            assert_eq!(state.tokens[1].location.start, 7);
+            assert_eq!(state.tokens[1].location.end, 9);
+            assert_eq!(state.tokens[2].token, token::TOKEN_EOS);
+            assert_eq!(state.comments.len(), state.tokens.len());
+        });
+    }
+
+    #[test]
+    fn scanner_mode_experimental_splits_illegal_unicode_string_literal_prefix() {
+        reset_parser_input();
+        let mut unicode_string = test_token_with_span(0, 11, token::TOKEN_ILLEGAL, b"");
+        unicode_string.error =
+            "Mismatching directional override markers in comment or string literal.".to_string();
+        let tokens = vec![
+            unicode_string,
+            test_token_with_span(12, 13, token::TOKEN_SEMICOLON, b""),
+            test_token_with_span(13, 13, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"unicode\"\xe2\x80\xae\";".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        set_scanner_mode_experimental_solidity();
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+            assert_eq!(state.tokens[0].literal.bytes, b"unicode");
+            assert_eq!(state.tokens[0].location.start, 0);
+            assert_eq!(state.tokens[0].location.end, 7);
+            assert_eq!(state.tokens[1].token, token::TOKEN_ILLEGAL);
+            assert_eq!(
+                state.tokens[1].error,
+                "Invalid character in string. If you are trying to use Unicode characters, use a unicode\"...\" string literal."
+            );
+            assert_eq!(state.tokens[1].location.start, 7);
+            assert_eq!(state.tokens[1].location.end, 9);
+            assert_eq!(state.tokens[2].token, token::TOKEN_SEMICOLON);
+            assert_eq!(state.tokens[3].token, token::TOKEN_EOS);
+            assert_eq!(state.comments.len(), state.tokens.len());
+        });
+    }
+
+    #[test]
+    fn parse_experimental_pragma_reclassifies_following_tokens() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_PRAGMA, b"pragma"),
+            test_token(1, token::TOKEN_IDENTIFIER, b"experimental"),
+            test_token(2, token::TOKEN_IDENTIFIER, b"solidity"),
+            test_token(3, token::TOKEN_SEMICOLON, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"let"),
+            test_token(5, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(6, token::TOKEN_SEMICOLON, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(!result.ok);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 7858);
+        assert_eq!(result.errors[0].location.start, 4);
+        assert_eq!(result.errors[0].location.end, 5);
+        assert_eq!(result.errors[0].location.source_id, 0);
+    }
+
+    #[test]
+    fn parse_experimental_prefixed_hex_string_reports_split_string_literal_location() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token_with_span(0, 6, token::TOKEN_PRAGMA, b"pragma"),
+            test_token_with_span(7, 19, token::TOKEN_IDENTIFIER, b"experimental"),
+            test_token_with_span(20, 28, token::TOKEN_IDENTIFIER, b"solidity"),
+            test_token_with_span(28, 29, token::TOKEN_SEMICOLON, b""),
+            test_token_with_span(30, 37, token::TOKEN_HEX_STRING_LITERAL, b"\x0a"),
+            test_token_with_span(37, 38, token::TOKEN_SEMICOLON, b""),
+            test_token_with_span(38, 38, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"pragma experimental solidity; hex\"0a\";".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(!result.ok);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(
+            result.errors[0].message,
+            "Expected identifier but got 'StringLiteral'"
+        );
+        assert_location_span(&result.errors[0].location, 33, 37);
+        assert!(result.errors[0].fatal);
+    }
+
+    #[test]
+    fn parse_experimental_prefixed_hex_string_reports_split_illegal_location() {
+        reset_parser_input();
+        let mut illegal_hex_string = test_token_with_span(30, 34, token::TOKEN_ILLEGAL, b"");
+        illegal_hex_string.error = "Expected even number of hex-nibbles.".to_string();
+        let tokens = vec![
+            test_token_with_span(0, 6, token::TOKEN_PRAGMA, b"pragma"),
+            test_token_with_span(7, 19, token::TOKEN_IDENTIFIER, b"experimental"),
+            test_token_with_span(20, 28, token::TOKEN_IDENTIFIER, b"solidity"),
+            test_token_with_span(28, 29, token::TOKEN_SEMICOLON, b""),
+            illegal_hex_string,
+            test_token_with_span(37, 38, token::TOKEN_SEMICOLON, b""),
+            test_token_with_span(38, 38, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"pragma experimental solidity; hex\"\\b\";".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(!result.ok);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(
+            result.errors[0].message,
+            "Expected identifier but got 'ILLEGAL'"
+        );
+        assert_location_span(&result.errors[0].location, 33, 36);
+        assert!(result.errors[0].fatal);
+    }
+
+    #[test]
+    fn parse_nested_documentation_advances_node_ids() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_CONTRACT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(2, token::TOKEN_LBRACE, b""),
+            test_token(3, token::TOKEN_FUNCTION, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(5, token::TOKEN_LPAREN, b""),
+            test_token(6, token::TOKEN_RPAREN, b""),
+            test_token(7, token::TOKEN_SEMICOLON, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let mut comments = vec![empty_string(); tokens.len()];
+        comments[0] = ffi::WireString {
+            bytes: b"/// contract".to_vec(),
+        };
+        comments[3] = ffi::WireString {
+            bytes: b"/// function".to_vec(),
+        };
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            comments,
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.max_id, 7);
+        assert_eq!(result.source_unit.node_id, 7);
+    }
+
+    #[test]
+    fn parse_do_while_statement_uses_distinct_kind() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_DO, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_RBRACE, b""),
+            test_token(3, token::TOKEN_WHILE, b""),
+            test_token(4, token::TOKEN_LPAREN, b""),
+            test_token(5, token::TOKEN_TRUE_LITERAL, b"true"),
+            test_token(6, token::TOKEN_RPAREN, b""),
+            test_token(7, token::TOKEN_SEMICOLON, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_do_while_statement();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.statement.kind, AST_NODE_KIND_DO_WHILE_STATEMENT);
+        assert_eq!(result.statement.location.end, 8);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_try_statement_preserves_clause_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_TRY, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"D"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_ADDRESS, b"address"),
+            test_token(4, token::TOKEN_LPAREN, b""),
+            test_token(5, token::TOKEN_NUMBER, b"0"),
+            test_token(6, token::TOKEN_RPAREN, b""),
+            test_token(7, token::TOKEN_RPAREN, b""),
+            test_token(8, token::TOKEN_PERIOD, b""),
+            test_token(9, token::TOKEN_IDENTIFIER, b"g"),
+            test_token(10, token::TOKEN_LPAREN, b""),
+            test_token(11, token::TOKEN_RPAREN, b""),
+            test_token(12, token::TOKEN_RETURNS, b""),
+            test_token(13, token::TOKEN_LPAREN, b""),
+            test_token(14, token::TOKEN_UINT, b"uint"),
+            test_token(15, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(16, token::TOKEN_RPAREN, b""),
+            test_token(17, token::TOKEN_LBRACE, b""),
+            test_token(18, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(19, token::TOKEN_SEMICOLON, b""),
+            test_token(20, token::TOKEN_RBRACE, b""),
+            test_token(21, token::TOKEN_CATCH, b""),
+            test_token(22, token::TOKEN_IDENTIFIER, b"Error"),
+            test_token(23, token::TOKEN_LPAREN, b""),
+            test_token(24, token::TOKEN_STRING, b"string"),
+            test_token(25, token::TOKEN_MEMORY, b""),
+            test_token(26, token::TOKEN_IDENTIFIER, b"reason"),
+            test_token(27, token::TOKEN_RPAREN, b""),
+            test_token(28, token::TOKEN_LBRACE, b""),
+            test_token(29, token::TOKEN_IDENTIFIER, b"reason"),
+            test_token(30, token::TOKEN_SEMICOLON, b""),
+            test_token(31, token::TOKEN_RBRACE, b""),
+            test_token(32, token::TOKEN_CATCH, b""),
+            test_token(33, token::TOKEN_LPAREN, b""),
+            test_token(34, token::TOKEN_BYTES, b"bytes"),
+            test_token(35, token::TOKEN_MEMORY, b""),
+            test_token(36, token::TOKEN_IDENTIFIER, b"data"),
+            test_token(37, token::TOKEN_RPAREN, b""),
+            test_token(38, token::TOKEN_LBRACE, b""),
+            test_token(39, token::TOKEN_IDENTIFIER, b"data"),
+            test_token(40, token::TOKEN_SEMICOLON, b""),
+            test_token(41, token::TOKEN_RBRACE, b""),
+            test_token(42, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_try_statement();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.statement.kind, AST_NODE_KIND_TRY_STATEMENT);
+        assert_eq!(result.external_call.kind, AST_NODE_KIND_FUNCTION_CALL);
+        assert_eq!(
+            result.external_call_detail.expression.kind,
+            AST_NODE_KIND_FUNCTION_CALL
+        );
+        assert_eq!(result.clauses.len(), 3);
+        assert_eq!(result.clause_details.len(), 3);
+        assert_eq!(result.clause_block_statement_details.len(), 3);
+        assert_eq!(
+            result.clause_details[0].try_catch_clause.kind,
+            AST_NODE_KIND_TRY_CATCH_CLAUSE
+        );
+        assert_eq!(
+            result.clause_details[0].error_parameter_declarations.len(),
+            1
+        );
+        assert_eq!(result.clause_details[0].error_parameter_details.len(), 1);
+        assert_eq!(result.clause_details[0].block_statements.len(), 1);
+        assert_eq!(result.clause_details[0].block_statement_details.len(), 1);
+        assert_eq!(result.clause_details[1].error_name.bytes, b"Error");
+        assert_eq!(
+            result.clause_details[1].error_parameter_declarations.len(),
+            1
+        );
+        assert_eq!(result.clause_details[1].error_parameter_details.len(), 1);
+        assert_eq!(result.clause_details[1].block_statements.len(), 1);
+        assert_eq!(result.clause_details[1].block_statement_details.len(), 1);
+        assert!(result.clause_details[2].error_name.bytes.is_empty());
+        assert_eq!(
+            result.clause_details[2].error_parameter_declarations.len(),
+            1
+        );
+        assert_eq!(result.clause_details[2].error_parameter_details.len(), 1);
+        assert_eq!(result.clause_details[2].block_statements.len(), 1);
+        assert_eq!(result.clause_details[2].block_statement_details.len(), 1);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_for_statement_keeps_post_expression_inside_parentheses() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FOR, b""),
+            test_token(1, token::TOKEN_LPAREN, b""),
+            test_token(2, token::TOKEN_SEMICOLON, b""),
+            test_token(3, token::TOKEN_TRUE_LITERAL, b"true"),
+            test_token(4, token::TOKEN_SEMICOLON, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"i"),
+            test_token(6, token::TOKEN_INC, b""),
+            test_token(7, token::TOKEN_RPAREN, b""),
+            test_token(8, token::TOKEN_LBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_for_statement();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.statement.kind, AST_NODE_KIND_FOR_STATEMENT);
+        assert!(!result.init_expression.present);
+        assert_eq!(result.condition_expression.kind, AST_NODE_KIND_LITERAL);
+        assert_eq!(
+            result.loop_expression.kind,
+            AST_NODE_KIND_EXPRESSION_STATEMENT
+        );
+        assert_eq!(result.loop_expression.location.end, 7);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_array_expression_uses_distinct_kind() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_LBRACK, b""),
+            test_token(1, token::TOKEN_TRUE_LITERAL, b"true"),
+            test_token(2, token::TOKEN_RBRACK, b""),
+            test_token(3, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_primary_expression();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.expression.kind,
+            AST_NODE_KIND_INLINE_ARRAY_EXPRESSION
+        );
+    }
+
+    #[test]
+    fn parse_inline_assembly_consumes_balanced_yul_block() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FUNCTION, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(4, token::TOKEN_LPAREN, b""),
+            test_token(5, token::TOKEN_RPAREN, b""),
+            test_token(6, token::TOKEN_LBRACE, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_RETURN, b""),
+            test_token(10, token::TOKEN_SEMICOLON, b""),
+            test_token(11, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.inline_assembly.location.end, 9);
+        assert_eq!(current_token(), token::TOKEN_RETURN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_leave_outside_yul_function() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LEAVE, b""),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 8149);
+        assert_eq!(
+            result.errors[0].message,
+            "Keyword \"leave\" can only be used inside a function."
+        );
+        assert!(result.errors[0].syntax);
+        assert!(!result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reclassifies_solidity_identifier_leave_as_yul_leave() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"leave"),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 8149);
+        assert!(result.errors[0].syntax);
+        assert!(!result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reclassifies_non_yul_keyword_as_identifier() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_ADDRESS, b""),
+            test_token(4, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(5, token::TOKEN_NUMBER, b"1"),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 5568);
+        assert_eq!(
+            result.errors[0].message,
+            "Cannot use builtin function name \"address\" as identifier name."
+        );
+        assert!(!result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_merges_solidity_scanned_dotted_yul_identifier() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"s"),
+            test_token(6, token::TOKEN_PERIOD, b""),
+            test_token(7, token::TOKEN_IDENTIFIER, b"offset"),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.inline_assembly.location.end, 9);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn scanner_mode_yul_merges_full_dotted_identifier_spans() {
+        for (tokens, expected) in [
+            (
+                vec![
+                    test_token_with_span(0, 1, token::TOKEN_IDENTIFIER, b"a"),
+                    test_token_with_span(1, 2, token::TOKEN_PERIOD, b""),
+                    test_token_with_span(2, 3, token::TOKEN_IDENTIFIER, b"b"),
+                    test_token_with_span(3, 4, token::TOKEN_PERIOD, b""),
+                    test_token_with_span(4, 5, token::TOKEN_IDENTIFIER, b"c"),
+                    test_token_with_span(5, 6, token::TOKEN_RBRACE, b""),
+                    test_token_with_span(6, 6, token::TOKEN_EOS, b""),
+                ],
+                (&b"a.b.c"[..], 5),
+            ),
+            (
+                vec![
+                    test_token_with_span(0, 1, token::TOKEN_IDENTIFIER, b"a"),
+                    test_token_with_span(1, 2, token::TOKEN_PERIOD, b""),
+                    test_token_with_span(2, 3, token::TOKEN_RBRACE, b""),
+                    test_token_with_span(3, 3, token::TOKEN_EOS, b""),
+                ],
+                (&b"a."[..], 2),
+            ),
+            (
+                vec![
+                    test_token_with_span(0, 1, token::TOKEN_IDENTIFIER, b"a"),
+                    test_token_with_span(1, 2, token::TOKEN_PERIOD, b""),
+                    test_token_with_span(2, 3, token::TOKEN_NUMBER, b"1"),
+                    test_token_with_span(3, 4, token::TOKEN_RBRACE, b""),
+                    test_token_with_span(4, 4, token::TOKEN_EOS, b""),
+                ],
+                (&b"a.1"[..], 3),
+            ),
+        ] {
+            reset_parser_input();
+            let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+            set_parser_input(
+                tokens,
+                empty_string(),
+                Vec::new(),
+                comment_locations,
+                0,
+                String::new(),
+                true,
+            );
+
+            set_scanner_mode_yul_for_current_inline_block();
+
+            PARSER_STATE.with(|state| {
+                let state = state.borrow();
+                assert_eq!(state.tokens[0].token, token::TOKEN_IDENTIFIER);
+                assert_eq!(state.tokens[0].literal.bytes, expected.0);
+                assert_eq!(state.tokens[0].location.start, 0);
+                assert_eq!(state.tokens[0].location.end, expected.1);
+                assert_eq!(state.tokens[1].token, token::TOKEN_RBRACE);
+                assert_eq!(state.comments.len(), state.tokens.len());
+            });
+        }
+    }
+
+    #[test]
+    fn parse_inline_assembly_merges_experimental_solidity_leading_dot_number() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(5, token::TOKEN_PERIOD, b""),
+            test_token(6, token::TOKEN_NUMBER, b"5"),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 4828);
+        assert_eq!(result.errors[0].message, "Invalid number literal.");
+        assert_eq!(result.errors[0].location.start, 5);
+        assert_eq!(result.errors[0].location.end, 7);
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_NUMBER);
+    }
+
+    #[test]
+    fn parse_inline_assembly_recovers_bare_unicode_as_yul_identifier() {
+        reset_parser_input();
+        let mut assembly = test_token(0, token::TOKEN_ASSEMBLY, b"assembly");
+        assembly.location.end = 8;
+        let mut lbrace = test_token(9, token::TOKEN_LBRACE, b"");
+        lbrace.location.end = 10;
+        let mut let_token = test_token(11, token::TOKEN_LET, b"let");
+        let_token.location.end = 14;
+        let mut unicode = test_token(15, token::TOKEN_ILLEGAL, b"");
+        unicode.location.end = 22;
+        unicode.error = "Invalid token.".to_string();
+        let mut assembly_assign = test_token(23, token::TOKEN_ASSEMBLY_ASSIGN, b":=");
+        assembly_assign.location.end = 25;
+        let mut number = test_token(26, token::TOKEN_NUMBER, b"1");
+        number.location.end = 27;
+        let mut rbrace = test_token(28, token::TOKEN_RBRACE, b"");
+        rbrace.location.end = 29;
+        let mut eos = test_token(29, token::TOKEN_EOS, b"");
+        eos.location.end = 29;
+        let tokens = vec![
+            assembly,
+            lbrace,
+            let_token,
+            unicode,
+            assembly_assign,
+            number,
+            rbrace,
+            eos,
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"assembly { let unicode := 1 }".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.inline_assembly.location.end, 29);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_splits_solidity_scanned_unicode_string_literal() {
+        reset_parser_input();
+        let mut unicode_string = test_token(5, token::TOKEN_UNICODE_STRING_LITERAL, b"abc");
+        unicode_string.location.end = 17;
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            unicode_string,
+            test_token(17, token::TOKEN_RBRACE, b""),
+            test_token(18, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 6913);
+        assert_eq!(result.errors[0].message, "Call or assignment expected.");
+        assert_eq!(result.errors[0].location.start, 17);
+        assert_eq!(result.errors[0].location.end, 18);
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_normalizes_solidity_string_unicode_error_as_yul_error() {
+        reset_parser_input();
+        let mut illegal_string = test_token(5, token::TOKEN_ILLEGAL, b"");
+        illegal_string.location.end = 7;
+        illegal_string.error =
+            "Invalid character in string. If you are trying to use Unicode characters, use a unicode\"...\" string literal."
+                .to_string();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            illegal_string,
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1465);
+        assert_eq!(
+            result.errors[0].message,
+            "Illegal token: Invalid character in string."
+        );
+        assert_eq!(result.errors[0].location.start, 5);
+        assert_eq!(result.errors[0].location.end, 7);
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_ILLEGAL);
+    }
+
+    #[test]
+    fn parse_inline_assembly_splits_raw_unicode_string_literal_to_yul_illegal_string() {
+        reset_parser_input();
+        let mut assembly = test_token(0, token::TOKEN_ASSEMBLY, b"assembly");
+        assembly.location.end = 8;
+        let mut lbrace = test_token(9, token::TOKEN_LBRACE, b"");
+        lbrace.location.end = 10;
+        let mut let_token = test_token(11, token::TOKEN_LET, b"let");
+        let_token.location.end = 14;
+        let mut x = test_token(15, token::TOKEN_IDENTIFIER, b"x");
+        x.location.end = 16;
+        let mut assembly_assign = test_token(17, token::TOKEN_ASSEMBLY_ASSIGN, b":=");
+        assembly_assign.location.end = 19;
+        let mut unicode_string = test_token(20, token::TOKEN_UNICODE_STRING_LITERAL, b"\xc3\xa9");
+        unicode_string.location.end = 31;
+        let mut rbrace = test_token(32, token::TOKEN_RBRACE, b"");
+        rbrace.location.end = 33;
+        let mut eos = test_token(33, token::TOKEN_EOS, b"");
+        eos.location.end = 33;
+        let tokens = vec![
+            assembly,
+            lbrace,
+            let_token,
+            x,
+            assembly_assign,
+            unicode_string,
+            rbrace,
+            eos,
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"assembly { let x := unicode\"\xc3\xa9\" }".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1465);
+        assert_eq!(
+            result.errors[0].message,
+            "Illegal token: Invalid character in string."
+        );
+        assert_eq!(result.errors[0].location.start, 27);
+        assert_eq!(result.errors[0].location.end, 29);
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_ILLEGAL);
+    }
+
+    #[test]
+    fn parse_inline_assembly_splits_illegal_unicode_string_literal_to_yul_illegal_string() {
+        reset_parser_input();
+        let mut assembly = test_token(0, token::TOKEN_ASSEMBLY, b"assembly");
+        assembly.location.end = 8;
+        let mut lbrace = test_token(9, token::TOKEN_LBRACE, b"");
+        lbrace.location.end = 10;
+        let mut let_token = test_token(11, token::TOKEN_LET, b"let");
+        let_token.location.end = 14;
+        let mut x = test_token(15, token::TOKEN_IDENTIFIER, b"x");
+        x.location.end = 16;
+        let mut assembly_assign = test_token(17, token::TOKEN_ASSEMBLY_ASSIGN, b":=");
+        assembly_assign.location.end = 19;
+        let mut unicode_string = test_token(20, token::TOKEN_ILLEGAL, b"");
+        unicode_string.location.end = 31;
+        unicode_string.error =
+            "Mismatching directional override markers in comment or string literal.".to_string();
+        let mut rbrace = test_token(33, token::TOKEN_RBRACE, b"");
+        rbrace.location.end = 34;
+        let mut eos = test_token(34, token::TOKEN_EOS, b"");
+        eos.location.end = 34;
+        let tokens = vec![
+            assembly,
+            lbrace,
+            let_token,
+            x,
+            assembly_assign,
+            unicode_string,
+            rbrace,
+            eos,
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"assembly { let x := unicode\"\xe2\x80\xae\" }".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1465);
+        assert_eq!(
+            result.errors[0].message,
+            "Illegal token: Invalid character in string."
+        );
+        assert_eq!(result.errors[0].location.start, 27);
+        assert_eq!(result.errors[0].location.end, 29);
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_ILLEGAL);
+    }
+
+    #[test]
+    fn parse_inline_assembly_allows_leave_inside_yul_function() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FUNCTION, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(4, token::TOKEN_LPAREN, b""),
+            test_token(5, token::TOKEN_RPAREN, b""),
+            test_token(6, token::TOKEN_LBRACE, b""),
+            test_token(7, token::TOKEN_LEAVE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.inline_assembly.location.end, 10);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_yul_for_context_errors() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_BREAK, b""),
+            test_token(3, token::TOKEN_CONTINUE, b""),
+            test_token(4, token::TOKEN_FOR, b""),
+            test_token(5, token::TOKEN_LBRACE, b""),
+            test_token(6, token::TOKEN_BREAK, b""),
+            test_token(7, token::TOKEN_FUNCTION, b""),
+            test_token(8, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(9, token::TOKEN_LPAREN, b""),
+            test_token(10, token::TOKEN_RPAREN, b""),
+            test_token(11, token::TOKEN_LBRACE, b""),
+            test_token(12, token::TOKEN_RBRACE, b""),
+            test_token(13, token::TOKEN_RBRACE, b""),
+            test_token(14, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(15, token::TOKEN_LBRACE, b""),
+            test_token(16, token::TOKEN_CONTINUE, b""),
+            test_token(17, token::TOKEN_RBRACE, b""),
+            test_token(18, token::TOKEN_LBRACE, b""),
+            test_token(19, token::TOKEN_BREAK, b""),
+            test_token(20, token::TOKEN_CONTINUE, b""),
+            test_token(21, token::TOKEN_RBRACE, b""),
+            test_token(22, token::TOKEN_RBRACE, b""),
+            test_token(23, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 5, "{:?}", result.errors);
+        assert_eq!(result.errors[0].error_id, 2592);
+        assert_eq!(
+            result.errors[0].message,
+            "Keyword \"break\" needs to be inside a for-loop body."
+        );
+        assert!(result.errors[0].syntax);
+        assert_eq!(result.errors[1].error_id, 2592);
+        assert_eq!(
+            result.errors[1].message,
+            "Keyword \"continue\" needs to be inside a for-loop body."
+        );
+        assert!(result.errors[1].syntax);
+        assert_eq!(result.errors[2].error_id, 9615);
+        assert_eq!(
+            result.errors[2].message,
+            "Keyword \"break\" in for-loop init block is not allowed."
+        );
+        assert!(result.errors[2].syntax);
+        assert_eq!(result.errors[3].error_id, 3441);
+        assert_eq!(
+            result.errors[3].message,
+            "Functions cannot be defined inside a for-loop init block."
+        );
+        assert!(result.errors[3].syntax);
+        assert_eq!(result.errors[4].error_id, 2461);
+        assert_eq!(
+            result.errors[4].message,
+            "Keyword \"continue\" in for-loop post block is not allowed."
+        );
+        assert!(result.errors[4].syntax);
+        assert!(result.errors.iter().all(|error| !error.fatal));
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_allows_yul_break_continue_inside_for_body() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FOR, b""),
+            test_token(3, token::TOKEN_LBRACE, b""),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(6, token::TOKEN_LBRACE, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_LBRACE, b""),
+            test_token(9, token::TOKEN_BREAK, b""),
+            test_token(10, token::TOKEN_CONTINUE, b""),
+            test_token(11, token::TOKEN_RBRACE, b""),
+            test_token(12, token::TOKEN_RBRACE, b""),
+            test_token(13, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_allows_yul_for_call_condition() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FOR, b""),
+            test_token(3, token::TOKEN_LBRACE, b""),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(6, token::TOKEN_LPAREN, b""),
+            test_token(7, token::TOKEN_NUMBER, b"1"),
+            test_token(8, token::TOKEN_RPAREN, b""),
+            test_token(9, token::TOKEN_LBRACE, b""),
+            test_token(10, token::TOKEN_RBRACE, b""),
+            test_token(11, token::TOKEN_LBRACE, b""),
+            test_token(12, token::TOKEN_RBRACE, b""),
+            test_token(13, token::TOKEN_RBRACE, b""),
+            test_token(14, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_for_missing_pre_block() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FOR, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_LBRACE, b""),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected '{' but got identifier");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_IDENTIFIER);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_for_missing_condition() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FOR, b""),
+            test_token(3, token::TOKEN_LBRACE, b""),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_LBRACE, b""),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_LBRACE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_LBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_for_missing_post_block() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FOR, b""),
+            test_token(3, token::TOKEN_LBRACE, b""),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(6, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(7, token::TOKEN_LBRACE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected '{' but got identifier");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_IDENTIFIER);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_for_missing_body_block() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FOR, b""),
+            test_token(3, token::TOKEN_LBRACE, b""),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(6, token::TOKEN_LBRACE, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected '{' but got identifier");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_IDENTIFIER);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_switch_without_cases() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_SWITCH, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2418);
+        assert_eq!(
+            result.errors[0].message,
+            "Switch statement without any cases."
+        );
+        assert!(result.errors[0].fatal);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_identifier_case_value() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_SWITCH, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_CASE, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(6, token::TOKEN_LBRACE, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 4805);
+        assert_eq!(result.errors[0].message, "Literal expected.");
+        assert!(result.errors[0].fatal);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_case_after_default() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_SWITCH, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_DEFAULT, b""),
+            test_token(5, token::TOKEN_LBRACE, b""),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_CASE, b""),
+            test_token(8, token::TOKEN_NUMBER, b"1"),
+            test_token(9, token::TOKEN_LBRACE, b""),
+            test_token(10, token::TOKEN_RBRACE, b""),
+            test_token(11, token::TOKEN_RBRACE, b""),
+            test_token(12, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 4904);
+        assert_eq!(
+            result.errors[0].message,
+            "Case not allowed after default case."
+        );
+        assert!(result.errors[0].fatal);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_duplicate_default_case() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_SWITCH, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_DEFAULT, b""),
+            test_token(5, token::TOKEN_LBRACE, b""),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_DEFAULT, b""),
+            test_token(8, token::TOKEN_LBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_RBRACE, b""),
+            test_token(11, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 6931);
+        assert_eq!(result.errors[0].message, "Only one default case allowed.");
+        assert!(result.errors[0].fatal);
+    }
+
+    #[test]
+    fn parse_inline_assembly_allows_yul_switch_cases() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_SWITCH, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(4, token::TOKEN_LPAREN, b""),
+            test_token(5, token::TOKEN_NUMBER, b"1"),
+            test_token(6, token::TOKEN_RPAREN, b""),
+            test_token(7, token::TOKEN_CASE, b""),
+            test_token(8, token::TOKEN_NUMBER, b"1"),
+            test_token(9, token::TOKEN_LBRACE, b""),
+            test_token(10, token::TOKEN_RBRACE, b""),
+            test_token(11, token::TOKEN_DEFAULT, b""),
+            test_token(12, token::TOKEN_LBRACE, b""),
+            test_token(13, token::TOKEN_RBRACE, b""),
+            test_token(14, token::TOKEN_RBRACE, b""),
+            test_token(15, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_stray_yul_case() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_CASE, b""),
+            test_token(3, token::TOKEN_NUMBER, b"1"),
+            test_token(4, token::TOKEN_LBRACE, b""),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_stray_yul_default() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_DEFAULT, b""),
+            test_token(3, token::TOKEN_LBRACE, b""),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_yul_typed_literal() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_COLON, b""),
+            test_token(6, token::TOKEN_IDENTIFIER, b"u256"),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 5473);
+        assert_eq!(
+            result.errors[0].message,
+            "Types are not supported in untyped Yul."
+        );
+        assert!(!result.errors[0].fatal);
+        assert_location_span(&result.errors[0].location, 4, 7);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_typed_literal_statement() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_NUMBER, b"1"),
+            test_token(3, token::TOKEN_COLON, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"u256"),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 2);
+        assert_eq!(result.errors[0].error_id, 5473);
+        assert_eq!(
+            result.errors[0].message,
+            "Types are not supported in untyped Yul."
+        );
+        assert!(!result.errors[0].fatal);
+        assert_location_span(&result.errors[0].location, 2, 5);
+        assert_eq!(result.errors[1].error_id, 6913);
+        assert_eq!(result.errors[1].message, "Call or assignment expected.");
+        assert!(result.errors[1].fatal);
+        assert_eq!(current_token(), token::TOKEN_RBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_yul_typed_literal_builtin_type_name() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_COLON, b""),
+            test_token(6, token::TOKEN_IDENTIFIER, b"add"),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 2);
+        assert_eq!(result.errors[0].error_id, 5568);
+        assert_eq!(
+            result.errors[0].message,
+            "Cannot use builtin function name \"add\" as identifier name."
+        );
+        assert!(!result.errors[0].fatal);
+        assert_eq!(result.errors[1].error_id, 5473);
+        assert_eq!(
+            result.errors[1].message,
+            "Types are not supported in untyped Yul."
+        );
+        assert!(!result.errors[1].fatal);
+        assert_location_span(&result.errors[1].location, 4, 7);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_yul_typed_literals_in_switch() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_SWITCH, b""),
+            test_token(3, token::TOKEN_NUMBER, b"1"),
+            test_token(4, token::TOKEN_COLON, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"u256"),
+            test_token(6, token::TOKEN_CASE, b""),
+            test_token(7, token::TOKEN_NUMBER, b"2"),
+            test_token(8, token::TOKEN_COLON, b""),
+            test_token(9, token::TOKEN_IDENTIFIER, b"u256"),
+            test_token(10, token::TOKEN_LBRACE, b""),
+            test_token(11, token::TOKEN_RBRACE, b""),
+            test_token(12, token::TOKEN_RBRACE, b""),
+            test_token(13, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
+        assert!(result.errors.iter().all(|error| error.error_id == 5473));
+        assert!(result.errors.iter().all(|error| {
+            error.message == "Types are not supported in untyped Yul." && !error.fatal
+        }));
+        assert_location_span(&result.errors[0].location, 3, 6);
+        assert_location_span(&result.errors[1].location, 7, 10);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_yul_typed_let_name() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_COLON, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"u256"),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 5473);
+        assert_eq!(
+            result.errors[0].message,
+            "Types are not supported in untyped Yul."
+        );
+        assert!(!result.errors[0].fatal);
+        assert_location_span(&result.errors[0].location, 3, 6);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_let_missing_name() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected identifier but got ':='");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_ASSEMBLY_ASSIGN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_let_missing_name_after_comma() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_COMMA, b""),
+            test_token(5, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(6, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected identifier but got ':='");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_ASSEMBLY_ASSIGN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_let_missing_type_name() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_COLON, b""),
+            test_token(5, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(6, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected identifier but got ':='");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_ASSEMBLY_ASSIGN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_yul_typed_function_names() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FUNCTION, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(4, token::TOKEN_LPAREN, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(6, token::TOKEN_COLON, b""),
+            test_token(7, token::TOKEN_IDENTIFIER, b"u256"),
+            test_token(8, token::TOKEN_RPAREN, b""),
+            test_token(9, token::TOKEN_RIGHT_ARROW, b""),
+            test_token(10, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(11, token::TOKEN_COLON, b""),
+            test_token(12, token::TOKEN_IDENTIFIER, b"u256"),
+            test_token(13, token::TOKEN_LBRACE, b""),
+            test_token(14, token::TOKEN_RBRACE, b""),
+            test_token(15, token::TOKEN_RBRACE, b""),
+            test_token(16, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
+        assert!(result.errors.iter().all(|error| error.error_id == 5473));
+        assert!(result.errors.iter().all(|error| {
+            error.message == "Types are not supported in untyped Yul." && !error.fatal
+        }));
+        assert_location_span(&result.errors[0].location, 5, 8);
+        assert_location_span(&result.errors[1].location, 10, 13);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_function_missing_name() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FUNCTION, b""),
+            test_token(3, token::TOKEN_LBRACE, b""),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected identifier but got '{'");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_LBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_function_missing_parameter_list() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FUNCTION, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(4, token::TOKEN_LBRACE, b""),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected '(' but got '{'");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_LBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_function_trailing_parameter_comma() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FUNCTION, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(4, token::TOKEN_LPAREN, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(6, token::TOKEN_COMMA, b""),
+            test_token(7, token::TOKEN_RPAREN, b""),
+            test_token(8, token::TOKEN_LBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_RBRACE, b""),
+            test_token(11, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected identifier but got ')'");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RPAREN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_function_missing_return_name() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FUNCTION, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(4, token::TOKEN_LPAREN, b""),
+            test_token(5, token::TOKEN_RPAREN, b""),
+            test_token(6, token::TOKEN_RIGHT_ARROW, b""),
+            test_token(7, token::TOKEN_LBRACE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected identifier but got '{'");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_LBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_function_missing_body() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_FUNCTION, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(4, token::TOKEN_LPAREN, b""),
+            test_token(5, token::TOKEN_RPAREN, b""),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected '{' but got '}'");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_allows_nested_yul_call_arguments() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(3, token::TOKEN_LPAREN, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"g"),
+            test_token(5, token::TOKEN_LPAREN, b""),
+            test_token(6, token::TOKEN_NUMBER, b"1"),
+            test_token(7, token::TOKEN_RPAREN, b""),
+            test_token(8, token::TOKEN_COMMA, b""),
+            test_token(9, token::TOKEN_NUMBER, b"2"),
+            test_token(10, token::TOKEN_RPAREN, b""),
+            test_token(11, token::TOKEN_RBRACE, b""),
+            test_token(12, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_typed_yul_call_literal_argument() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(3, token::TOKEN_LPAREN, b""),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_COLON, b""),
+            test_token(6, token::TOKEN_IDENTIFIER, b"u256"),
+            test_token(7, token::TOKEN_RPAREN, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 5473);
+        assert_eq!(
+            result.errors[0].message,
+            "Types are not supported in untyped Yul."
+        );
+        assert!(!result.errors[0].fatal);
+        assert_location_span(&result.errors[0].location, 4, 7);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_call_missing_argument_after_comma() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(3, token::TOKEN_LPAREN, b""),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_COMMA, b""),
+            test_token(6, token::TOKEN_RPAREN, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RPAREN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_call_missing_comma_between_arguments() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(3, token::TOKEN_LPAREN, b""),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_NUMBER, b"2"),
+            test_token(6, token::TOKEN_RPAREN, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected ',' but got 'Number'");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_NUMBER);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_invalid_yul_number_literal() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(
+                4,
+                token::TOKEN_NUMBER,
+                b"115792089237316195423570985008687907853269984665640564039457584007913129639936",
+            ),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 4828);
+        assert_eq!(result.errors[0].message, "Invalid number literal.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_NUMBER);
+    }
+
+    #[test]
+    fn parse_inline_assembly_allows_zero_hex_yul_number_literal() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_NUMBER, b"0x0"),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_missing_yul_assignment_rhs() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_missing_yul_let_initializer_rhs() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_extra_yul_assignment_rhs_token() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(5, token::TOKEN_IDENTIFIER, b"z"),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 6913);
+        assert_eq!(result.errors[0].message, "Call or assignment expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_extra_yul_assignment_call_rhs_token() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(5, token::TOKEN_LPAREN, b""),
+            test_token(6, token::TOKEN_NUMBER, b"1"),
+            test_token(7, token::TOKEN_RPAREN, b""),
+            test_token(8, token::TOKEN_IDENTIFIER, b"z"),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 6913);
+        assert_eq!(result.errors[0].message, "Call or assignment expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_literal_before_yul_assignment() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_NUMBER, b"1"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2856);
+        assert_eq!(
+            result.errors[0].message,
+            "Variable name must precede \":=\" in assignment."
+        );
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_ASSEMBLY_ASSIGN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_literal_before_yul_multiple_assignment_comma() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_NUMBER, b"1"),
+            test_token(3, token::TOKEN_COMMA, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(5, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(6, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2856);
+        assert_eq!(
+            result.errors[0].message,
+            "Variable name must precede \",\" in multiple assignment."
+        );
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_COMMA);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_literal_later_in_yul_assignment_list() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_COMMA, b""),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(6, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2856);
+        assert_eq!(
+            result.errors[0].message,
+            "Variable name must precede \":=\" in assignment."
+        );
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_ASSEMBLY_ASSIGN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_literal_later_before_yul_assignment_comma() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_COMMA, b""),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_COMMA, b""),
+            test_token(6, token::TOKEN_IDENTIFIER, b"z"),
+            test_token(7, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(8, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2856);
+        assert_eq!(
+            result.errors[0].message,
+            "Variable name must precede \",\" in multiple assignment."
+        );
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_COMMA);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_assignment_list_without_assignment() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_COMMA, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected ':=' but got '}'");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_bare_yul_identifier_statement() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 6913);
+        assert_eq!(result.errors[0].message, "Call or assignment expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_literal_function_name() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_NUMBER, b"1"),
+            test_token(3, token::TOKEN_LPAREN, b""),
+            test_token(4, token::TOKEN_RPAREN, b""),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 9980);
+        assert_eq!(result.errors[0].message, "Function name expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_LPAREN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_stray_yul_open_parenthesis() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_LPAREN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_literal_rhs_call_suffix() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(5, token::TOKEN_NUMBER, b"1"),
+            test_token(6, token::TOKEN_LPAREN, b""),
+            test_token(7, token::TOKEN_RPAREN, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_LPAREN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_extra_yul_close_parenthesis_after_call() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(3, token::TOKEN_LPAREN, b""),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_RPAREN, b""),
+            test_token(6, token::TOKEN_RPAREN, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RPAREN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_stray_yul_comma() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_COMMA, b""),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_COMMA);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_extra_yul_comma_after_call() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(3, token::TOKEN_LPAREN, b""),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_RPAREN, b""),
+            test_token(6, token::TOKEN_COMMA, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_COMMA);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_stray_yul_colon() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_COLON, b""),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_COLON);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_stray_yul_arrow() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_RIGHT_ARROW, b""),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_RIGHT_ARROW);
+    }
+
+    #[test]
+    fn parse_inline_assembly_allows_yul_if_literal_condition() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IF, b""),
+            test_token(3, token::TOKEN_NUMBER, b"1"),
+            test_token(4, token::TOKEN_LBRACE, b""),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_allows_yul_if_call_condition() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IF, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(4, token::TOKEN_LPAREN, b""),
+            test_token(5, token::TOKEN_NUMBER, b"1"),
+            test_token(6, token::TOKEN_RPAREN, b""),
+            test_token(7, token::TOKEN_LBRACE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_yul_if_typed_literal_condition() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IF, b""),
+            test_token(3, token::TOKEN_NUMBER, b"1"),
+            test_token(4, token::TOKEN_COLON, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"u256"),
+            test_token(6, token::TOKEN_LBRACE, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 5473);
+        assert_eq!(
+            result.errors[0].message,
+            "Types are not supported in untyped Yul."
+        );
+        assert!(!result.errors[0].fatal);
+        assert_location_span(&result.errors[0].location, 3, 6);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_if_missing_condition() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IF, b""),
+            test_token(3, token::TOKEN_LBRACE, b""),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_LBRACE);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_if_missing_body() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IF, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(5, token::TOKEN_LBRACE, b""),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 2314);
+        assert_eq!(result.errors[0].message, "Expected '{' but got identifier");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_IDENTIFIER);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_semicolon() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_SEMICOLON, b""),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_SEMICOLON);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_operator_token() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_ADD, b""),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_ADD);
+    }
+
+    #[test]
+    fn parse_inline_assembly_allows_yul_builtin_call() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"add"),
+            test_token(3, token::TOKEN_LPAREN, b""),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_COMMA, b""),
+            test_token(6, token::TOKEN_NUMBER, b"2"),
+            test_token(7, token::TOKEN_RPAREN, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_allows_yul_builtin_call_assignment_rhs() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"add"),
+            test_token(5, token::TOKEN_LPAREN, b""),
+            test_token(6, token::TOKEN_NUMBER, b"1"),
+            test_token(7, token::TOKEN_COMMA, b""),
+            test_token(8, token::TOKEN_NUMBER, b"2"),
+            test_token(9, token::TOKEN_RPAREN, b""),
+            test_token(10, token::TOKEN_RBRACE, b""),
+            test_token(11, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_recovers_yul_builtin_operator_token_from_source() {
+        reset_parser_input();
+        let source = b"assembly { add(1, 2) }";
+        let tokens = vec![
+            test_token_with_span(0, 8, token::TOKEN_ASSEMBLY, b""),
+            test_token_with_span(9, 10, token::TOKEN_LBRACE, b""),
+            test_token_with_span(11, 14, token::TOKEN_ADD, b""),
+            test_token_with_span(14, 15, token::TOKEN_LPAREN, b""),
+            test_token_with_span(15, 16, token::TOKEN_NUMBER, b"1"),
+            test_token_with_span(16, 17, token::TOKEN_COMMA, b""),
+            test_token_with_span(18, 19, token::TOKEN_NUMBER, b"2"),
+            test_token_with_span(19, 20, token::TOKEN_RPAREN, b""),
+            test_token_with_span(21, 22, token::TOKEN_RBRACE, b""),
+            test_token_with_span(22, 22, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: source.to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_yul_builtin_assignment_target() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"add"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 6272);
+        assert_eq!(
+            result.errors[0].message,
+            "Cannot assign to builtin function \"add\"."
+        );
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_ASSEMBLY_ASSIGN);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_uncalled_yul_builtin_rhs() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(3, token::TOKEN_ASSEMBLY_ASSIGN, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"add"),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 7104);
+        assert_eq!(
+            result.errors[0].message,
+            "Builtin function \"add\" must be called."
+        );
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_IDENTIFIER);
+    }
+
+    #[test]
+    fn parse_inline_assembly_rejects_uncalled_yul_builtin_switch_expression() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_SWITCH, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"add"),
+            test_token(4, token::TOKEN_CASE, b""),
+            test_token(5, token::TOKEN_NUMBER, b"1"),
+            test_token(6, token::TOKEN_LBRACE, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 7104);
+        assert_eq!(
+            result.errors[0].message,
+            "Builtin function \"add\" must be called."
+        );
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_IDENTIFIER);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_yul_builtin_let_name() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"add"),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 5568);
+        assert_eq!(
+            result.errors[0].message,
+            "Cannot use builtin function name \"add\" as identifier name."
+        );
+        assert!(!result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_yul_selfdestruct_builtin_let_name() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_LET, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"selfdestruct"),
+            test_token(4, token::TOKEN_RBRACE, b""),
+            test_token(5, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 5568);
+        assert_eq!(
+            result.errors[0].message,
+            "Cannot use builtin function name \"selfdestruct\" as identifier name."
+        );
+        assert!(!result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_uses_byzantium_yul_builtin_gate() {
+        reset_parser_input();
+        set_tokens_with_evm_version(
+            yul_assignment_rhs_identifier_tokens(b"returndatasize"),
+            "homestead",
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+
+        reset_parser_input();
+        set_tokens_with_evm_version(
+            yul_assignment_rhs_identifier_tokens(b"returndatasize"),
+            "byzantium",
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 7104);
+        assert_eq!(
+            result.errors[0].message,
+            "Builtin function \"returndatasize\" must be called."
+        );
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_IDENTIFIER);
+    }
+
+    #[test]
+    fn parse_inline_assembly_uses_paris_yul_builtin_split() {
+        reset_parser_input();
+        set_tokens_with_evm_version(
+            yul_assignment_rhs_identifier_tokens(b"difficulty"),
+            "london",
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 7104);
+        assert_eq!(
+            result.errors[0].message,
+            "Builtin function \"difficulty\" must be called."
+        );
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_IDENTIFIER);
+
+        reset_parser_input();
+        set_tokens_with_evm_version(yul_assignment_rhs_identifier_tokens(b"difficulty"), "paris");
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+
+        reset_parser_input();
+        set_tokens_with_evm_version(
+            yul_assignment_rhs_identifier_tokens(b"prevrandao"),
+            "london",
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+
+        reset_parser_input();
+        set_tokens_with_evm_version(yul_assignment_rhs_identifier_tokens(b"prevrandao"), "paris");
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 7104);
+        assert_eq!(
+            result.errors[0].message,
+            "Builtin function \"prevrandao\" must be called."
+        );
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_IDENTIFIER);
+    }
+
+    #[test]
+    fn parse_inline_assembly_uses_cancun_yul_builtin_gate() {
+        reset_parser_input();
+        set_tokens_with_evm_version(yul_let_name_tokens(b"mcopy"), "shanghai");
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+
+        reset_parser_input();
+        set_tokens_with_evm_version(yul_let_name_tokens(b"mcopy"), "cancun");
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 5568);
+        assert_eq!(
+            result.errors[0].message,
+            "Cannot use builtin function name \"mcopy\" as identifier name."
+        );
+        assert!(!result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_uses_osaka_yul_builtin_gate() {
+        reset_parser_input();
+        set_tokens_with_evm_version(yul_let_name_tokens(b"clz"), "prague");
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+
+        reset_parser_input();
+        set_tokens_with_evm_version(yul_let_name_tokens(b"clz"), "osaka");
+
+        let result = parse_inline_assembly();
+
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 5568);
+        assert_eq!(
+            result.errors[0].message,
+            "Cannot use builtin function name \"clz\" as identifier name."
+        );
+        assert!(!result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_yul_illegal_token_error() {
+        reset_parser_input();
+        let mut tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_ILLEGAL, b""),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        tokens[2].error = "Octal numbers not allowed.".to_string();
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1465);
+        assert_eq!(
+            result.errors[0].message,
+            "Illegal token: Octal numbers not allowed."
+        );
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_ILLEGAL);
+    }
+
+    #[test]
+    fn parse_inline_assembly_reports_yul_eof_as_literal_error() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(!result.inline_assembly.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 1856);
+        assert_eq!(result.errors[0].message, "Literal or identifier expected.");
+        assert!(result.errors[0].fatal);
+        assert_eq!(current_token(), token::TOKEN_EOS);
+    }
+
+    #[test]
+    fn parse_inline_assembly_preserves_flags() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ASSEMBLY, b""),
+            test_token(1, token::TOKEN_LPAREN, b""),
+            test_token(2, token::TOKEN_STRING_LITERAL, b"memory-safe"),
+            test_token(3, token::TOKEN_COMMA, b""),
+            test_token(4, token::TOKEN_STRING_LITERAL, b"flag-two"),
+            test_token(5, token::TOKEN_RPAREN, b""),
+            test_token(6, token::TOKEN_LBRACE, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_inline_assembly();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.inline_assembly.kind, AST_NODE_KIND_INLINE_ASSEMBLY);
+        assert_eq!(result.flags.len(), 2);
+        assert_eq!(result.flags[0].bytes, b"memory-safe");
+        assert_eq!(result.flags[1].bytes, b"flag-two");
+        assert_location_span(&result.block_location, 6, 8);
+    }
+
+    #[test]
+    fn parse_unchecked_block_uses_distinct_kind() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_UNCHECKED, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_RBRACE, b""),
+            test_token(3, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_block();
+
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 5296);
+        assert!(!result.errors[0].fatal);
+        assert_eq!(result.block.kind, AST_NODE_KIND_UNCHECKED_BLOCK);
+    }
+
+    #[test]
+    fn parse_event_definition_preserves_anonymous_flag() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_EVENT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"E"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_RPAREN, b""),
+            test_token(4, token::TOKEN_ANONYMOUS, b""),
+            test_token(5, token::TOKEN_SEMICOLON, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_event_definition();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.anonymous);
+        assert_eq!(result.event_definition.kind, AST_NODE_KIND_EVENT_DEFINITION);
+    }
+
+    #[test]
+    fn parse_variable_declaration_preserves_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_UINT, b"uint"),
+            test_token(1, token::TOKEN_PUBLIC, b""),
+            test_token(2, token::TOKEN_CONSTANT, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_ASSIGN, b""),
+            test_token(5, token::TOKEN_NUMBER, b"1"),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let options = VarDeclParserOptions {
+            kind: VAR_DECL_KIND_STATE,
+            allow_initial_value: true,
+            ..VarDeclParserOptions::default()
+        };
+        let result = parse_variable_declaration_with_options(options, empty_ast_node(), 0);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.variable_declaration.kind,
+            AST_NODE_KIND_VARIABLE_DECLARATION
+        );
+        assert_eq!(result.type_name.kind, AST_NODE_KIND_ELEMENTARY_TYPE_NAME);
+        assert_eq!(result.value.kind, AST_NODE_KIND_LITERAL);
+        assert_eq!(result.name_location.start, 3);
+        assert_eq!(result.visibility, VISIBILITY_PUBLIC);
+        assert_eq!(result.mutability, VARIABLE_DECLARATION_MUTABILITY_CONSTANT);
+        assert_eq!(
+            result.variable_location,
+            VARIABLE_DECLARATION_LOCATION_UNSPECIFIED
+        );
+        assert!(!result.indexed);
+        assert_eq!(result.type_name_elementary_token, token::TOKEN_UINT);
+        assert_eq!(result.type_name_elementary_first_number, 0);
+        assert_eq!(result.type_name_elementary_second_number, 0);
+        assert!(!result.type_name_has_state_mutability);
+        assert_eq!(
+            result.type_name_state_mutability,
+            STATE_MUTABILITY_NON_PAYABLE
+        );
+        assert!(!result.type_name_user_defined_path_node.present);
+        assert!(result.type_name_user_defined_path.is_empty());
+        assert!(result.type_name_user_defined_path_locations.is_empty());
+    }
+
+    #[test]
+    fn parse_variable_declaration_preserves_user_defined_type_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_IDENTIFIER, b"Lib"),
+            test_token(1, token::TOKEN_PERIOD, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"T"),
+            test_token(3, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_variable_declaration();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.type_name.kind, AST_NODE_KIND_USER_DEFINED_TYPE_NAME);
+        assert_eq!(
+            result.type_name_user_defined_path_node.kind,
+            AST_NODE_KIND_IDENTIFIER_PATH
+        );
+        assert_eq!(result.type_name_user_defined_path.len(), 2);
+        assert_eq!(result.type_name_user_defined_path[0].bytes, b"Lib");
+        assert_eq!(result.type_name_user_defined_path[1].bytes, b"T");
+        assert_eq!(result.type_name_user_defined_path_locations[0].start, 0);
+        assert_eq!(result.type_name_user_defined_path_locations[1].start, 2);
+        assert_eq!(result.name.bytes, b"x");
+    }
+
+    #[test]
+    fn parse_variable_declaration_preserves_dynamic_array_type_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_UINT, b"uint"),
+            test_token(1, token::TOKEN_LBRACK, b""),
+            test_token(2, token::TOKEN_RBRACK, b""),
+            test_token(3, token::TOKEN_LBRACK, b""),
+            test_token(4, token::TOKEN_RBRACK, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_variable_declaration();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.type_name.kind, AST_NODE_KIND_ARRAY_TYPE_NAME);
+        assert_eq!(result.type_name_elementary_token, token::TOKEN_UINT);
+        assert_eq!(result.type_name_array_base_types.len(), 2);
+        assert_eq!(
+            result.type_name_array_base_types[0].kind,
+            AST_NODE_KIND_ELEMENTARY_TYPE_NAME
+        );
+        assert_eq!(
+            result.type_name_array_base_types[1].kind,
+            AST_NODE_KIND_ARRAY_TYPE_NAME
+        );
+        assert_eq!(result.type_name_array_lengths.len(), 2);
+        assert!(!result.type_name_array_lengths[0].present);
+        assert!(!result.type_name_array_lengths[1].present);
+        assert_eq!(result.name.bytes, b"x");
+    }
+
+    #[test]
+    fn parse_postfix_variable_declaration_statement_preserves_type_expression_detail() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_LET, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(2, token::TOKEN_COLON, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"T"),
+            test_token(4, token::TOKEN_ASSIGN, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_postfix_variable_declaration_statement();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.statement.kind,
+            AST_NODE_KIND_VARIABLE_DECLARATION_STATEMENT
+        );
+        assert_eq!(result.variables.len(), 1);
+        assert_eq!(result.variable_details.len(), 1);
+        let variable = &result.variable_details[0];
+        assert_eq!(variable.name.bytes, b"x");
+        assert_eq!(variable.type_expression.kind, AST_NODE_KIND_IDENTIFIER);
+        assert_eq!(
+            variable.type_expression_detail.expression.node_id,
+            variable.type_expression.node_id
+        );
+        assert_eq!(
+            variable.type_expression_detail.expression.kind,
+            AST_NODE_KIND_IDENTIFIER
+        );
+        assert_eq!(result.initial_value.kind, AST_NODE_KIND_IDENTIFIER);
+        assert_eq!(
+            result.initial_value_detail.expression.node_id,
+            result.initial_value.node_id
+        );
+    }
+
+    #[test]
+    fn parse_simple_statement_preserves_lookahead_array_type_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_UINT, b"uint"),
+            test_token(1, token::TOKEN_LBRACK, b""),
+            test_token(2, token::TOKEN_NUMBER, b"2"),
+            test_token(3, token::TOKEN_RBRACK, b""),
+            test_token(4, token::TOKEN_MEMORY, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(6, token::TOKEN_SEMICOLON, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_simple_statement();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.statement.kind,
+            AST_NODE_KIND_VARIABLE_DECLARATION_STATEMENT
+        );
+        assert_eq!(result.variable_details.len(), 1);
+        let variable = &result.variable_details[0];
+        assert_eq!(variable.type_name.kind, AST_NODE_KIND_ARRAY_TYPE_NAME);
+        assert_eq!(variable.type_name_elementary_token, token::TOKEN_UINT);
+        assert_eq!(variable.type_name_array_base_types.len(), 1);
+        assert_eq!(
+            variable.type_name_array_base_types[0].kind,
+            AST_NODE_KIND_ELEMENTARY_TYPE_NAME
+        );
+        assert_eq!(variable.type_name_array_lengths.len(), 1);
+        assert_eq!(
+            variable.type_name_array_lengths[0].kind,
+            AST_NODE_KIND_LITERAL
+        );
+        assert_eq!(variable.type_name_array_length_details.len(), 1);
+        assert_eq!(
+            variable.type_name_array_length_details[0].expression.kind,
+            AST_NODE_KIND_LITERAL
+        );
+        assert_eq!(
+            variable.variable_location,
+            VARIABLE_DECLARATION_LOCATION_MEMORY
+        );
+        assert_eq!(variable.name.bytes, b"x");
+    }
+
+    #[test]
+    fn parse_simple_statement_plain_address_array_lookahead_has_no_state_mutability() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ADDRESS, b"address"),
+            test_token(1, token::TOKEN_LBRACK, b""),
+            test_token(2, token::TOKEN_RBRACK, b""),
+            test_token(3, token::TOKEN_MEMORY, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"a"),
+            test_token(5, token::TOKEN_SEMICOLON, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_simple_statement();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.variable_details.len(), 1);
+        let variable = &result.variable_details[0];
+        assert_eq!(variable.type_name.kind, AST_NODE_KIND_ARRAY_TYPE_NAME);
+        assert_eq!(variable.type_name_elementary_token, token::TOKEN_ADDRESS);
+        assert!(!variable.type_name_has_state_mutability);
+        assert_eq!(
+            variable.type_name_state_mutability,
+            STATE_MUTABILITY_NON_PAYABLE
+        );
+        assert_eq!(variable.type_name_array_base_types.len(), 1);
+        assert_eq!(
+            variable.type_name_array_base_types[0].kind,
+            AST_NODE_KIND_ELEMENTARY_TYPE_NAME
+        );
+    }
+
+    #[test]
+    fn type_name_from_index_access_structure_rejects_excessive_array_depth() {
+        let indices = (0..=MAX_BRIDGE_ARRAY_TYPE_DEPTH)
+            .map(|index| ffi::WireIndexAccess {
+                start: empty_ast_node(),
+                start_detail: empty_expression_result(Vec::new()),
+                has_end: false,
+                end: empty_ast_node(),
+                end_detail: empty_expression_result(Vec::new()),
+                location: test_location(index as i64 + 1),
+            })
+            .collect();
+        let result = type_name_from_index_access_structure(ffi::WireIndexAccessedPath {
+            path: vec![ffi::WireAstNode {
+                present: true,
+                node_id: 1,
+                kind: AST_NODE_KIND_ELEMENTARY_TYPE_NAME_EXPRESSION,
+                location: test_location(0),
+                text: ffi::WireString {
+                    bytes: b"bytes".to_vec(),
+                },
+            }],
+            path_expression_types: Vec::new(),
+            indices,
+            errors: Vec::new(),
+        });
+
+        assert!(!result.type_name.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 7319);
+        assert!(result.errors[0].fatal);
+        assert_eq!(
+            result.errors[0].location.start,
+            MAX_BRIDGE_ARRAY_TYPE_DEPTH as i64 + 1
+        );
+    }
+
+    #[test]
+    fn expression_from_index_access_structure_rejects_excessive_array_depth() {
+        let indices = (0..=MAX_BRIDGE_ARRAY_TYPE_DEPTH)
+            .map(|index| ffi::WireIndexAccess {
+                start: empty_ast_node(),
+                start_detail: empty_expression_result(Vec::new()),
+                has_end: false,
+                end: empty_ast_node(),
+                end_detail: empty_expression_result(Vec::new()),
+                location: test_location(index as i64 + 1),
+            })
+            .collect();
+        let result = expression_from_index_access_structure(ffi::WireIndexAccessedPath {
+            path: vec![ffi::WireAstNode {
+                present: true,
+                node_id: 1,
+                kind: AST_NODE_KIND_ELEMENTARY_TYPE_NAME_EXPRESSION,
+                location: test_location(0),
+                text: ffi::WireString {
+                    bytes: b"bytes".to_vec(),
+                },
+            }],
+            path_expression_types: Vec::new(),
+            indices,
+            errors: Vec::new(),
+        });
+
+        assert!(!result.expression.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 7319);
+        assert!(result.errors[0].fatal);
+        assert_eq!(
+            result.errors[0].location.start,
+            MAX_BRIDGE_ARRAY_TYPE_DEPTH as i64 + 1
+        );
+    }
+
+    #[test]
+    fn parse_simple_statement_preserves_lookahead_user_defined_array_type_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_IDENTIFIER, b"D"),
+            test_token(1, token::TOKEN_LBRACK, b""),
+            test_token(2, token::TOKEN_NUMBER, b"2"),
+            test_token(3, token::TOKEN_RBRACK, b""),
+            test_token(4, token::TOKEN_MEMORY, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(6, token::TOKEN_SEMICOLON, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_simple_statement();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.variable_details.len(), 1);
+        let variable = &result.variable_details[0];
+        assert_eq!(variable.type_name.kind, AST_NODE_KIND_ARRAY_TYPE_NAME);
+        assert_eq!(
+            variable.type_name_user_defined_path_node.kind,
+            AST_NODE_KIND_IDENTIFIER_PATH
+        );
+        assert_eq!(variable.type_name_user_defined_path.len(), 1);
+        assert_eq!(variable.type_name_user_defined_path[0].bytes, b"D");
+        assert_eq!(variable.type_name_array_base_types.len(), 1);
+        assert_eq!(
+            variable.type_name_array_base_types[0].kind,
+            AST_NODE_KIND_USER_DEFINED_TYPE_NAME
+        );
+        assert_eq!(variable.type_name_array_lengths.len(), 1);
+        assert_eq!(
+            variable.type_name_array_lengths[0].kind,
+            AST_NODE_KIND_LITERAL
+        );
+        assert_eq!(variable.type_name_array_length_details.len(), 1);
+        assert_eq!(
+            variable.type_name_array_length_details[0].expression.kind,
+            AST_NODE_KIND_LITERAL
+        );
+        assert_eq!(variable.name.bytes, b"x");
+    }
+
+    #[test]
+    fn parse_using_directive_preserves_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_USING, b""),
+            test_token(1, token::TOKEN_LBRACE, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"Lib"),
+            test_token(3, token::TOKEN_PERIOD, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(5, token::TOKEN_AS, b""),
+            test_token(6, token::TOKEN_ADD, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_FOR, b""),
+            test_token(9, token::TOKEN_UINT, b"uint"),
+            test_token(10, token::TOKEN_IDENTIFIER, b"global"),
+            test_token(11, token::TOKEN_SEMICOLON, b""),
+            test_token(12, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_using_directive();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.using_directive.kind,
+            AST_NODE_KIND_USING_FOR_DIRECTIVE
+        );
+        assert!(result.uses_braces);
+        assert!(result.global);
+        assert_eq!(result.functions.len(), 1);
+        assert_eq!(result.function_details.len(), 1);
+        assert_eq!(result.functions[0].kind, AST_NODE_KIND_IDENTIFIER_PATH);
+        assert_eq!(
+            result.function_details[0].identifier_path.node_id,
+            result.functions[0].node_id
+        );
+        assert_eq!(result.function_details[0].path[0].bytes, b"Lib");
+        assert_eq!(result.function_details[0].path[1].bytes, b"f");
+        assert_eq!(result.operators.len(), 1);
+        assert!(result.operators[0].present);
+        assert_eq!(result.operators[0].token, token::TOKEN_ADD);
+        assert_eq!(result.type_name.kind, AST_NODE_KIND_ELEMENTARY_TYPE_NAME);
+        assert_eq!(
+            result.type_name_detail.type_name.node_id,
+            result.type_name.node_id
+        );
+        assert_eq!(
+            result.type_name_detail.elementary_type_token,
+            token::TOKEN_UINT
+        );
+    }
+
+    #[test]
+    fn parse_modifier_definition_preserves_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_MODIFIER, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"m"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_UINT, b"uint"),
+            test_token(4, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(5, token::TOKEN_RPAREN, b""),
+            test_token(6, token::TOKEN_VIRTUAL, b""),
+            test_token(7, token::TOKEN_OVERRIDE, b""),
+            test_token(8, token::TOKEN_LPAREN, b""),
+            test_token(9, token::TOKEN_IDENTIFIER, b"A"),
+            test_token(10, token::TOKEN_PERIOD, b""),
+            test_token(11, token::TOKEN_IDENTIFIER, b"B"),
+            test_token(12, token::TOKEN_RPAREN, b""),
+            test_token(13, token::TOKEN_LBRACE, b""),
+            test_token(14, token::TOKEN_RBRACE, b""),
+            test_token(15, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_modifier_definition();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.modifier_definition.kind,
+            AST_NODE_KIND_MODIFIER_DEFINITION
+        );
+        assert_eq!(result.name.bytes, b"m");
+        assert_eq!(result.parameter_details.len(), 1);
+        assert_eq!(result.parameter_details[0].name.bytes, b"x");
+        assert!(result.is_virtual);
+        assert_eq!(result.overrides.kind, AST_NODE_KIND_OVERRIDE_SPECIFIER);
+        assert_eq!(result.override_path_details.len(), 1);
+        assert_eq!(result.override_path_details[0].path[0].bytes, b"A");
+        assert_eq!(result.override_path_details[0].path[1].bytes, b"B");
+        assert_eq!(result.block.kind, AST_NODE_KIND_BLOCK);
+        assert!(result.block_statements.is_empty());
+    }
+
+    #[test]
+    fn parse_type_name_recovers_missing_sized_elementary_type_literal_from_source() {
+        reset_parser_input();
+        let mut uint256 = test_token(0, token::TOKEN_UINT_M, b"");
+        uint256.location = ffi::WireSourceLocation {
+            start: 0,
+            end: 7,
+            source_id: 0,
+        };
+        let tokens = vec![uint256, test_token(7, token::TOKEN_EOS, b"")];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            ffi::WireString {
+                bytes: b"uint256".to_vec(),
+            },
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_type_name();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.type_name.kind, AST_NODE_KIND_ELEMENTARY_TYPE_NAME);
+        assert_eq!(result.type_name.text.bytes, b"uint256");
+        assert_eq!(result.elementary_type_token, token::TOKEN_UINT_M);
+        assert_eq!(result.elementary_type_first_number, 0);
+        assert_eq!(result.elementary_type_second_number, 0);
+    }
+
+    #[test]
+    fn parse_type_name_uses_scanner_token_info_for_sized_elementary_type() {
+        reset_parser_input();
+        let mut uint256 = test_token(0, token::TOKEN_UINT_M, b"");
+        uint256.first_number = 256;
+        let tokens = vec![uint256, test_token(1, token::TOKEN_EOS, b"")];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_type_name();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.type_name.kind, AST_NODE_KIND_ELEMENTARY_TYPE_NAME);
+        assert_eq!(result.type_name.text.bytes, b"uint256");
+        assert_eq!(result.elementary_type_token, token::TOKEN_UINT_M);
+        assert_eq!(result.elementary_type_first_number, 256);
+        assert_eq!(result.elementary_type_second_number, 0);
+    }
+
+    #[test]
+    fn parse_storage_layout_specifier_counts_base_slot_expression() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_IDENTIFIER, b"layout"),
+            test_token(1, token::TOKEN_IDENTIFIER, b"at"),
+            test_token(2, token::TOKEN_NUMBER, b"1"),
+            test_token(3, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_storage_layout_specifier();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.storage_layout_specifier.kind,
+            AST_NODE_KIND_STORAGE_LAYOUT_SPECIFIER
+        );
+        assert_eq!(result.base_slot_expression.kind, AST_NODE_KIND_LITERAL);
+        assert_eq!(
+            result.base_slot_expression_detail.expression.kind,
+            AST_NODE_KIND_LITERAL
+        );
+        assert_eq!(result.tokens_consumed, 3);
+    }
+
+    #[test]
+    fn parse_contract_definition_preserves_storage_layout_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_CONTRACT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(2, token::TOKEN_IDENTIFIER, b"layout"),
+            test_token(3, token::TOKEN_IDENTIFIER, b"at"),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_LBRACE, b""),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_contract_definition();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.storage_layout_specifier.kind,
+            AST_NODE_KIND_STORAGE_LAYOUT_SPECIFIER
+        );
+        assert_eq!(
+            result.storage_layout_base_slot_expression.kind,
+            AST_NODE_KIND_LITERAL
+        );
+        assert_eq!(
+            result
+                .storage_layout_base_slot_expression_detail
+                .expression
+                .kind,
+            AST_NODE_KIND_LITERAL
+        );
+    }
+
+    #[test]
+    fn parse_contract_definition_counts_member_tokens() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_CONTRACT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(2, token::TOKEN_LBRACE, b""),
+            test_token(3, token::TOKEN_STRUCT, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"S"),
+            test_token(5, token::TOKEN_LBRACE, b""),
+            test_token(6, token::TOKEN_UINT, b"uint"),
+            test_token(7, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(8, token::TOKEN_SEMICOLON, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_UINT, b"uint"),
+            test_token(11, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(12, token::TOKEN_SEMICOLON, b""),
+            test_token(13, token::TOKEN_RBRACE, b""),
+            test_token(14, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_contract_definition();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.contract_definition.kind,
+            AST_NODE_KIND_CONTRACT_DEFINITION
+        );
+        assert_eq!(result.sub_nodes.len(), 2);
+        assert_eq!(result.sub_nodes[0].kind, AST_NODE_KIND_STRUCT_DEFINITION);
+        assert_eq!(result.sub_nodes[1].kind, AST_NODE_KIND_VARIABLE_DECLARATION);
+        assert_eq!(result.sub_node_structs.len(), 1);
+        assert_eq!(result.sub_node_structs[0].member_details.len(), 1);
+        assert_eq!(
+            result.sub_node_structs[0].member_details[0].name.bytes,
+            b"x"
+        );
+        assert_eq!(
+            result.sub_node_structs[0].member_details[0].type_name_elementary_token,
+            token::TOKEN_UINT
+        );
+        assert_eq!(result.sub_node_variable_declarations.len(), 1);
+        assert_eq!(
+            result.sub_node_variable_declarations[0]
+                .variable_declaration
+                .node_id,
+            result.sub_nodes[1].node_id
+        );
+        assert_eq!(result.sub_node_variable_declarations[0].name.bytes, b"y");
+        assert_eq!(
+            result.sub_node_variable_declarations[0].type_name_elementary_token,
+            token::TOKEN_UINT
+        );
+        assert_eq!(result.tokens_consumed, 14);
+    }
+
+    #[test]
+    fn parse_contract_definition_preserves_inheritance_details() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_CONTRACT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(2, token::TOKEN_IS, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"A"),
+            test_token(4, token::TOKEN_COMMA, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"B"),
+            test_token(6, token::TOKEN_LPAREN, b""),
+            test_token(7, token::TOKEN_RPAREN, b""),
+            test_token(8, token::TOKEN_LBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_contract_definition();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.base_contracts.len(), 2);
+        assert_eq!(result.base_contract_details.len(), 2);
+        assert_eq!(
+            result.base_contract_details[0]
+                .inheritance_specifier
+                .node_id,
+            result.base_contracts[0].node_id
+        );
+        assert_eq!(
+            result.base_contract_details[0].base_name_path[0].bytes,
+            b"A"
+        );
+        assert!(!result.base_contract_details[0].has_arguments);
+        assert_eq!(
+            result.base_contract_details[1]
+                .inheritance_specifier
+                .node_id,
+            result.base_contracts[1].node_id
+        );
+        assert_eq!(
+            result.base_contract_details[1].base_name_path[0].bytes,
+            b"B"
+        );
+        assert!(result.base_contract_details[1].has_arguments);
+        assert!(result.base_contract_details[1].arguments.is_empty());
+        assert_eq!(result.tokens_consumed, 10);
+    }
+
+    #[test]
+    fn parse_contract_definition_preserves_using_directive_details() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_CONTRACT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(2, token::TOKEN_LBRACE, b""),
+            test_token(3, token::TOKEN_USING, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"L"),
+            test_token(5, token::TOKEN_FOR, b""),
+            test_token(6, token::TOKEN_MUL, b""),
+            test_token(7, token::TOKEN_SEMICOLON, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_contract_definition();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.sub_nodes.len(), 1);
+        assert_eq!(result.sub_node_using_directives.len(), 1);
+        let using_directive = &result.sub_node_using_directives[0];
+        assert_eq!(
+            using_directive.using_directive.node_id,
+            result.sub_nodes[0].node_id
+        );
+        assert_eq!(using_directive.functions.len(), 1);
+        assert_eq!(using_directive.function_details.len(), 1);
+        assert_eq!(using_directive.function_details[0].path[0].bytes, b"L");
+        assert!(!using_directive.operators[0].present);
+        assert!(!using_directive.type_name.present);
+    }
+
+    #[test]
+    fn parse_contract_definition_preserves_supported_member_details() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_CONTRACT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(2, token::TOKEN_LBRACE, b""),
+            test_token(3, token::TOKEN_STRUCT, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"S"),
+            test_token(5, token::TOKEN_LBRACE, b""),
+            test_token(6, token::TOKEN_RBRACE, b""),
+            test_token(7, token::TOKEN_ENUM, b""),
+            test_token(8, token::TOKEN_IDENTIFIER, b"E"),
+            test_token(9, token::TOKEN_LBRACE, b""),
+            test_token(10, token::TOKEN_IDENTIFIER, b"A"),
+            test_token(11, token::TOKEN_RBRACE, b""),
+            test_token(12, token::TOKEN_TYPE, b""),
+            test_token(13, token::TOKEN_IDENTIFIER, b"T"),
+            test_token(14, token::TOKEN_IS, b""),
+            test_token(15, token::TOKEN_UINT, b"uint"),
+            test_token(16, token::TOKEN_SEMICOLON, b""),
+            test_token(17, token::TOKEN_EVENT, b""),
+            test_token(18, token::TOKEN_IDENTIFIER, b"Ping"),
+            test_token(19, token::TOKEN_LPAREN, b""),
+            test_token(20, token::TOKEN_RPAREN, b""),
+            test_token(21, token::TOKEN_SEMICOLON, b""),
+            test_token(22, token::TOKEN_IDENTIFIER, b"error"),
+            test_token(23, token::TOKEN_IDENTIFIER, b"Failure"),
+            test_token(24, token::TOKEN_LPAREN, b""),
+            test_token(25, token::TOKEN_RPAREN, b""),
+            test_token(26, token::TOKEN_SEMICOLON, b""),
+            test_token(27, token::TOKEN_FUNCTION, b""),
+            test_token(28, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(29, token::TOKEN_LPAREN, b""),
+            test_token(30, token::TOKEN_RPAREN, b""),
+            test_token(31, token::TOKEN_LBRACE, b""),
+            test_token(32, token::TOKEN_RBRACE, b""),
+            test_token(33, token::TOKEN_RBRACE, b""),
+            test_token(34, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_contract_definition();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.sub_nodes.len(), 6);
+        assert_eq!(result.sub_node_structs.len(), 1);
+        assert_eq!(result.sub_node_structs[0].name.bytes, b"S");
+        assert_eq!(result.sub_node_structs[0].member_details.len(), 0);
+        assert_eq!(
+            result.sub_node_structs[0].struct_definition.node_id,
+            result.sub_nodes[0].node_id
+        );
+        assert_eq!(result.sub_node_enums.len(), 1);
+        assert_eq!(result.sub_node_enums[0].member_details[0].name.bytes, b"A");
+        assert_eq!(result.sub_node_user_defined_value_types.len(), 1);
+        assert_eq!(result.sub_node_user_defined_value_types[0].name.bytes, b"T");
+        assert_eq!(result.sub_node_events.len(), 1);
+        assert_eq!(result.sub_node_events[0].name.bytes, b"Ping");
+        assert!(result.sub_node_events[0].parameter_declarations.is_empty());
+        assert!(result.sub_node_events[0].parameter_details.is_empty());
+        assert_eq!(result.sub_node_errors.len(), 1);
+        assert_eq!(result.sub_node_errors[0].name.bytes, b"Failure");
+        assert!(result.sub_node_errors[0].parameter_declarations.is_empty());
+        assert!(result.sub_node_errors[0].parameter_details.is_empty());
+        assert_eq!(result.sub_node_functions.len(), 1);
+        assert_eq!(result.sub_node_functions[0].name.bytes, b"f");
+        assert_eq!(
+            result.sub_node_functions[0].function_definition.node_id,
+            result.sub_nodes[5].node_id
+        );
+        assert!(result.sub_node_functions[0].parameter_details.is_empty());
+        assert_eq!(result.sub_node_functions[0].block.kind, AST_NODE_KIND_BLOCK);
+        assert!(result.sub_node_functions[0].block_statements.is_empty());
+        assert!(result.sub_node_variable_declarations.is_empty());
+        assert_eq!(result.tokens_consumed, 34);
+    }
+
+    #[test]
+    fn parse_contract_definition_reports_missing_kind_after_abstract() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ABSTRACT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"A"),
+            test_token(2, token::TOKEN_LBRACE, b""),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_contract_definition();
+
+        assert!(result.contract_definition.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 3515);
+        assert_eq!(result.errors[0].location.start, 1);
+        assert_eq!(result.errors[0].location.end, 2);
+        assert!(result.is_abstract);
+        assert_eq!(result.tokens_consumed, 4);
+    }
+
+    #[test]
+    fn parse_contract_definition_reports_duplicate_inheritance_secondary_location() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_CONTRACT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(2, token::TOKEN_IS, b""),
+            test_token(3, token::TOKEN_IDENTIFIER, b"A"),
+            test_token(4, token::TOKEN_IS, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"B"),
+            test_token(6, token::TOKEN_LBRACE, b""),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_contract_definition();
+
+        assert!(result.contract_definition.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 6668);
+        assert_eq!(result.errors[0].location.start, 4);
+        assert_eq!(result.errors[0].secondary_locations.len(), 1);
+        assert_eq!(
+            result.errors[0].secondary_locations[0].message,
+            "Previous list:"
+        );
+        assert_eq!(result.errors[0].secondary_locations[0].location.start, 3);
+    }
+
+    #[test]
+    fn parse_contract_definition_reports_duplicate_storage_layout_secondary_location() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_CONTRACT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(2, token::TOKEN_IDENTIFIER, b"layout"),
+            test_token(3, token::TOKEN_IDENTIFIER, b"at"),
+            test_token(4, token::TOKEN_NUMBER, b"1"),
+            test_token(5, token::TOKEN_IDENTIFIER, b"layout"),
+            test_token(6, token::TOKEN_IDENTIFIER, b"at"),
+            test_token(7, token::TOKEN_NUMBER, b"2"),
+            test_token(8, token::TOKEN_LBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_contract_definition();
+
+        assert!(result.contract_definition.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 8714);
+        assert_eq!(result.errors[0].location.start, 5);
+        assert_eq!(result.errors[0].secondary_locations.len(), 1);
+        assert_eq!(
+            result.errors[0].secondary_locations[0].message,
+            "Previous definition:"
+        );
+        assert_eq!(result.errors[0].secondary_locations[0].location.start, 2);
+    }
+
+    #[test]
+    fn parse_current_identifier_path_spans_final_segment() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_IDENTIFIER, b"A"),
+            test_token(1, token::TOKEN_PERIOD, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"B"),
+            test_token(3, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_current_identifier_path_with_node_id(0);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.identifier_path.kind, AST_NODE_KIND_IDENTIFIER_PATH);
+        assert_eq!(result.identifier_path.location.start, 0);
+        assert_eq!(result.identifier_path.location.end, 3);
+        assert_eq!(result.path_locations[1].start, 2);
+        assert_eq!(result.path_locations[1].end, 3);
+        assert_eq!(result.tokens_consumed, 3);
+    }
+
+    #[test]
+    fn scannerless_expected_token_errors_use_slice_token_locations() {
+        reset_parser_input();
+
+        let override_result = parse_override_specifier(
+            vec![
+                test_token(0, token::TOKEN_OVERRIDE, b""),
+                test_token(1, token::TOKEN_LPAREN, b""),
+                test_token(2, token::TOKEN_IDENTIFIER, b"A"),
+                test_token(3, token::TOKEN_IDENTIFIER, b"B"),
+                test_token(4, token::TOKEN_RPAREN, b""),
+            ],
+            0,
+        );
+        assert_eq!(override_result.errors.len(), 1);
+        assert_eq!(override_result.errors[0].error_id, 2314);
+        assert_eq!(
+            override_result.errors[0].message,
+            "Expected ',' but got identifier"
+        );
+        assert_eq!(override_result.errors[0].location.start, 3);
+
+        let inheritance_result = parse_inheritance_specifier(
+            vec![
+                test_token(10, token::TOKEN_IDENTIFIER, b"Base"),
+                test_token(11, token::TOKEN_LPAREN, b""),
+                test_token(12, token::TOKEN_IDENTIFIER, b"arg"),
+            ],
+            0,
+            Vec::new(),
+            0,
+        );
+        assert_eq!(inheritance_result.errors.len(), 1);
+        assert_eq!(inheritance_result.errors[0].error_id, 2314);
+        assert_eq!(
+            inheritance_result.errors[0].message,
+            "Expected ')' but got identifier"
+        );
+        assert_eq!(inheritance_result.errors[0].location.start, 12);
+
+        let modifier_result = parse_modifier_invocation(
+            vec![
+                test_token(20, token::TOKEN_IDENTIFIER, b"mod"),
+                test_token(21, token::TOKEN_LPAREN, b""),
+                test_token(22, token::TOKEN_IDENTIFIER, b"arg"),
+            ],
+            0,
+            Vec::new(),
+            0,
+        );
+        assert_eq!(modifier_result.errors.len(), 1);
+        assert_eq!(modifier_result.errors[0].error_id, 2314);
+        assert_eq!(
+            modifier_result.errors[0].message,
+            "Expected ')' but got identifier"
+        );
+        assert_eq!(modifier_result.errors[0].location.start, 22);
+
+        let identifier_path_result = parse_identifier_path(
+            vec![
+                test_token(30, token::TOKEN_IDENTIFIER, b"A"),
+                test_token(31, token::TOKEN_PERIOD, b""),
+                test_token(32, token::TOKEN_RPAREN, b""),
+            ],
+            0,
+        );
+        assert_eq!(identifier_path_result.errors.len(), 1);
+        assert_eq!(identifier_path_result.errors[0].error_id, 2314);
+        assert_eq!(
+            identifier_path_result.errors[0].message,
+            "Expected identifier but got ')'"
+        );
+        assert_eq!(identifier_path_result.errors[0].location.start, 32);
+
+        let trailing_period_result = parse_identifier_path(
+            vec![
+                test_token(40, token::TOKEN_IDENTIFIER, b"A"),
+                test_token(41, token::TOKEN_PERIOD, b""),
+            ],
+            0,
+        );
+        assert_eq!(trailing_period_result.errors.len(), 1);
+        assert_eq!(trailing_period_result.errors[0].error_id, 2314);
+        assert_eq!(
+            trailing_period_result.errors[0].message,
+            "Expected identifier but got end of source"
+        );
+        assert_eq!(trailing_period_result.errors[0].location.start, 42);
+        assert_eq!(trailing_period_result.errors[0].location.end, 42);
+    }
+
+    #[test]
+    fn parse_address_payable_type_preserves_state_mutability() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_ADDRESS, b"address"),
+            test_token(1, token::TOKEN_PAYABLE, b""),
+            test_token(2, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_type_name();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.type_name.kind, AST_NODE_KIND_ELEMENTARY_TYPE_NAME);
+        assert!(result.has_state_mutability);
+        assert_eq!(result.state_mutability, STATE_MUTABILITY_PAYABLE);
+        assert_eq!(result.elementary_type_token, token::TOKEN_ADDRESS);
+        assert_eq!(result.elementary_type_first_number, 0);
+        assert_eq!(result.elementary_type_second_number, 0);
+    }
+
+    #[test]
+    fn parse_mapping_preserves_names_and_value_type_mutability() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_MAPPING, b""),
+            test_token(1, token::TOKEN_LPAREN, b""),
+            test_token(2, token::TOKEN_ADDRESS, b"address"),
+            test_token(3, token::TOKEN_IDENTIFIER, b"key"),
+            test_token(4, token::TOKEN_DOUBLE_ARROW, b""),
+            test_token(5, token::TOKEN_ADDRESS, b"address"),
+            test_token(6, token::TOKEN_PAYABLE, b""),
+            test_token(7, token::TOKEN_IDENTIFIER, b"value"),
+            test_token(8, token::TOKEN_RPAREN, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_mapping();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.mapping.kind, AST_NODE_KIND_MAPPING);
+        assert_eq!(result.key_type.kind, AST_NODE_KIND_ELEMENTARY_TYPE_NAME);
+        assert_eq!(result.key_name.bytes, b"key");
+        assert_eq!(result.key_name_location.start, 3);
+        assert_eq!(result.value_type.kind, AST_NODE_KIND_ELEMENTARY_TYPE_NAME);
+        assert!(result.value_type_has_state_mutability);
+        assert_eq!(result.value_type_state_mutability, STATE_MUTABILITY_PAYABLE);
+        assert_eq!(result.value_name.bytes, b"value");
+        assert_eq!(result.value_name_location.start, 7);
+    }
+
+    #[test]
+    fn parse_function_type_preserves_header_metadata() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FUNCTION, b""),
+            test_token(1, token::TOKEN_LPAREN, b""),
+            test_token(2, token::TOKEN_UINT, b"uint"),
+            test_token(3, token::TOKEN_RPAREN, b""),
+            test_token(4, token::TOKEN_EXTERNAL, b""),
+            test_token(5, token::TOKEN_VIEW, b""),
+            test_token(6, token::TOKEN_RETURNS, b""),
+            test_token(7, token::TOKEN_LPAREN, b""),
+            test_token(8, token::TOKEN_BOOL, b"bool"),
+            test_token(9, token::TOKEN_RPAREN, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_function_type();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.function_type.kind, AST_NODE_KIND_FUNCTION_TYPE_NAME);
+        assert_eq!(result.parameters.kind, AST_NODE_KIND_PARAMETER_LIST);
+        assert_eq!(result.return_parameters.kind, AST_NODE_KIND_PARAMETER_LIST);
+        assert_eq!(result.visibility, VISIBILITY_EXTERNAL);
+        assert_eq!(result.state_mutability, STATE_MUTABILITY_VIEW);
+    }
+
+    #[test]
+    fn parse_state_function_variable_leaves_second_visibility_for_variable() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FUNCTION, b""),
+            test_token(1, token::TOKEN_LPAREN, b""),
+            test_token(2, token::TOKEN_RPAREN, b""),
+            test_token(3, token::TOKEN_EXTERNAL, b""),
+            test_token(4, token::TOKEN_PUBLIC, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(6, token::TOKEN_SEMICOLON, b""),
+            test_token(7, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let options = VarDeclParserOptions {
+            kind: VAR_DECL_KIND_STATE,
+            ..VarDeclParserOptions::default()
+        };
+        let result = parse_variable_declaration_with_options(options, empty_ast_node(), 0);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.type_name.kind, AST_NODE_KIND_FUNCTION_TYPE_NAME);
+        assert_eq!(result.name.bytes, b"f");
+        assert_eq!(result.name_location.start, 5);
+        assert_eq!(result.visibility, VISIBILITY_PUBLIC);
+        assert_eq!(current_token(), token::TOKEN_SEMICOLON);
+    }
+
+    #[test]
+    fn parse_function_header_counts_parameter_list_tokens() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_LPAREN, b""),
+            test_token(1, token::TOKEN_UINT, b"uint"),
+            test_token(2, token::TOKEN_RPAREN, b""),
+            test_token(3, token::TOKEN_PUBLIC, b""),
+            test_token(4, token::TOKEN_RETURNS, b""),
+            test_token(5, token::TOKEN_LPAREN, b""),
+            test_token(6, token::TOKEN_BOOL, b"bool"),
+            test_token(7, token::TOKEN_RPAREN, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_function_header(false);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.parameters.kind, AST_NODE_KIND_PARAMETER_LIST);
+        assert_eq!(result.parameter_details.len(), 1);
+        assert_eq!(
+            result.parameter_details[0].type_name_elementary_token,
+            token::TOKEN_UINT
+        );
+        assert_eq!(result.return_parameters.kind, AST_NODE_KIND_PARAMETER_LIST);
+        assert_eq!(result.return_parameter_details.len(), 1);
+        assert_eq!(
+            result.return_parameter_details[0].type_name_elementary_token,
+            token::TOKEN_BOOL
+        );
+        assert_eq!(result.visibility, VISIBILITY_PUBLIC);
+        assert_eq!(result.tokens_consumed, 8);
+    }
+
+    #[test]
+    fn parse_function_definition_preserves_header_declarations_on_error() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FUNCTION, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_UINT, b"uint"),
+            test_token(4, token::TOKEN_IDENTIFIER, b"a"),
+            test_token(5, token::TOKEN_RPAREN, b""),
+            test_token(6, token::TOKEN_RETURNS, b""),
+            test_token(7, token::TOKEN_LPAREN, b""),
+            test_token(8, token::TOKEN_UINT, b"uint"),
+            test_token(9, token::TOKEN_IDENTIFIER, b"b"),
+            test_token(10, token::TOKEN_RPAREN, b""),
+            test_token(11, token::TOKEN_LBRACE, b""),
+            test_token(12, token::TOKEN_RBRACE, b""),
+            test_token(13, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_function_definition(false, false);
+
+        assert!(!result.function_definition.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.parameter_declarations.len(), 1);
+        assert_eq!(result.return_parameter_declarations.len(), 1);
+        assert_eq!(result.parameter_details.len(), 1);
+        assert_eq!(result.return_parameter_details.len(), 1);
+        assert_eq!(result.parameter_declarations[0].text.bytes, b"a");
+        assert_eq!(result.return_parameter_declarations[0].text.bytes, b"b");
+        assert_eq!(result.parameter_details[0].name.bytes, b"a");
+        assert_eq!(result.return_parameter_details[0].name.bytes, b"b");
+    }
+
+    #[test]
+    fn parse_function_definition_counts_body_tokens() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FUNCTION, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_RPAREN, b""),
+            test_token(4, token::TOKEN_LBRACE, b""),
+            test_token(5, token::TOKEN_RBRACE, b""),
+            test_token(6, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_function_definition(false, true);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.function_definition.kind,
+            AST_NODE_KIND_FUNCTION_DEFINITION
+        );
+        assert_eq!(result.block.kind, AST_NODE_KIND_BLOCK);
+        assert!(!result.block_unchecked);
+        assert!(result.block_statements.is_empty());
+        assert_eq!(result.tokens_consumed, 6);
+    }
+
+    #[test]
+    fn parse_function_definition_preserves_experimental_return_expression_detail() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FUNCTION, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_RPAREN, b""),
+            test_token(4, token::TOKEN_RIGHT_ARROW, b""),
+            test_token(5, token::TOKEN_NUMBER, b"1"),
+            test_token(6, token::TOKEN_ADD, b""),
+            test_token(7, token::TOKEN_NUMBER, b"2"),
+            test_token(8, token::TOKEN_LBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+        set_scanner_mode_experimental_solidity();
+
+        let result = parse_function_definition(true, true);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.function_definition.kind,
+            AST_NODE_KIND_FUNCTION_DEFINITION
+        );
+        assert_eq!(
+            result.experimental_return_expression.kind,
+            AST_NODE_KIND_BINARY_OPERATION
+        );
+        assert_eq!(
+            result
+                .experimental_return_expression_detail
+                .expression
+                .node_id,
+            result.experimental_return_expression.node_id
+        );
+        assert_eq!(
+            result
+                .experimental_return_expression_detail
+                .left_expression_detail
+                .len(),
+            1
+        );
+        assert_eq!(
+            result
+                .experimental_return_expression_detail
+                .right_expression_detail
+                .len(),
+            1
+        );
+        assert_eq!(
+            result
+                .experimental_return_expression_detail
+                .left_expression
+                .kind,
+            AST_NODE_KIND_LITERAL
+        );
+        assert_eq!(
+            result
+                .experimental_return_expression_detail
+                .right_expression
+                .kind,
+            AST_NODE_KIND_LITERAL
+        );
+    }
+
+    #[test]
+    fn parse_function_definition_preserves_modifier_invocation_details() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FUNCTION, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_RPAREN, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"m"),
+            test_token(5, token::TOKEN_LPAREN, b""),
+            test_token(6, token::TOKEN_RPAREN, b""),
+            test_token(7, token::TOKEN_LBRACE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_function_definition(false, true);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.function_definition.kind,
+            AST_NODE_KIND_FUNCTION_DEFINITION
+        );
+        assert_eq!(result.modifiers.len(), 1);
+        assert_eq!(result.modifier_details.len(), 1);
+        assert_eq!(
+            result.modifiers[0].node_id,
+            result.modifier_details[0].modifier_invocation.node_id
+        );
+        assert_eq!(
+            result.modifier_details[0].modifier_invocation.kind,
+            AST_NODE_KIND_MODIFIER_INVOCATION
+        );
+        assert_eq!(
+            result.modifier_details[0].modifier_name.node_id,
+            result.modifier_details[0]
+                .modifier_name_detail
+                .identifier_path
+                .node_id
+        );
+        assert_eq!(
+            result.modifier_details[0].modifier_name_detail.path[0].bytes,
+            b"m"
+        );
+        assert!(result.modifier_details[0].has_arguments);
+        assert!(result.modifier_details[0].arguments.is_empty());
+    }
+
+    #[test]
+    fn parse_function_definition_preserves_empty_override_specifier() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FUNCTION, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_RPAREN, b""),
+            test_token(4, token::TOKEN_PUBLIC, b""),
+            test_token(5, token::TOKEN_VIRTUAL, b""),
+            test_token(6, token::TOKEN_OVERRIDE, b""),
+            test_token(7, token::TOKEN_LBRACE, b""),
+            test_token(8, token::TOKEN_RBRACE, b""),
+            test_token(9, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_function_definition(false, true);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.function_definition.kind,
+            AST_NODE_KIND_FUNCTION_DEFINITION
+        );
+        assert!(result.is_virtual);
+        assert_eq!(result.overrides.kind, AST_NODE_KIND_OVERRIDE_SPECIFIER);
+        assert!(result.override_paths.is_empty());
+    }
+
+    #[test]
+    fn parse_function_definition_preserves_override_path_details() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FUNCTION, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(2, token::TOKEN_LPAREN, b""),
+            test_token(3, token::TOKEN_RPAREN, b""),
+            test_token(4, token::TOKEN_PUBLIC, b""),
+            test_token(5, token::TOKEN_OVERRIDE, b""),
+            test_token(6, token::TOKEN_LPAREN, b""),
+            test_token(7, token::TOKEN_IDENTIFIER, b"A"),
+            test_token(8, token::TOKEN_PERIOD, b""),
+            test_token(9, token::TOKEN_IDENTIFIER, b"B"),
+            test_token(10, token::TOKEN_RPAREN, b""),
+            test_token(11, token::TOKEN_LBRACE, b""),
+            test_token(12, token::TOKEN_RBRACE, b""),
+            test_token(13, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_function_definition(false, true);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.overrides.kind, AST_NODE_KIND_OVERRIDE_SPECIFIER);
+        assert_eq!(result.override_paths.len(), 1);
+        assert_eq!(result.override_path_details.len(), 1);
+        assert_eq!(
+            result.override_path_details[0].identifier_path.node_id,
+            result.override_paths[0].node_id
+        );
+        assert_eq!(result.override_path_details[0].path[0].bytes, b"A");
+        assert_eq!(result.override_path_details[0].path[1].bytes, b"B");
+        assert_eq!(result.override_path_details[0].path_locations[1].start, 9);
+    }
+
+    #[test]
+    fn parse_quantified_function_definition_counts_type_variables_and_body() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_FORALL, b""),
+            test_token(1, token::TOKEN_LPAREN, b""),
+            test_token(2, token::TOKEN_IDENTIFIER, b"T"),
+            test_token(3, token::TOKEN_RPAREN, b""),
+            test_token(4, token::TOKEN_FUNCTION, b""),
+            test_token(5, token::TOKEN_IDENTIFIER, b"f"),
+            test_token(6, token::TOKEN_LPAREN, b""),
+            test_token(7, token::TOKEN_RPAREN, b""),
+            test_token(8, token::TOKEN_LBRACE, b""),
+            test_token(9, token::TOKEN_RBRACE, b""),
+            test_token(10, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+        set_scanner_mode_experimental_solidity();
+
+        let result = parse_quantified_function_definition();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.for_all_quantifier.kind,
+            AST_NODE_KIND_FOR_ALL_QUANTIFIER
+        );
+        assert_eq!(
+            result.type_variable_declarations.kind,
+            AST_NODE_KIND_PARAMETER_LIST
+        );
+        assert_eq!(
+            result.quantified_function.kind,
+            AST_NODE_KIND_FUNCTION_DEFINITION
+        );
+        assert_eq!(result.type_variable_declaration_parameters.len(), 1);
+        assert_eq!(result.type_variable_declaration_details.len(), 1);
+        assert_eq!(
+            result.type_variable_declaration_parameters[0].node_id,
+            result.type_variable_declaration_details[0]
+                .variable_declaration
+                .node_id
+        );
+        assert_eq!(
+            result
+                .quantified_function_detail
+                .function_definition
+                .node_id,
+            result.quantified_function.node_id
+        );
+        assert_eq!(result.tokens_consumed, 10);
+    }
+
+    #[test]
+    fn parse_function_call_list_arguments_counts_expression_tokens() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_NUMBER, b"1"),
+            test_token(1, token::TOKEN_COMMA, b""),
+            test_token(2, token::TOKEN_NUMBER, b"2"),
+            test_token(3, token::TOKEN_RPAREN, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_function_call_list_arguments();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.arguments.len(), 2);
+        assert_eq!(result.tokens_consumed, 3);
+    }
+
+    #[test]
+    fn parse_named_arguments_counts_expression_tokens() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_IDENTIFIER, b"x"),
+            test_token(1, token::TOKEN_COLON, b""),
+            test_token(2, token::TOKEN_NUMBER, b"1"),
+            test_token(3, token::TOKEN_COMMA, b""),
+            test_token(4, token::TOKEN_IDENTIFIER, b"y"),
+            test_token(5, token::TOKEN_COLON, b""),
+            test_token(6, token::TOKEN_NUMBER, b"2"),
+            test_token(7, token::TOKEN_RBRACE, b""),
+            test_token(8, token::TOKEN_EOS, b""),
+        ];
+        let comment_locations = (0..tokens.len() as i64).map(test_location).collect();
+        set_parser_input(
+            tokens,
+            empty_string(),
+            Vec::new(),
+            comment_locations,
+            0,
+            String::new(),
+            true,
+        );
+
+        let result = parse_named_arguments();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.arguments.len(), 2);
+        assert_eq!(result.parameter_names.len(), 2);
+        assert_eq!(result.tokens_consumed, 7);
+    }
+
+    #[test]
+    fn scannerless_ast_parsers_return_absent_nodes() {
+        reset_parser_input();
+        for node in [
+            parse_contract_definition().contract_definition,
+            parse_statement().statement,
+            parse_expression().expression,
+        ] {
+            assert!(!node.present);
+            assert_eq!(node.node_id, 0);
+            assert_eq!(node.kind, AST_NODE_KIND_NONE);
+        }
+    }
+
+    #[test]
+    fn scannerless_collections_return_empty_data() {
+        reset_parser_input();
+        assert!(parse_function_call_list_arguments().arguments.is_empty());
+        assert!(parse_function_call_arguments().arguments.is_empty());
+        assert!(parse_index_accessed_path().path.is_empty());
+        assert!(
+            !find_license_string(empty_string(), Vec::new(), 0)
+                .license
+                .has_value
+        );
+
+        let parameter_list = create_empty_parameter_list(empty_source_location(), 0);
+        assert!(parameter_list.parameter_list.present);
+        assert_eq!(
+            parameter_list.parameter_list.kind,
+            AST_NODE_KIND_PARAMETER_LIST
+        );
+        assert!(parameter_list.parameters.is_empty());
+    }
+}
