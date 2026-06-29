@@ -633,7 +633,19 @@ struct RustParserResult
 	std::int64_t maxID = 0;
 };
 
+struct RustParserSourceUnitResult
+{
+	RustParserResult result;
+	ASTPointer<SourceUnit> sourceUnit;
+};
+
 RustParserResult parseSourceUnitWithRust(
+	langutil::CharStream const& _charStream,
+	langutil::EVMVersion _evmVersion,
+	std::int64_t _currentNodeID = 0
+);
+
+RustParserSourceUnitResult parseSourceUnitWithRustIfSupported(
 	langutil::CharStream const& _charStream,
 	langutil::EVMVersion _evmVersion,
 	std::int64_t _currentNodeID = 0

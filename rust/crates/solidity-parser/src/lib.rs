@@ -3,6 +3,6 @@
 #![allow(dead_code)]
 
 pub mod bridge;
+pub mod compact;
 mod doc_string_parser;
 mod parser;
-mod token;

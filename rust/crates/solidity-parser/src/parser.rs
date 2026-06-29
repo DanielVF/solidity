@@ -1,4 +1,5 @@
-use crate::{bridge::ffi, token};
+use crate::bridge::ffi;
+use langutil::{scanner, token};
 use std::cell::{Cell, RefCell};
 use std::panic::{catch_unwind, panic_any, resume_unwind, AssertUnwindSafe};
 use std::sync::{
@@ -100,6 +101,7 @@ const VARIABLE_DECLARATION_LOCATION_MEMORY: u8 = 3;
 const VARIABLE_DECLARATION_LOCATION_CALLDATA: u8 = 4;
 const RECURSION_LIMIT: u32 = 1200;
 const MAX_BRIDGE_ARRAY_TYPE_DEPTH: usize = 256;
+const CALLER_THREAD_NESTING_LIMIT: usize = 32;
 const PARSE_THREAD_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 static PANIC_HOOK_INIT: Once = Once::new();
@@ -108,6 +110,7 @@ static SUPPRESSED_RECURSION_LIMIT_PANICS: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     static RECURSION_DEPTH: Cell<u32> = const { Cell::new(0) };
     static PARSER_STATE: RefCell<ParserState> = RefCell::new(ParserState::default());
+    static ACTIVE_PARSER_STATE: Cell<*mut ParserState> = const { Cell::new(std::ptr::null_mut()) };
 }
 
 #[derive(Clone)]
@@ -116,7 +119,6 @@ struct ParserComment {
     location: ffi::WireSourceLocation,
 }
 
-#[derive(Clone)]
 struct ParserState {
     tokens: Vec<ffi::WireLocatedToken>,
     comments: Vec<ParserComment>,
@@ -195,6 +197,69 @@ impl Default for ParserState {
             reported_warnings: Vec::new(),
         }
     }
+}
+
+impl ParserState {
+    fn ensure_token_index(&mut self, _index: usize) {}
+
+    fn ensure_current_token(&mut self) {}
+
+    fn advance_cursor(&mut self) -> u64 {
+        if self.cursor < self.tokens.len() {
+            self.cursor += 1;
+            1
+        } else {
+            0
+        }
+    }
+}
+
+struct ActiveParserStateGuard {
+    previous: *mut ParserState,
+}
+
+impl ActiveParserStateGuard {
+    fn new(state: &mut ParserState) -> Self {
+        ACTIVE_PARSER_STATE.with(|active| {
+            let previous = active.replace(state as *mut ParserState);
+            Self { previous }
+        })
+    }
+}
+
+impl Drop for ActiveParserStateGuard {
+    fn drop(&mut self) {
+        ACTIVE_PARSER_STATE.with(|active| active.set(self.previous));
+    }
+}
+
+fn take_stored_parser_state() -> ParserState {
+    PARSER_STATE.with(|state| std::mem::take(&mut *state.borrow_mut()))
+}
+
+fn parser_state<R>(f: impl FnOnce(&ParserState) -> R) -> R {
+    ACTIVE_PARSER_STATE.with(|active| {
+        let state = active.get();
+        if state.is_null() {
+            PARSER_STATE.with(|stored| f(&stored.borrow()))
+        } else {
+            // Top-level parsing installs a scoped active state. The guard owns exclusive
+            // access for the parse duration, so helpers can read it without RefCell traffic.
+            unsafe { f(&*state) }
+        }
+    })
+}
+
+fn parser_state_mut<R>(f: impl FnOnce(&mut ParserState) -> R) -> R {
+    ACTIVE_PARSER_STATE.with(|active| {
+        let state = active.get();
+        if state.is_null() {
+            PARSER_STATE.with(|stored| f(&mut stored.borrow_mut()))
+        } else {
+            // See parser_state: the active parse scope guarantees unique mutable access.
+            unsafe { f(&mut *state) }
+        }
+    })
 }
 
 struct RecursionGuard;
@@ -580,15 +645,73 @@ impl SemVerMatchExpressionParser {
 
 pub fn parse() -> ffi::WireParserResult {
     install_recursion_limit_panic_hook();
-    let parser_state = PARSER_STATE.with(|state| state.borrow().clone());
     let _suppress_recursion_limit_panic_hook = SuppressRecursionLimitPanicHook::new();
+
+    if parser_input_needs_large_stack() {
+        return parse_on_large_stack_thread();
+    }
+
+    let mut parser_state = take_stored_parser_state();
+    let _active_parser_state = ActiveParserStateGuard::new(&mut parser_state);
+    parse_with_recursion_limit_catch()
+}
+
+pub fn parse_compact_output() -> crate::compact::CompactParseOutput {
+    install_recursion_limit_panic_hook();
+    let _suppress_recursion_limit_panic_hook = SuppressRecursionLimitPanicHook::new();
+
+    if parser_input_needs_large_stack() {
+        return parse_compact_on_large_stack_thread();
+    }
+
+    let mut parser_state = take_stored_parser_state();
+    let _active_parser_state = ActiveParserStateGuard::new(&mut parser_state);
+    parse_compact_with_recursion_limit_catch()
+}
+
+fn parse_compact_on_large_stack_thread() -> crate::compact::CompactParseOutput {
+    let parser_state = take_stored_parser_state();
     let parse_thread = std::thread::Builder::new()
         .name("solidity-parser".to_string())
         .stack_size(PARSE_THREAD_STACK_SIZE)
         .spawn(move || {
-            PARSER_STATE.with(|state| {
-                *state.borrow_mut() = parser_state;
-            });
+            let mut parser_state = parser_state;
+            let _active_parser_state = ActiveParserStateGuard::new(&mut parser_state);
+            parse_compact_with_recursion_limit_catch()
+        })
+        .expect("failed to spawn Solidity parser thread");
+
+    match parse_thread.join() {
+        Ok(result) => result,
+        Err(payload) => resume_unwind(payload),
+    }
+}
+
+fn parse_compact_with_recursion_limit_catch() -> crate::compact::CompactParseOutput {
+    match catch_unwind(AssertUnwindSafe(parse_compact_impl)) {
+        Ok(result) => result,
+        Err(payload) => {
+            if payload.is::<RecursionLimitExceeded>() {
+                reset_recursion_depth();
+                compact_result_from_errors(vec![fatal_parser_error(
+                    7319,
+                    "Maximum recursion depth reached during parsing.",
+                )])
+            } else {
+                resume_unwind(payload);
+            }
+        }
+    }
+}
+
+fn parse_on_large_stack_thread() -> ffi::WireParserResult {
+    let parser_state = take_stored_parser_state();
+    let parse_thread = std::thread::Builder::new()
+        .name("solidity-parser".to_string())
+        .stack_size(PARSE_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let mut parser_state = parser_state;
+            let _active_parser_state = ActiveParserStateGuard::new(&mut parser_state);
             parse_with_recursion_limit_catch()
         })
         .expect("failed to spawn Solidity parser thread");
@@ -597,6 +720,29 @@ pub fn parse() -> ffi::WireParserResult {
         Ok(result) => result,
         Err(payload) => resume_unwind(payload),
     }
+}
+
+fn parser_input_needs_large_stack() -> bool {
+    parser_state(|state| {
+        let mut nesting = 0usize;
+        let mut max_nesting = 0usize;
+        for token in &state.tokens {
+            match token.token {
+                token::TOKEN_LBRACE | token::TOKEN_LPAREN | token::TOKEN_LBRACK => {
+                    nesting += 1;
+                    max_nesting = max_nesting.max(nesting);
+                    if max_nesting > CALLER_THREAD_NESTING_LIMIT {
+                        return true;
+                    }
+                }
+                token::TOKEN_RBRACE | token::TOKEN_RPAREN | token::TOKEN_RBRACK => {
+                    nesting = nesting.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+        false
+    })
 }
 
 fn parse_with_recursion_limit_catch() -> ffi::WireParserResult {
@@ -645,6 +791,14 @@ impl Drop for SuppressRecursionLimitPanicHook {
     }
 }
 
+struct ResetParserInputOnDrop;
+
+impl Drop for ResetParserInputOnDrop {
+    fn drop(&mut self) {
+        reset_parser_input();
+    }
+}
+
 fn parse_impl() -> ffi::WireParserResult {
     assert!(!inside_modifier());
 
@@ -682,8 +836,8 @@ fn parse_impl() -> ffi::WireParserResult {
             return parser_result_error("Failed to parse pragma directive.");
         }
         experimental_solidity_enabled |= pragma.experimental_solidity_enabled;
-        source_unit_pragmas.push(pragma.clone());
-        nodes.push(pragma.pragma_directive);
+        nodes.push(pragma.pragma_directive.clone());
+        source_unit_pragmas.push(pragma);
     }
 
     if experimental_solidity_enabled {
@@ -702,8 +856,8 @@ fn parse_impl() -> ffi::WireParserResult {
                     return parser_result_error("Failed to parse pragma directive.");
                 }
                 experimental_solidity_enabled |= pragma.experimental_solidity_enabled;
-                source_unit_pragmas.push(pragma.clone());
-                nodes.push(pragma.pragma_directive);
+                nodes.push(pragma.pragma_directive.clone());
+                source_unit_pragmas.push(pragma);
             }
             token::TOKEN_IMPORT => {
                 let import = parse_import_directive();
@@ -714,8 +868,8 @@ fn parse_impl() -> ffi::WireParserResult {
                 if !import.import_directive.present {
                     return parser_result_error("Failed to parse import directive.");
                 }
-                source_unit_imports.push(import.clone());
-                nodes.push(import.import_directive);
+                nodes.push(import.import_directive.clone());
+                source_unit_imports.push(import);
             }
             token::TOKEN_ABSTRACT
             | token::TOKEN_INTERFACE
@@ -729,8 +883,8 @@ fn parse_impl() -> ffi::WireParserResult {
                 if !contract.contract_definition.present {
                     return parser_result_error("Failed to parse contract definition.");
                 }
-                source_unit_contracts.push(contract.clone());
-                nodes.push(contract.contract_definition);
+                nodes.push(contract.contract_definition.clone());
+                source_unit_contracts.push(contract);
             }
             token::TOKEN_STRUCT => {
                 let struct_definition = parse_struct_definition();
@@ -741,8 +895,8 @@ fn parse_impl() -> ffi::WireParserResult {
                 if !struct_definition.struct_definition.present {
                     return parser_result_error("Failed to parse struct definition.");
                 }
-                source_unit_structs.push(struct_definition.clone());
-                nodes.push(struct_definition.struct_definition);
+                nodes.push(struct_definition.struct_definition.clone());
+                source_unit_structs.push(struct_definition);
             }
             token::TOKEN_ENUM => {
                 let enum_definition = parse_enum_definition();
@@ -753,8 +907,8 @@ fn parse_impl() -> ffi::WireParserResult {
                 if !enum_definition.enum_definition.present {
                     return parser_result_error("Failed to parse enum definition.");
                 }
-                source_unit_enums.push(enum_definition.clone());
-                nodes.push(enum_definition.enum_definition);
+                nodes.push(enum_definition.enum_definition.clone());
+                source_unit_enums.push(enum_definition);
             }
             token::TOKEN_TYPE => {
                 if experimental_solidity_enabled {
@@ -766,8 +920,8 @@ fn parse_impl() -> ffi::WireParserResult {
                     if !type_definition.type_definition.present {
                         return parser_result_error("Failed to parse type definition.");
                     }
-                    source_unit_type_definitions.push(type_definition.clone());
-                    nodes.push(type_definition.type_definition);
+                    nodes.push(type_definition.type_definition.clone());
+                    source_unit_type_definitions.push(type_definition);
                 } else {
                     let type_definition = parse_user_defined_value_type_definition();
                     if parser_errors_have_fatal(&type_definition.errors) {
@@ -777,8 +931,8 @@ fn parse_impl() -> ffi::WireParserResult {
                     if !type_definition.user_defined_value_type_definition.present {
                         return parser_result_error("Failed to parse type definition.");
                     }
-                    source_unit_user_defined_value_types.push(type_definition.clone());
-                    nodes.push(type_definition.user_defined_value_type_definition);
+                    nodes.push(type_definition.user_defined_value_type_definition.clone());
+                    source_unit_user_defined_value_types.push(type_definition);
                 }
             }
             token::TOKEN_USING => {
@@ -790,8 +944,8 @@ fn parse_impl() -> ffi::WireParserResult {
                 if !using_directive.using_directive.present {
                     return parser_result_error("Failed to parse using directive.");
                 }
-                source_unit_using_directives.push(using_directive.clone());
-                nodes.push(using_directive.using_directive);
+                nodes.push(using_directive.using_directive.clone());
+                source_unit_using_directives.push(using_directive);
             }
             token::TOKEN_FUNCTION => {
                 let function = parse_function_definition(true, true);
@@ -804,8 +958,8 @@ fn parse_impl() -> ffi::WireParserResult {
                 if !function.function_definition.present {
                     return parser_result_error("Failed to parse function definition.");
                 }
-                source_unit_functions.push(function.clone());
-                nodes.push(function.function_definition);
+                nodes.push(function.function_definition.clone());
+                source_unit_functions.push(function);
             }
             token::TOKEN_FORALL => {
                 let quantified_function = parse_quantified_function_definition();
@@ -816,8 +970,8 @@ fn parse_impl() -> ffi::WireParserResult {
                 if !quantified_function.for_all_quantifier.present {
                     return parser_result_error("Failed to parse quantified function definition.");
                 }
-                source_unit_for_all_quantifiers.push(quantified_function.clone());
-                nodes.push(quantified_function.for_all_quantifier);
+                nodes.push(quantified_function.for_all_quantifier.clone());
+                source_unit_for_all_quantifiers.push(quantified_function);
             }
             token::TOKEN_EVENT => {
                 let event_definition = parse_event_definition();
@@ -828,8 +982,8 @@ fn parse_impl() -> ffi::WireParserResult {
                 if !event_definition.event_definition.present {
                     return parser_result_error("Failed to parse event definition.");
                 }
-                source_unit_events.push(event_definition.clone());
-                nodes.push(event_definition.event_definition);
+                nodes.push(event_definition.event_definition.clone());
+                source_unit_events.push(event_definition);
             }
             token::TOKEN_CLASS => {
                 assert!(experimental_solidity_enabled);
@@ -841,8 +995,8 @@ fn parse_impl() -> ffi::WireParserResult {
                 if !type_class_definition.type_class_definition.present {
                     return parser_result_error("Failed to parse type class definition.");
                 }
-                source_unit_type_class_definitions.push(type_class_definition.clone());
-                nodes.push(type_class_definition.type_class_definition);
+                nodes.push(type_class_definition.type_class_definition.clone());
+                source_unit_type_class_definitions.push(type_class_definition);
             }
             token::TOKEN_INSTANTIATION => {
                 assert!(experimental_solidity_enabled);
@@ -854,8 +1008,8 @@ fn parse_impl() -> ffi::WireParserResult {
                 if !type_class_instantiation.type_class_instantiation.present {
                     return parser_result_error("Failed to parse type class instantiation.");
                 }
-                source_unit_type_class_instantiations.push(type_class_instantiation.clone());
-                nodes.push(type_class_instantiation.type_class_instantiation);
+                nodes.push(type_class_instantiation.type_class_instantiation.clone());
+                source_unit_type_class_instantiations.push(type_class_instantiation);
             }
             _ => {
                 if current_token() == token::TOKEN_IDENTIFIER
@@ -871,8 +1025,8 @@ fn parse_impl() -> ffi::WireParserResult {
                     if !error_definition.error_definition.present {
                         return parser_result_error("Failed to parse error definition.");
                     }
-                    source_unit_errors.push(error_definition.clone());
-                    nodes.push(error_definition.error_definition);
+                    nodes.push(error_definition.error_definition.clone());
+                    source_unit_errors.push(error_definition);
                 } else if variable_declaration_start(current_token(), peek_next_token())
                     && peek_next_token() != token::TOKEN_EOS
                 {
@@ -893,8 +1047,8 @@ fn parse_impl() -> ffi::WireParserResult {
                     if !variable_declaration.variable_declaration.present {
                         return parser_result_error("Failed to parse variable declaration.");
                     }
-                    source_unit_variable_declarations.push(variable_declaration.clone());
-                    nodes.push(variable_declaration.variable_declaration);
+                    nodes.push(variable_declaration.variable_declaration.clone());
+                    source_unit_variable_declarations.push(variable_declaration);
 
                     let semicolon = expect_token(token::TOKEN_SEMICOLON);
                     if !semicolon.errors.is_empty() {
@@ -912,7 +1066,9 @@ fn parse_impl() -> ffi::WireParserResult {
 
     location.end = current_location().end;
     let max_node_id = max_node_id(current_node_id(), &nodes);
-    let license_result = find_license_string(current_source(), nodes.clone(), location.source_id);
+    let license_result = parser_state(|state| {
+        find_license_string_borrowed(&state.source, &nodes, location.source_id)
+    });
     report_parser_diagnostics(&license_result.diagnostics);
     let license = license_result.license;
     let has_license = license.has_value;
@@ -1018,6 +1174,94 @@ pub fn set_parser_input_with_evm_version(
         current_compiler_version,
         evm_version,
     );
+}
+
+pub fn set_parser_source_input_with_evm_version(
+    source: ffi::WireString,
+    current_node_id: i64,
+    current_compiler_version: String,
+    evm_version_name: String,
+) {
+    let evm_version = EvmVersion::from_name(&evm_version_name).unwrap_or_else(EvmVersion::current);
+    let (tokens, comment_literals, comment_locations) =
+        scan_parser_input_from_source(&source.bytes);
+
+    set_parser_input_for_evm_version(
+        tokens,
+        source,
+        comment_literals,
+        comment_locations,
+        current_node_id,
+        current_compiler_version,
+        evm_version,
+    );
+}
+
+fn scan_parser_input_from_source(
+    source: &[u8],
+) -> (
+    Vec<ffi::WireLocatedToken>,
+    Vec<ffi::WireString>,
+    Vec<ffi::WireSourceLocation>,
+) {
+    let output = scanner::scan_borrowed(source, scanner::ScannerKind::Solidity);
+    let token_count = output.tokens.len();
+    let tokens = output
+        .tokens
+        .into_iter()
+        .map(wire_located_token_from_scanner)
+        .collect();
+    let mut comment_literals = Vec::with_capacity(token_count);
+    let mut comment_locations = Vec::with_capacity(token_count);
+    for comment in output.comments {
+        comment_literals.push(ffi::WireString {
+            bytes: comment.literal,
+        });
+        comment_locations.push(wire_source_location_from_scanner(comment.location));
+    }
+
+    (tokens, comment_literals, comment_locations)
+}
+
+fn wire_located_token_from_scanner(token: scanner::LocatedToken) -> ffi::WireLocatedToken {
+    let token_id = token.token;
+    ffi::WireLocatedToken {
+        token: token_id,
+        literal: scanner_literal_for_parser(token_id, &token.literal),
+        token_name: String::new(),
+        first_number: token.first_number,
+        second_number: token.second_number,
+        error: token.error,
+        location: wire_source_location_from_scanner(token.location),
+    }
+}
+
+fn scanner_literal_for_parser(token_id: u32, literal: &[u8]) -> ffi::WireString {
+    let suppress_literal = matches!(
+        token_id,
+        token::TOKEN_IDENTIFIER
+            | token::TOKEN_NUMBER
+            | token::TOKEN_TRUE_LITERAL
+            | token::TOKEN_FALSE_LITERAL
+    ) || (token::TOKEN_ABSTRACT..=token::TOKEN_SUB_YEAR).contains(&token_id)
+        || token::is_elementary_type_name(token_id)
+        || token::is_reserved_keyword(token_id);
+
+    ffi::WireString {
+        bytes: if suppress_literal {
+            Vec::new()
+        } else {
+            literal.to_vec()
+        },
+    }
+}
+
+fn wire_source_location_from_scanner(location: scanner::SourceLocation) -> ffi::WireSourceLocation {
+    ffi::WireSourceLocation {
+        start: location.start,
+        end: location.end,
+        source_id: location.source_id,
+    }
 }
 
 fn set_parser_input_for_evm_version(
@@ -1290,6 +1534,123 @@ pub fn parse_pragma_directive(
         tokens_consumed,
         errors,
     )
+}
+
+struct CompactPragmaDirectiveParseResult {
+    pragma_directive: ffi::WireAstNode,
+    experimental_solidity_enabled: bool,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_pragma_directive_parse_result(
+    pragma_directive: ffi::WireAstNode,
+    experimental_solidity_enabled: bool,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactPragmaDirectiveParseResult {
+    CompactPragmaDirectiveParseResult {
+        pragma_directive,
+        experimental_solidity_enabled,
+        errors,
+    }
+}
+
+fn parse_pragma_directive_compact(
+    pragma_builder: crate::compact::CompactPragmaDirectiveBuilder<'_>,
+    finished_parsing_top_level_pragmas: bool,
+) -> CompactPragmaDirectiveParseResult {
+    let _recursion_guard = RecursionGuard::new();
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let mut literals = Vec::new();
+    let mut tokens = Vec::new();
+    let mut experimental_solidity_enabled = false;
+
+    let pragma = expect_token(token::TOKEN_PRAGMA);
+    if !pragma.errors.is_empty() {
+        return compact_pragma_directive_parse_result(empty_ast_node(), false, pragma.errors);
+    }
+
+    loop {
+        let current = current_token();
+        if current == token::TOKEN_ILLEGAL {
+            errors.push(parser_error(
+                6281,
+                "Token incompatible with Solidity parser as part of pragma directive.",
+            ));
+        } else {
+            let mut literal = current_literal();
+            if literal.bytes.is_empty() {
+                if let Some(token_text) = token_to_string(current) {
+                    literal = ffi::WireString {
+                        bytes: token_text.as_bytes().to_vec(),
+                    };
+                }
+            }
+            literals.push(literal);
+            tokens.push(current);
+        }
+
+        advance();
+        if current_token() == token::TOKEN_SEMICOLON || current_token() == token::TOKEN_EOS {
+            break;
+        }
+    }
+
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return compact_pragma_directive_parse_result(empty_ast_node(), false, errors);
+    }
+
+    if !literals.is_empty() && literals[0].bytes == b"solidity" {
+        let version = parse_pragma_version(
+            location.clone(),
+            tokens[1..].to_vec(),
+            literals[1..].to_vec(),
+            current_compiler_version(),
+        );
+        if !version.errors.is_empty() {
+            errors.extend(version.errors);
+            return compact_pragma_directive_parse_result(empty_ast_node(), false, errors);
+        }
+    }
+
+    if literals.len() >= 2
+        && literals[0].bytes == b"experimental"
+        && literals[1].bytes == b"solidity"
+    {
+        if !evm_version_at_least_constantinople() {
+            errors.push(fatal_parser_error(
+                7637,
+                "Experimental solidity requires Constantinople EVM version at the minimum.",
+            ));
+            return compact_pragma_directive_parse_result(empty_ast_node(), false, errors);
+        }
+
+        if finished_parsing_top_level_pragmas {
+            errors.push(fatal_parser_error(
+                8185,
+                "Experimental pragma \"solidity\" can only be set at the beginning of the source unit.",
+            ));
+            return compact_pragma_directive_parse_result(empty_ast_node(), false, errors);
+        }
+
+        set_experimental_solidity_enabled_in_current_source_unit(true);
+        experimental_solidity_enabled = true;
+    }
+
+    let pragma_directive = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(current_node_id()),
+        kind: AST_NODE_KIND_PRAGMA_DIRECTIVE,
+        location,
+        text: join_wire_strings(&literals),
+    };
+
+    pragma_builder.finish(&pragma_directive, &tokens, &literals);
+
+    compact_pragma_directive_parse_result(pragma_directive, experimental_solidity_enabled, errors)
 }
 
 pub fn parse_import_directive() -> ffi::WireImportDirectiveResult {
@@ -1619,6 +1980,204 @@ pub fn parse_import_directive() -> ffi::WireImportDirectiveResult {
     )
 }
 
+struct CompactImportDirectiveParseResult {
+    import_directive: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_import_directive_parse_result(
+    import_directive: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactImportDirectiveParseResult {
+    CompactImportDirectiveParseResult {
+        import_directive,
+        errors,
+    }
+}
+
+fn parse_import_directive_compact(
+    mut import_builder: crate::compact::CompactImportDirectiveBuilder<'_>,
+) -> CompactImportDirectiveParseResult {
+    let _recursion_guard = RecursionGuard::new();
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let path: ffi::WireString;
+    let mut unit_alias = empty_string();
+    let mut unit_alias_location = empty_source_location();
+    let mut node_id = current_node_id();
+
+    let import = expect_token(token::TOKEN_IMPORT);
+    if !import.errors.is_empty() {
+        return compact_import_directive_parse_result(empty_ast_node(), import.errors);
+    }
+
+    if is_quoted_path(current_token()) || is_current_stdlib_path() {
+        path = if is_quoted_path(current_token()) {
+            let literal = get_literal_and_advance(current_literal());
+            advance_by(literal.tokens_consumed);
+            literal.value
+        } else {
+            let stdlib = get_current_stdlib_import_path_and_advance();
+            if !stdlib.errors.is_empty() {
+                errors.extend(stdlib.errors);
+                return compact_import_directive_parse_result(empty_ast_node(), errors);
+            }
+            stdlib.value
+        };
+
+        if current_token() == token::TOKEN_AS {
+            advance();
+            let alias = expect_identifier_with_location(
+                current_token(),
+                current_literal(),
+                current_token_name(),
+                current_location(),
+            );
+            advance_by(alias.tokens_consumed);
+            if !alias.errors.is_empty() {
+                errors.extend(alias.errors);
+                return compact_import_directive_parse_result(empty_ast_node(), errors);
+            }
+            unit_alias = alias.identifier;
+            unit_alias_location = alias.location;
+        }
+    } else {
+        if current_token() == token::TOKEN_LBRACE {
+            advance();
+            loop {
+                let mut has_alias = false;
+                let mut alias = empty_string();
+                let mut alias_location = current_location();
+                let parsed_identifier = parse_identifier(
+                    current_token(),
+                    current_literal(),
+                    current_token_name(),
+                    current_location(),
+                    node_id,
+                );
+                advance_by(parsed_identifier.tokens_consumed);
+                if !parsed_identifier.errors.is_empty() {
+                    errors.extend(parsed_identifier.errors);
+                    return compact_import_directive_parse_result(empty_ast_node(), errors);
+                }
+                node_id = parsed_identifier.current_node_id;
+                let identifier = parsed_identifier.identifier;
+
+                if current_token() == token::TOKEN_AS {
+                    let as_token = expect_token(token::TOKEN_AS);
+                    if !as_token.errors.is_empty() {
+                        errors.extend(as_token.errors);
+                        return compact_import_directive_parse_result(empty_ast_node(), errors);
+                    }
+
+                    let parsed_alias = expect_identifier_with_location(
+                        current_token(),
+                        current_literal(),
+                        current_token_name(),
+                        current_location(),
+                    );
+                    advance_by(parsed_alias.tokens_consumed);
+                    if !parsed_alias.errors.is_empty() {
+                        errors.extend(parsed_alias.errors);
+                        return compact_import_directive_parse_result(empty_ast_node(), errors);
+                    }
+                    has_alias = true;
+                    alias = parsed_alias.identifier;
+                    alias_location = parsed_alias.location;
+                }
+
+                import_builder.add_symbol_alias(&identifier, has_alias, &alias, &alias_location);
+
+                if current_token() != token::TOKEN_COMMA {
+                    break;
+                }
+                advance();
+            }
+
+            let rbrace = expect_token(token::TOKEN_RBRACE);
+            if !rbrace.errors.is_empty() {
+                errors.extend(rbrace.errors);
+                return compact_import_directive_parse_result(empty_ast_node(), errors);
+            }
+        } else if current_token() == token::TOKEN_MUL {
+            advance();
+            let as_token = expect_token(token::TOKEN_AS);
+            if !as_token.errors.is_empty() {
+                errors.extend(as_token.errors);
+                return compact_import_directive_parse_result(empty_ast_node(), errors);
+            }
+
+            let alias = expect_identifier_with_location(
+                current_token(),
+                current_literal(),
+                current_token_name(),
+                current_location(),
+            );
+            advance_by(alias.tokens_consumed);
+            if !alias.errors.is_empty() {
+                errors.extend(alias.errors);
+                return compact_import_directive_parse_result(empty_ast_node(), errors);
+            }
+            unit_alias = alias.identifier;
+            unit_alias_location = alias.location;
+        } else {
+            errors.push(fatal_parser_error(
+                9478,
+                "Expected string literal (path), \"*\" or alias list.",
+            ));
+            return compact_import_directive_parse_result(empty_ast_node(), errors);
+        }
+
+        if current_token() != token::TOKEN_IDENTIFIER || current_literal().bytes != b"from" {
+            errors.push(fatal_parser_error(8208, "Expected \"from\"."));
+            return compact_import_directive_parse_result(empty_ast_node(), errors);
+        }
+        advance();
+
+        if !is_quoted_path(current_token()) && !is_current_stdlib_path() {
+            errors.push(fatal_parser_error(6845, "Expected import path."));
+            return compact_import_directive_parse_result(empty_ast_node(), errors);
+        }
+
+        path = if is_quoted_path(current_token()) {
+            let literal = get_literal_and_advance(current_literal());
+            advance_by(literal.tokens_consumed);
+            literal.value
+        } else {
+            let stdlib = get_current_stdlib_import_path_and_advance();
+            if !stdlib.errors.is_empty() {
+                errors.extend(stdlib.errors);
+                return compact_import_directive_parse_result(empty_ast_node(), errors);
+            }
+            stdlib.value
+        };
+    }
+
+    if path.bytes.is_empty() {
+        errors.push(fatal_parser_error(6326, "Import path cannot be empty."));
+        return compact_import_directive_parse_result(empty_ast_node(), errors);
+    }
+
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return compact_import_directive_parse_result(empty_ast_node(), errors);
+    }
+
+    let import_directive = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(node_id),
+        kind: AST_NODE_KIND_IMPORT_DIRECTIVE,
+        location,
+        text: path.clone(),
+    };
+
+    import_builder.finish(&import_directive, &path, &unit_alias, &unit_alias_location);
+
+    compact_import_directive_parse_result(import_directive, errors)
+}
+
 pub fn parse_contract_kind(current_token: u32, next_token: u32) -> ffi::WireContractKindResult {
     let is_abstract = current_token == token::TOKEN_ABSTRACT;
     let contract_token = if is_abstract {
@@ -1660,6 +2219,30 @@ pub fn parse_contract_kind(current_token: u32, next_token: u32) -> ffi::WireCont
 }
 
 pub fn parse_storage_layout_specifier() -> ffi::WireStorageLayoutSpecifierResult {
+    parse_storage_layout_specifier_compact().into_wire()
+}
+
+struct ParsedStorageLayoutSpecifierResult {
+    storage_layout_specifier: ffi::WireAstNode,
+    base_slot_expression: ffi::WireAstNode,
+    base_slot_expression_detail: RustExpressionResult,
+    tokens_consumed: u64,
+    errors: Vec<ffi::WireParserError>,
+}
+
+impl ParsedStorageLayoutSpecifierResult {
+    fn into_wire(self) -> ffi::WireStorageLayoutSpecifierResult {
+        ffi::WireStorageLayoutSpecifierResult {
+            storage_layout_specifier: self.storage_layout_specifier,
+            base_slot_expression: self.base_slot_expression,
+            base_slot_expression_detail: self.base_slot_expression_detail.into_wire(),
+            tokens_consumed: self.tokens_consumed,
+            errors: self.errors,
+        }
+    }
+}
+
+fn parse_storage_layout_specifier_compact() -> ParsedStorageLayoutSpecifierResult {
     let _recursion_guard = RecursionGuard::new();
     let start_cursor = parser_cursor();
     let mut location = current_location();
@@ -1668,7 +2251,7 @@ pub fn parse_storage_layout_specifier() -> ffi::WireStorageLayoutSpecifierResult
     let layout_identifier =
         expect_identifier_token(current_token(), current_literal(), current_token_name());
     if !layout_identifier.errors.is_empty() {
-        return empty_storage_layout_specifier_result(
+        return empty_parsed_storage_layout_specifier_result(
             tokens_consumed_since(start_cursor),
             layout_identifier.errors,
         );
@@ -1684,15 +2267,21 @@ pub fn parse_storage_layout_specifier() -> ffi::WireStorageLayoutSpecifierResult
     }
 
     advance();
-    let base_slot_expression_detail = parse_expression();
+    let base_slot_expression_detail = parse_expression_compact();
     if parser_errors_have_fatal(&base_slot_expression_detail.errors) {
         errors.extend(base_slot_expression_detail.errors);
-        return empty_storage_layout_specifier_result(tokens_consumed_since(start_cursor), errors);
+        return empty_parsed_storage_layout_specifier_result(
+            tokens_consumed_since(start_cursor),
+            errors,
+        );
     }
     errors.extend(base_slot_expression_detail.errors.clone());
     let base_slot_expression = base_slot_expression_detail.expression.clone();
     if !base_slot_expression.present {
-        return empty_storage_layout_specifier_result(tokens_consumed_since(start_cursor), errors);
+        return empty_parsed_storage_layout_specifier_result(
+            tokens_consumed_since(start_cursor),
+            errors,
+        );
     }
     location.end = base_slot_expression.location.end;
 
@@ -1704,7 +2293,7 @@ pub fn parse_storage_layout_specifier() -> ffi::WireStorageLayoutSpecifierResult
         text: empty_string(),
     };
 
-    ffi::WireStorageLayoutSpecifierResult {
+    ParsedStorageLayoutSpecifierResult {
         storage_layout_specifier,
         base_slot_expression,
         base_slot_expression_detail,
@@ -1717,10 +2306,17 @@ fn empty_storage_layout_specifier_result(
     tokens_consumed: u64,
     errors: Vec<ffi::WireParserError>,
 ) -> ffi::WireStorageLayoutSpecifierResult {
-    ffi::WireStorageLayoutSpecifierResult {
+    empty_parsed_storage_layout_specifier_result(tokens_consumed, errors).into_wire()
+}
+
+fn empty_parsed_storage_layout_specifier_result(
+    tokens_consumed: u64,
+    errors: Vec<ffi::WireParserError>,
+) -> ParsedStorageLayoutSpecifierResult {
+    ParsedStorageLayoutSpecifierResult {
         storage_layout_specifier: empty_ast_node(),
         base_slot_expression: empty_ast_node(),
-        base_slot_expression_detail: empty_expression_result(Vec::new()),
+        base_slot_expression_detail: RustExpressionResult::empty(Vec::new()),
         tokens_consumed,
         errors,
     }
@@ -2375,6 +2971,318 @@ pub fn parse_contract_definition() -> ffi::WireContractDefinitionResult {
     )
 }
 
+struct CompactContractDefinitionParseResult {
+    contract_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_contract_definition_parse_result(
+    contract_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactContractDefinitionParseResult {
+    CompactContractDefinitionParseResult {
+        contract_definition,
+        errors,
+    }
+}
+
+fn parse_contract_definition_compact(
+    builder: &mut crate::compact::CompactSourceUnitBuilder,
+) -> CompactContractDefinitionParseResult {
+    let _recursion_guard = RecursionGuard::new();
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let mut base_contracts: Vec<ffi::WireAstNode> = Vec::new();
+    let mut sub_nodes: Vec<ffi::WireAstNode> = Vec::new();
+    let mut storage_layout_specifier = empty_ast_node();
+    let mut storage_layout_base_slot_expression = empty_ast_node();
+    let mut storage_layout_base_slot_expression_detail = RustExpressionResult::empty(Vec::new());
+
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let contract_kind = parse_contract_kind(current_token(), peek_next_token());
+    advance_by(contract_kind.tokens_consumed);
+    errors.extend(contract_kind.errors);
+
+    let name_with_location = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(name_with_location.tokens_consumed);
+    if !name_with_location.errors.is_empty() {
+        errors.extend(name_with_location.errors);
+        return compact_contract_definition_parse_result(empty_ast_node(), errors);
+    }
+
+    let name = name_with_location.identifier;
+    let name_location = name_with_location.location;
+    let mut contract_builder = builder.start_contract();
+
+    loop {
+        if current_token() == token::TOKEN_IS {
+            if !base_contracts.is_empty() {
+                errors.push(parser_error_at_with_secondary(
+                    6668,
+                    "More than one inheritance list.",
+                    current_location(),
+                    "Previous list:",
+                    base_contracts[0].location.clone(),
+                ));
+            }
+
+            loop {
+                advance();
+                let base_current_node_id = max_node_id(current_node_id(), &base_contracts)
+                    .max(documentation.node_id)
+                    .max(storage_layout_specifier.node_id);
+                let base_contract = parse_current_inheritance_specifier_compact(
+                    contract_builder.start_base_contract(),
+                    base_current_node_id,
+                );
+                if parser_errors_have_fatal(&base_contract.errors) {
+                    errors.extend(base_contract.errors);
+                    return compact_contract_definition_parse_result(empty_ast_node(), errors);
+                }
+                errors.extend(base_contract.errors.clone());
+                if !base_contract.inheritance_specifier.present {
+                    return compact_contract_definition_parse_result(empty_ast_node(), errors);
+                }
+                base_contracts.push(base_contract.inheritance_specifier.clone());
+
+                if current_token() != token::TOKEN_COMMA {
+                    break;
+                }
+            }
+        } else if current_token() == token::TOKEN_IDENTIFIER
+            && current_literal().bytes == b"layout"
+            && contract_kind.contract_kind == CONTRACT_KIND_CONTRACT
+        {
+            if storage_layout_specifier.present {
+                errors.push(parser_error_at_with_secondary(
+                    8714,
+                    "More than one storage layout definition.",
+                    current_location(),
+                    "Previous definition:",
+                    storage_layout_specifier.location.clone(),
+                ));
+            }
+
+            let storage_layout = parse_storage_layout_specifier_compact();
+            errors.extend(storage_layout.errors);
+            storage_layout_specifier = storage_layout.storage_layout_specifier;
+            storage_layout_base_slot_expression = storage_layout.base_slot_expression;
+            storage_layout_base_slot_expression_detail = storage_layout.base_slot_expression_detail;
+            if !storage_layout_specifier.present {
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+        } else {
+            break;
+        }
+    }
+
+    if storage_layout_specifier.present && !base_contracts.is_empty() {
+        assert!(!source_locations_intersect(
+            &storage_layout_specifier.location,
+            &base_contracts[0].location,
+        ));
+        assert!(!source_locations_intersect(
+            &base_contracts[0].location,
+            &storage_layout_specifier.location,
+        ));
+    }
+
+    let lbrace = expect_token(token::TOKEN_LBRACE);
+    if !lbrace.errors.is_empty() {
+        errors.extend(lbrace.errors);
+        return compact_contract_definition_parse_result(empty_ast_node(), errors);
+    }
+
+    loop {
+        let current_token_value = current_token();
+        if current_token_value == token::TOKEN_RBRACE {
+            break;
+        } else if (current_token_value == token::TOKEN_FUNCTION
+            && peek_next_token() != token::TOKEN_LPAREN)
+            || current_token_value == token::TOKEN_CONSTRUCTOR
+            || current_token_value == token::TOKEN_RECEIVE
+            || current_token_value == token::TOKEN_FALLBACK
+        {
+            let function_definition =
+                parse_function_definition_compact(contract_builder.start_function(), false, true);
+            if parser_errors_have_fatal(&function_definition.errors) {
+                report_parser_warnings(&function_definition.warnings);
+                errors.extend(function_definition.errors);
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            errors.extend(function_definition.errors.clone());
+            report_parser_warnings(&function_definition.warnings);
+            if !function_definition.function_definition.present {
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            sub_nodes.push(function_definition.function_definition);
+        } else if current_token_value == token::TOKEN_STRUCT {
+            let struct_definition =
+                parse_struct_definition_compact(contract_builder.start_struct_definition());
+            if parser_errors_have_fatal(&struct_definition.errors) {
+                errors.extend(struct_definition.errors);
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            errors.extend(struct_definition.errors.clone());
+            if !struct_definition.struct_definition.present {
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            sub_nodes.push(struct_definition.struct_definition);
+        } else if current_token_value == token::TOKEN_ENUM {
+            let enum_definition =
+                parse_enum_definition_compact(contract_builder.start_enum_definition());
+            if parser_errors_have_fatal(&enum_definition.errors) {
+                errors.extend(enum_definition.errors);
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            errors.extend(enum_definition.errors.clone());
+            if !enum_definition.enum_definition.present {
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            sub_nodes.push(enum_definition.enum_definition);
+        } else if current_token_value == token::TOKEN_TYPE {
+            let type_definition = parse_user_defined_value_type_definition_compact(
+                contract_builder.start_user_defined_value_type_definition(),
+            );
+            if parser_errors_have_fatal(&type_definition.errors) {
+                errors.extend(type_definition.errors);
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            errors.extend(type_definition.errors.clone());
+            if !type_definition.user_defined_value_type_definition.present {
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            sub_nodes.push(type_definition.user_defined_value_type_definition);
+        } else if current_token_value == token::TOKEN_IDENTIFIER
+            && current_literal().bytes == b"error"
+            && peek_next_token() == token::TOKEN_IDENTIFIER
+            && peek_next_next_token() == token::TOKEN_LPAREN
+        {
+            let error_definition =
+                parse_error_definition_compact(contract_builder.start_error_definition());
+            if parser_errors_have_fatal(&error_definition.errors) {
+                errors.extend(error_definition.errors);
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            errors.extend(error_definition.errors.clone());
+            if !error_definition.error_definition.present {
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            sub_nodes.push(error_definition.error_definition);
+        } else if variable_declaration_start(current_token(), peek_next_token()) {
+            let options = VarDeclParserOptions {
+                kind: VAR_DECL_KIND_STATE,
+                allow_initial_value: true,
+                ..VarDeclParserOptions::default()
+            };
+            let variable_current_node_id =
+                max_node_id(max_node_id(current_node_id(), &base_contracts), &sub_nodes)
+                    .max(documentation.node_id)
+                    .max(storage_layout_specifier.node_id);
+            let variable_declaration = parse_variable_declaration_compact(
+                contract_builder.start_variable(),
+                options,
+                empty_ast_node(),
+                variable_current_node_id,
+            );
+            if parser_errors_have_fatal(&variable_declaration.errors) {
+                errors.extend(variable_declaration.errors);
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            errors.extend(variable_declaration.errors.clone());
+            if !variable_declaration.variable_declaration.present {
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            sub_nodes.push(variable_declaration.variable_declaration);
+            let semicolon = expect_token(token::TOKEN_SEMICOLON);
+            if !semicolon.errors.is_empty() {
+                errors.extend(semicolon.errors);
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+        } else if current_token_value == token::TOKEN_MODIFIER {
+            let modifier_definition =
+                parse_modifier_definition_compact(contract_builder.start_modifier_definition());
+            if parser_errors_have_fatal(&modifier_definition.errors) {
+                errors.extend(modifier_definition.errors);
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            errors.extend(modifier_definition.errors.clone());
+            if !modifier_definition.modifier_definition.present {
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            sub_nodes.push(modifier_definition.modifier_definition);
+        } else if current_token_value == token::TOKEN_EVENT {
+            let event_definition =
+                parse_event_definition_compact(contract_builder.start_event_definition());
+            if parser_errors_have_fatal(&event_definition.errors) {
+                errors.extend(event_definition.errors);
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            errors.extend(event_definition.errors.clone());
+            if !event_definition.event_definition.present {
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            sub_nodes.push(event_definition.event_definition);
+        } else if current_token_value == token::TOKEN_USING {
+            let using_directive =
+                parse_using_directive_compact(contract_builder.start_using_directive());
+            if parser_errors_have_fatal(&using_directive.errors) {
+                errors.extend(using_directive.errors);
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            errors.extend(using_directive.errors.clone());
+            if !using_directive.using_directive.present {
+                return compact_contract_definition_parse_result(empty_ast_node(), errors);
+            }
+            sub_nodes.push(using_directive.using_directive);
+        } else {
+            errors.push(fatal_parser_error(
+                9182,
+                "Function, variable, struct or modifier declaration expected.",
+            ));
+            return compact_contract_definition_parse_result(empty_ast_node(), errors);
+        }
+    }
+
+    location.end = current_location().end;
+    let rbrace = expect_token(token::TOKEN_RBRACE);
+    if !rbrace.errors.is_empty() {
+        errors.extend(rbrace.errors);
+        return compact_contract_definition_parse_result(empty_ast_node(), errors);
+    }
+
+    let node_id = max_node_id(max_node_id(current_node_id(), &base_contracts), &sub_nodes)
+        .max(documentation.node_id)
+        .max(storage_layout_specifier.node_id);
+    let contract_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(node_id),
+        kind: AST_NODE_KIND_CONTRACT_DEFINITION,
+        location,
+        text: name.clone(),
+    };
+
+    contract_builder.finish(
+        &contract_definition,
+        &name,
+        &name_location,
+        &documentation,
+        contract_kind.contract_kind,
+        contract_kind.is_abstract,
+        &storage_layout_specifier,
+        &storage_layout_base_slot_expression,
+        &storage_layout_base_slot_expression_detail,
+    );
+
+    compact_contract_definition_parse_result(contract_definition, errors)
+}
+
 pub fn parse_visibility_specifier(token: u32) -> ffi::WireVisibilitySpecifierResult {
     let visibility = match token {
         token::TOKEN_PUBLIC => VISIBILITY_PUBLIC,
@@ -2699,6 +3607,74 @@ fn parse_function_header_with_node_id(
     is_state_variable: bool,
     current_node_id: i64,
 ) -> ffi::WireFunctionHeaderParserResult {
+    parse_function_header_parts_with_node_id(is_state_variable, current_node_id).into_wire()
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ParsedFunctionHeaderParserResult {
+    pub(crate) is_virtual: bool,
+    pub(crate) overrides: ffi::WireAstNode,
+    pub(crate) override_paths: Vec<ffi::WireAstNode>,
+    pub(crate) override_path_details: Vec<ffi::WireIdentifierPathResult>,
+    pub(crate) parameters: ffi::WireAstNode,
+    pub(crate) parameter_declarations: Vec<ffi::WireAstNode>,
+    pub(crate) parameter_details: Vec<ParsedVariableDeclaration>,
+    pub(crate) return_parameters: ffi::WireAstNode,
+    pub(crate) return_parameter_declarations: Vec<ffi::WireAstNode>,
+    pub(crate) return_parameter_details: Vec<ParsedVariableDeclaration>,
+    pub(crate) visibility: u8,
+    pub(crate) state_mutability: u8,
+    pub(crate) modifiers: Vec<ffi::WireAstNode>,
+    pub(crate) modifier_details: Vec<ParsedModifierInvocationResult>,
+    pub(crate) experimental_return_expression: ffi::WireAstNode,
+    pub(crate) experimental_return_expression_detail: RustExpressionResult,
+    pub(crate) tokens_consumed: u64,
+    pub(crate) errors: Vec<ffi::WireParserError>,
+}
+
+impl ParsedFunctionHeaderParserResult {
+    fn into_wire(self) -> ffi::WireFunctionHeaderParserResult {
+        ffi::WireFunctionHeaderParserResult {
+            is_virtual: self.is_virtual,
+            overrides: self.overrides,
+            override_paths: self.override_paths,
+            override_path_details: self.override_path_details,
+            parameters: self.parameters,
+            parameter_declarations: self.parameter_declarations,
+            parameter_details: self
+                .parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            return_parameters: self.return_parameters,
+            return_parameter_declarations: self.return_parameter_declarations,
+            return_parameter_details: self
+                .return_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            visibility: self.visibility,
+            state_mutability: self.state_mutability,
+            modifiers: self.modifiers,
+            modifier_details: self
+                .modifier_details
+                .into_iter()
+                .map(ParsedModifierInvocationResult::into_wire)
+                .collect(),
+            experimental_return_expression: self.experimental_return_expression,
+            experimental_return_expression_detail: self
+                .experimental_return_expression_detail
+                .into_wire(),
+            tokens_consumed: self.tokens_consumed,
+            errors: self.errors,
+        }
+    }
+}
+
+fn parse_function_header_parts_with_node_id(
+    is_state_variable: bool,
+    current_node_id: i64,
+) -> ParsedFunctionHeaderParserResult {
     let _recursion_guard = RecursionGuard::new();
 
     let start_cursor = parser_cursor();
@@ -2706,9 +3682,12 @@ fn parse_function_header_with_node_id(
         allow_location_specifier: true,
         ..VarDeclParserOptions::default()
     };
-    let parameters =
-        parse_parameter_list_with_options_and_node_id(parameter_options, true, current_node_id);
-    let mut result = ffi::WireFunctionHeaderParserResult {
+    let parameters = parse_parameter_list_parts_with_options_and_node_id(
+        parameter_options,
+        true,
+        current_node_id,
+    );
+    let mut result = ParsedFunctionHeaderParserResult {
         is_virtual: false,
         overrides: empty_ast_node(),
         override_paths: Vec::new(),
@@ -2724,7 +3703,7 @@ fn parse_function_header_with_node_id(
         modifiers: Vec::new(),
         modifier_details: Vec::new(),
         experimental_return_expression: empty_ast_node(),
-        experimental_return_expression_detail: empty_expression_result(Vec::new()),
+        experimental_return_expression_detail: RustExpressionResult::empty(Vec::new()),
         tokens_consumed: 0,
         errors: Vec::new(),
     };
@@ -2737,7 +3716,7 @@ fn parse_function_header_with_node_id(
     loop {
         let token = current_token();
         if !is_state_variable && token == token::TOKEN_IDENTIFIER {
-            let modifier_invocation = parse_current_modifier_invocation_with_node_id(node_id);
+            let modifier_invocation = parse_current_modifier_invocation_parts_with_node_id(node_id);
             result.tokens_consumed += modifier_invocation.tokens_consumed;
             if parser_errors_have_fatal(&modifier_invocation.errors) {
                 result.errors.extend(modifier_invocation.errors.clone());
@@ -2825,7 +3804,7 @@ fn parse_function_header_with_node_id(
     if experimental_solidity_enabled_in_current_source_unit() {
         if current_token() == token::TOKEN_RIGHT_ARROW {
             result.tokens_consumed += advance();
-            let experimental_return_expression_detail = parse_binary_expression();
+            let experimental_return_expression_detail = parse_binary_expression_compact();
             if parser_errors_have_fatal(&experimental_return_expression_detail.errors) {
                 result
                     .errors
@@ -2845,7 +3824,7 @@ fn parse_function_header_with_node_id(
     } else if current_token() == token::TOKEN_RETURNS {
         let permit_empty_parameter_list = experimental_solidity_enabled_in_current_source_unit();
         result.tokens_consumed += advance();
-        let return_parameters = parse_parameter_list_with_options_and_node_id(
+        let return_parameters = parse_parameter_list_parts_with_options_and_node_id(
             parameter_options,
             permit_empty_parameter_list,
             node_id,
@@ -2987,6 +3966,95 @@ pub fn parse_quantified_function_definition() -> ffi::WireForAllQuantifierResult
         tokens_consumed_since(start_cursor),
         errors,
     )
+}
+
+struct CompactForAllQuantifierParseResult {
+    for_all_quantifier: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_for_all_quantifier_parse_result(
+    for_all_quantifier: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactForAllQuantifierParseResult {
+    CompactForAllQuantifierParseResult {
+        for_all_quantifier,
+        errors,
+    }
+}
+
+fn parse_quantified_function_definition_compact(
+    builder: crate::compact::CompactForAllQuantifierBuilder<'_>,
+) -> CompactForAllQuantifierParseResult {
+    assert!(experimental_solidity_enabled_in_current_source_unit());
+
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut builder = builder;
+    let mut location = current_location();
+    let mut errors = Vec::new();
+
+    let forall = expect_token(token::TOKEN_FORALL);
+    if !forall.errors.is_empty() {
+        return compact_for_all_quantifier_parse_result(empty_ast_node(), forall.errors);
+    }
+
+    let type_variable_declarations = parse_parameter_list_parts_with_options_and_node_id(
+        VarDeclParserOptions::default(),
+        true,
+        current_node_id(),
+    );
+    if parser_errors_have_fatal(&type_variable_declarations.errors) {
+        errors.extend(type_variable_declarations.errors);
+        return compact_for_all_quantifier_parse_result(empty_ast_node(), errors);
+    }
+    errors.extend(type_variable_declarations.errors);
+    if !type_variable_declarations.parameter_list.present {
+        return compact_for_all_quantifier_parse_result(empty_ast_node(), errors);
+    }
+    location.end = current_location().end;
+
+    if current_token() != token::TOKEN_FUNCTION {
+        errors.push(fatal_parser_error(5709, "Expected a function definition."));
+        return compact_for_all_quantifier_parse_result(empty_ast_node(), errors);
+    }
+
+    let quantified_function_result =
+        parse_function_definition_compact(builder.start_function(), true, true);
+    if parser_errors_have_fatal(&quantified_function_result.errors) {
+        report_parser_warnings(&quantified_function_result.warnings);
+        errors.extend(quantified_function_result.errors.clone());
+        return compact_for_all_quantifier_parse_result(empty_ast_node(), errors);
+    }
+    errors.extend(quantified_function_result.errors.clone());
+    report_parser_warnings(&quantified_function_result.warnings);
+    let quantified_function = quantified_function_result.function_definition.clone();
+    if !quantified_function.present {
+        return compact_for_all_quantifier_parse_result(empty_ast_node(), errors);
+    }
+    let for_all_quantifier = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(
+            type_variable_declarations
+                .parameter_list
+                .node_id
+                .max(quantified_function.node_id)
+                .max(current_node_id()),
+        ),
+        kind: AST_NODE_KIND_FOR_ALL_QUANTIFIER,
+        location,
+        text: empty_string(),
+    };
+
+    builder.finish(
+        &for_all_quantifier,
+        &type_variable_declarations.parameter_list,
+        &type_variable_declarations.parameters,
+        &type_variable_declarations.parameter_details,
+        &quantified_function,
+    );
+
+    compact_for_all_quantifier_parse_result(for_all_quantifier, errors)
 }
 
 pub fn parse_function_definition(
@@ -3172,12 +4240,12 @@ pub fn parse_function_definition(
         location.end = current_location().end;
         advance();
     } else {
-        let parsed_block = parse_block();
+        let parsed_block = parse_block_with_options(false, empty_string());
         errors.extend(parsed_block.errors);
         block = parsed_block.block;
         block_unchecked = parsed_block.unchecked;
         block_statements = parsed_block.statements;
-        block_statement_details = parsed_block.statement_details;
+        block_statement_details = into_wire_statement_details(parsed_block.statement_details);
         if !block.present {
             return function_definition_result(
                 empty_ast_node(),
@@ -3261,6 +4329,168 @@ pub fn parse_function_definition(
         errors,
         warnings,
     )
+}
+
+struct CompactFunctionDefinitionParseResult {
+    function_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+    warnings: Vec<ffi::WireParserError>,
+}
+
+fn compact_function_definition_parse_result(
+    function_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+    warnings: Vec<ffi::WireParserError>,
+) -> CompactFunctionDefinitionParseResult {
+    CompactFunctionDefinitionParseResult {
+        function_definition,
+        errors,
+        warnings,
+    }
+}
+
+fn parse_function_definition_compact(
+    function_builder: crate::compact::CompactFunctionBuilder<'_>,
+    free_function: bool,
+    allow_body: bool,
+) -> CompactFunctionDefinitionParseResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let kind = current_token();
+    let mut name = empty_string();
+    let mut name_location = empty_source_location();
+
+    if kind == token::TOKEN_FUNCTION {
+        advance();
+        if matches!(
+            current_token(),
+            token::TOKEN_CONSTRUCTOR | token::TOKEN_FALLBACK | token::TOKEN_RECEIVE
+        ) {
+            let expected = expected_function_kind_name(current_token());
+            name_location = current_location();
+            name = ffi::WireString {
+                bytes: token_to_string(current_token())
+                    .unwrap_or_default()
+                    .as_bytes()
+                    .to_vec(),
+            };
+            let name_text = String::from_utf8_lossy(&name.bytes);
+            let message = format!(
+                "This function is named \"{}\" but is not the {} of the contract. If you intend this to be a {}, use \"{}(...) {{ ... }}\" without the \"function\" keyword to define it.",
+                name_text, expected, expected, name_text
+            );
+            if current_token() == token::TOKEN_CONSTRUCTOR {
+                errors.push(parser_error(3323, &message));
+            } else {
+                warnings.push(parser_warning(3445, &message));
+            }
+            advance();
+        } else {
+            let parsed_name = expect_identifier_with_location(
+                current_token(),
+                current_literal(),
+                current_token_name(),
+                current_location(),
+            );
+            advance_by(parsed_name.tokens_consumed);
+            if !parsed_name.errors.is_empty() {
+                errors.extend(parsed_name.errors);
+                return compact_function_definition_parse_result(
+                    empty_ast_node(),
+                    errors,
+                    warnings,
+                );
+            }
+            name = parsed_name.identifier;
+            name_location = parsed_name.location;
+        }
+    } else {
+        assert!(matches!(
+            kind,
+            token::TOKEN_CONSTRUCTOR | token::TOKEN_FALLBACK | token::TOKEN_RECEIVE
+        ));
+        advance();
+    }
+
+    let header = parse_function_header_parts_with_node_id(
+        false,
+        documentation.node_id.max(current_node_id()),
+    );
+    let header_has_fatal_error = header.errors.iter().any(|error| error.fatal);
+    errors.extend(header.errors.clone());
+    if header_has_fatal_error {
+        return compact_function_definition_parse_result(empty_ast_node(), errors, warnings);
+    }
+
+    if experimental_solidity_enabled_in_current_source_unit() {
+        assert!(!header.return_parameters.present);
+    } else {
+        assert!(!header.experimental_return_expression.present);
+    }
+
+    let mut block = empty_ast_node();
+    let mut block_unchecked = false;
+    let mut block_statements = Vec::new();
+    let mut block_statement_details = Vec::new();
+    if !allow_body {
+        location.end = current_location().end;
+        let semicolon = expect_token(token::TOKEN_SEMICOLON);
+        if !semicolon.errors.is_empty() {
+            errors.extend(semicolon.errors);
+            return compact_function_definition_parse_result(empty_ast_node(), errors, warnings);
+        }
+    } else if current_token() == token::TOKEN_SEMICOLON {
+        location.end = current_location().end;
+        advance();
+    } else {
+        let parsed_block = parse_block_with_options(false, empty_string());
+        errors.extend(parsed_block.errors);
+        block = parsed_block.block;
+        block_unchecked = parsed_block.unchecked;
+        block_statements = parsed_block.statements;
+        block_statement_details = parsed_block.statement_details;
+        if !block.present {
+            return compact_function_definition_parse_result(empty_ast_node(), errors, warnings);
+        }
+        location.end = block.location.end;
+    }
+
+    let function_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(
+            max_node_id(current_node_id(), &header.modifiers)
+                .max(documentation.node_id)
+                .max(header.overrides.node_id)
+                .max(header.parameters.node_id)
+                .max(header.return_parameters.node_id)
+                .max(block.node_id)
+                .max(header.experimental_return_expression.node_id),
+        ),
+        kind: AST_NODE_KIND_FUNCTION_DEFINITION,
+        location,
+        text: name.clone(),
+    };
+
+    function_builder.finish(
+        &function_definition,
+        &name,
+        &name_location,
+        free_function,
+        kind,
+        &documentation,
+        &header,
+        &block,
+        block_unchecked,
+        &block_statements,
+        &block_statement_details,
+    );
+
+    compact_function_definition_parse_result(function_definition, errors, warnings)
 }
 
 pub fn parse_struct_definition() -> ffi::WireStructDefinitionResult {
@@ -3439,6 +4669,212 @@ pub fn parse_enum_definition() -> ffi::WireEnumDefinitionResult {
     }
 }
 
+struct CompactStructDefinitionParseResult {
+    struct_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_struct_definition_parse_result(
+    struct_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactStructDefinitionParseResult {
+    CompactStructDefinitionParseResult {
+        struct_definition,
+        errors,
+    }
+}
+
+fn parse_struct_definition_compact(
+    mut struct_builder: crate::compact::CompactStructDefinitionBuilder<'_>,
+) -> CompactStructDefinitionParseResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let struct_token = expect_token(token::TOKEN_STRUCT);
+    if !struct_token.errors.is_empty() {
+        return compact_struct_definition_parse_result(empty_ast_node(), struct_token.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return compact_struct_definition_parse_result(empty_ast_node(), parsed_name.errors);
+    }
+
+    let lbrace = expect_token(token::TOKEN_LBRACE);
+    if !lbrace.errors.is_empty() {
+        return compact_struct_definition_parse_result(empty_ast_node(), lbrace.errors);
+    }
+
+    let mut node_id = documentation.node_id.max(current_node_id());
+    let mut members = Vec::new();
+    while current_token() != token::TOKEN_RBRACE {
+        let member = parse_variable_declaration_compact(
+            struct_builder.start_member(),
+            VarDeclParserOptions::default(),
+            empty_ast_node(),
+            node_id,
+        );
+        if parser_errors_have_fatal(&member.errors) {
+            errors.extend(member.errors);
+            return compact_struct_definition_parse_result(empty_ast_node(), errors);
+        }
+        errors.extend(member.errors.clone());
+        if !member.variable_declaration.present {
+            return compact_struct_definition_parse_result(empty_ast_node(), errors);
+        }
+        node_id = member.variable_declaration.node_id.max(node_id);
+        members.push(member.variable_declaration);
+        let semicolon = expect_token(token::TOKEN_SEMICOLON);
+        if !semicolon.errors.is_empty() {
+            errors.extend(semicolon.errors);
+            return compact_struct_definition_parse_result(empty_ast_node(), errors);
+        }
+    }
+
+    location.end = current_location().end;
+    let rbrace = expect_token(token::TOKEN_RBRACE);
+    if !rbrace.errors.is_empty() {
+        errors.extend(rbrace.errors);
+        return compact_struct_definition_parse_result(empty_ast_node(), errors);
+    }
+
+    let struct_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(node_id, &members).max(documentation.node_id)),
+        kind: AST_NODE_KIND_STRUCT_DEFINITION,
+        location,
+        text: parsed_name.identifier.clone(),
+    };
+
+    struct_builder.finish(
+        &struct_definition,
+        &parsed_name.identifier,
+        &parsed_name.location,
+        &documentation,
+    );
+
+    compact_struct_definition_parse_result(struct_definition, errors)
+}
+
+struct CompactEnumDefinitionParseResult {
+    enum_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_enum_definition_parse_result(
+    enum_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactEnumDefinitionParseResult {
+    CompactEnumDefinitionParseResult {
+        enum_definition,
+        errors,
+    }
+}
+
+fn parse_enum_definition_compact(
+    mut enum_builder: crate::compact::CompactEnumDefinitionBuilder<'_>,
+) -> CompactEnumDefinitionParseResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let enum_token = expect_token(token::TOKEN_ENUM);
+    if !enum_token.errors.is_empty() {
+        return compact_enum_definition_parse_result(empty_ast_node(), enum_token.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return compact_enum_definition_parse_result(empty_ast_node(), parsed_name.errors);
+    }
+
+    let lbrace = expect_token(token::TOKEN_LBRACE);
+    if !lbrace.errors.is_empty() {
+        return compact_enum_definition_parse_result(empty_ast_node(), lbrace.errors);
+    }
+
+    let mut node_id = documentation.node_id.max(current_node_id());
+    let mut members = Vec::new();
+    while current_token() != token::TOKEN_RBRACE {
+        let member = parse_enum_value(
+            current_comment_literal(),
+            current_comment_location(),
+            current_token(),
+            current_literal(),
+            current_token_name(),
+            current_location(),
+            node_id,
+        );
+        advance_by(member.tokens_consumed);
+        if !member.errors.is_empty() {
+            return compact_enum_definition_parse_result(empty_ast_node(), member.errors);
+        }
+        node_id = member.current_node_id;
+        members.push(member.enum_value.clone());
+        enum_builder.add_member(&member);
+
+        if current_token() == token::TOKEN_RBRACE {
+            break;
+        }
+
+        let comma = expect_token(token::TOKEN_COMMA);
+        if !comma.errors.is_empty() {
+            return compact_enum_definition_parse_result(empty_ast_node(), comma.errors);
+        }
+        if current_token() != token::TOKEN_IDENTIFIER {
+            return compact_enum_definition_parse_result(
+                empty_ast_node(),
+                vec![fatal_parser_error(1612, "Expected identifier after ','")],
+            );
+        }
+    }
+
+    if members.is_empty() {
+        errors.push(parser_error(3147, "Enum with no members is not allowed."));
+    }
+
+    location.end = current_location().end;
+    let rbrace = expect_token(token::TOKEN_RBRACE);
+    if !rbrace.errors.is_empty() {
+        errors.extend(rbrace.errors);
+        return compact_enum_definition_parse_result(empty_ast_node(), errors);
+    }
+
+    let enum_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(node_id, &members).max(documentation.node_id)),
+        kind: AST_NODE_KIND_ENUM_DEFINITION,
+        location,
+        text: parsed_name.identifier.clone(),
+    };
+
+    enum_builder.finish(
+        &enum_definition,
+        &parsed_name.identifier,
+        &parsed_name.location,
+        &documentation,
+    );
+
+    compact_enum_definition_parse_result(enum_definition, errors)
+}
+
 pub fn parse_variable_declaration() -> ffi::WireVariableDeclarationResult {
     parse_variable_declaration_with_options(
         VarDeclParserOptions::default(),
@@ -3452,11 +4888,318 @@ fn parse_variable_declaration_with_options(
     look_ahead_array_type: ffi::WireAstNode,
     current_node_id: i64,
 ) -> ffi::WireVariableDeclarationResult {
-    parse_variable_declaration_with_type_name_result(
+    parse_variable_declaration_parts_with_options(options, look_ahead_array_type, current_node_id)
+        .into_wire()
+}
+
+fn parse_variable_declaration_parts_with_options(
+    options: VarDeclParserOptions,
+    look_ahead_array_type: ffi::WireAstNode,
+    current_node_id: i64,
+) -> ParsedVariableDeclaration {
+    parse_variable_declaration_parts_with_type_name_result(
         options,
         type_name_from_look_ahead_array_type_node(look_ahead_array_type),
         current_node_id,
     )
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ParsedVariableDeclaration {
+    variable_declaration: ffi::WireAstNode,
+    type_name: ffi::WireAstNode,
+    type_expression: ffi::WireAstNode,
+    type_expression_detail: RustExpressionResult,
+    documentation: ffi::WireAstNode,
+    overrides: ffi::WireAstNode,
+    override_paths: Vec<ffi::WireAstNode>,
+    override_path_details: Vec<ffi::WireIdentifierPathResult>,
+    value: ffi::WireAstNode,
+    value_detail: RustExpressionResult,
+    type_name_elementary_token: u32,
+    type_name_elementary_first_number: u32,
+    type_name_elementary_second_number: u32,
+    type_name_has_state_mutability: bool,
+    type_name_state_mutability: u8,
+    type_name_user_defined_path_node: ffi::WireAstNode,
+    type_name_user_defined_path: Vec<ffi::WireString>,
+    type_name_user_defined_path_locations: Vec<ffi::WireSourceLocation>,
+    type_name_array_base_types: Vec<ffi::WireAstNode>,
+    type_name_array_lengths: Vec<ffi::WireAstNode>,
+    type_name_array_length_details: Vec<RustExpressionResult>,
+    type_name_function_parameters: ffi::WireAstNode,
+    type_name_function_parameter_declarations: Vec<ffi::WireAstNode>,
+    type_name_function_parameter_details: Vec<ParsedVariableDeclaration>,
+    type_name_function_return_parameters: ffi::WireAstNode,
+    type_name_function_return_parameter_declarations: Vec<ffi::WireAstNode>,
+    type_name_function_return_parameter_details: Vec<ParsedVariableDeclaration>,
+    type_name_function_visibility: u8,
+    type_name_function_state_mutability: u8,
+    type_name_mapping_key_type: ffi::WireAstNode,
+    type_name_mapping_key_elementary_token: u32,
+    type_name_mapping_key_elementary_first_number: u32,
+    type_name_mapping_key_elementary_second_number: u32,
+    type_name_mapping_key_user_defined_path_node: ffi::WireAstNode,
+    type_name_mapping_key_user_defined_path: Vec<ffi::WireString>,
+    type_name_mapping_key_user_defined_path_locations: Vec<ffi::WireSourceLocation>,
+    type_name_mapping_key_name: ffi::WireString,
+    type_name_mapping_key_name_location: ffi::WireSourceLocation,
+    type_name_mapping_value_type: ffi::WireAstNode,
+    type_name_mapping_value_elementary_token: u32,
+    type_name_mapping_value_elementary_first_number: u32,
+    type_name_mapping_value_elementary_second_number: u32,
+    type_name_mapping_value_has_state_mutability: bool,
+    type_name_mapping_value_state_mutability: u8,
+    type_name_mapping_value_user_defined_path_node: ffi::WireAstNode,
+    type_name_mapping_value_user_defined_path: Vec<ffi::WireString>,
+    type_name_mapping_value_user_defined_path_locations: Vec<ffi::WireSourceLocation>,
+    type_name_mapping_value_array_base_types: Vec<ffi::WireAstNode>,
+    type_name_mapping_value_array_lengths: Vec<ffi::WireAstNode>,
+    type_name_mapping_value_array_length_details: Vec<RustExpressionResult>,
+    type_name_mapping_value_function_parameters: ffi::WireAstNode,
+    type_name_mapping_value_function_parameter_declarations: Vec<ffi::WireAstNode>,
+    type_name_mapping_value_function_parameter_details: Vec<ParsedVariableDeclaration>,
+    type_name_mapping_value_function_return_parameters: ffi::WireAstNode,
+    type_name_mapping_value_function_return_parameter_declarations: Vec<ffi::WireAstNode>,
+    type_name_mapping_value_function_return_parameter_details: Vec<ParsedVariableDeclaration>,
+    type_name_mapping_value_function_visibility: u8,
+    type_name_mapping_value_function_state_mutability: u8,
+    type_name_mapping_value_name: ffi::WireString,
+    type_name_mapping_value_name_location: ffi::WireSourceLocation,
+    type_name_mapping_details: Vec<ffi::WireMappingTypeName>,
+    name: ffi::WireString,
+    name_location: ffi::WireSourceLocation,
+    visibility: u8,
+    mutability: u8,
+    variable_location: u8,
+    indexed: bool,
+    errors: Vec<ffi::WireParserError>,
+}
+
+impl ParsedVariableDeclaration {
+    pub(crate) fn as_compact_parts(&self) -> crate::compact::CompactVariableDeclarationParts<'_> {
+        crate::compact::CompactVariableDeclarationParts {
+            variable_declaration: &self.variable_declaration,
+            type_name: &self.type_name,
+            type_expression: &self.type_expression,
+            type_expression_detail: crate::compact::CompactExpressionDetailRef::Rust(
+                &self.type_expression_detail,
+            ),
+            documentation: &self.documentation,
+            overrides: &self.overrides,
+            override_paths: &self.override_paths,
+            override_path_details: &self.override_path_details,
+            value: &self.value,
+            value_detail: crate::compact::CompactExpressionDetailRef::Rust(&self.value_detail),
+            type_name_elementary_token: self.type_name_elementary_token,
+            type_name_elementary_first_number: self.type_name_elementary_first_number,
+            type_name_elementary_second_number: self.type_name_elementary_second_number,
+            type_name_has_state_mutability: self.type_name_has_state_mutability,
+            type_name_state_mutability: self.type_name_state_mutability,
+            type_name_user_defined_path_node: &self.type_name_user_defined_path_node,
+            type_name_user_defined_path: &self.type_name_user_defined_path,
+            type_name_user_defined_path_locations: &self.type_name_user_defined_path_locations,
+            type_name_array_base_types: &self.type_name_array_base_types,
+            type_name_array_lengths: &self.type_name_array_lengths,
+            type_name_array_length_details: crate::compact::CompactExpressionDetailsRef::Rust(
+                &self.type_name_array_length_details,
+            ),
+            type_name_function_parameters: &self.type_name_function_parameters,
+            type_name_function_parameter_declarations: &self
+                .type_name_function_parameter_declarations,
+            type_name_function_parameter_details: crate::compact::CompactVariableDetailsRef::Parsed(
+                &self.type_name_function_parameter_details,
+            ),
+            type_name_function_return_parameters: &self.type_name_function_return_parameters,
+            type_name_function_return_parameter_declarations: &self
+                .type_name_function_return_parameter_declarations,
+            type_name_function_return_parameter_details:
+                crate::compact::CompactVariableDetailsRef::Parsed(
+                    &self.type_name_function_return_parameter_details,
+                ),
+            type_name_function_visibility: self.type_name_function_visibility,
+            type_name_function_state_mutability: self.type_name_function_state_mutability,
+            type_name_mapping_key_type: &self.type_name_mapping_key_type,
+            type_name_mapping_key_elementary_token: self.type_name_mapping_key_elementary_token,
+            type_name_mapping_key_elementary_first_number: self
+                .type_name_mapping_key_elementary_first_number,
+            type_name_mapping_key_elementary_second_number: self
+                .type_name_mapping_key_elementary_second_number,
+            type_name_mapping_key_user_defined_path_node: &self
+                .type_name_mapping_key_user_defined_path_node,
+            type_name_mapping_key_user_defined_path: &self.type_name_mapping_key_user_defined_path,
+            type_name_mapping_key_user_defined_path_locations: &self
+                .type_name_mapping_key_user_defined_path_locations,
+            type_name_mapping_key_name: &self.type_name_mapping_key_name,
+            type_name_mapping_key_name_location: &self.type_name_mapping_key_name_location,
+            type_name_mapping_value_type: &self.type_name_mapping_value_type,
+            type_name_mapping_value_elementary_token: self.type_name_mapping_value_elementary_token,
+            type_name_mapping_value_elementary_first_number: self
+                .type_name_mapping_value_elementary_first_number,
+            type_name_mapping_value_elementary_second_number: self
+                .type_name_mapping_value_elementary_second_number,
+            type_name_mapping_value_has_state_mutability: self
+                .type_name_mapping_value_has_state_mutability,
+            type_name_mapping_value_state_mutability: self.type_name_mapping_value_state_mutability,
+            type_name_mapping_value_user_defined_path_node: &self
+                .type_name_mapping_value_user_defined_path_node,
+            type_name_mapping_value_user_defined_path: &self
+                .type_name_mapping_value_user_defined_path,
+            type_name_mapping_value_user_defined_path_locations: &self
+                .type_name_mapping_value_user_defined_path_locations,
+            type_name_mapping_value_array_base_types: &self
+                .type_name_mapping_value_array_base_types,
+            type_name_mapping_value_array_lengths: &self.type_name_mapping_value_array_lengths,
+            type_name_mapping_value_array_length_details:
+                crate::compact::CompactExpressionDetailsRef::Rust(
+                    &self.type_name_mapping_value_array_length_details,
+                ),
+            type_name_mapping_value_function_parameters: &self
+                .type_name_mapping_value_function_parameters,
+            type_name_mapping_value_function_parameter_declarations: &self
+                .type_name_mapping_value_function_parameter_declarations,
+            type_name_mapping_value_function_parameter_details:
+                crate::compact::CompactVariableDetailsRef::Parsed(
+                    &self.type_name_mapping_value_function_parameter_details,
+                ),
+            type_name_mapping_value_function_return_parameters: &self
+                .type_name_mapping_value_function_return_parameters,
+            type_name_mapping_value_function_return_parameter_declarations: &self
+                .type_name_mapping_value_function_return_parameter_declarations,
+            type_name_mapping_value_function_return_parameter_details:
+                crate::compact::CompactVariableDetailsRef::Parsed(
+                    &self.type_name_mapping_value_function_return_parameter_details,
+                ),
+            type_name_mapping_value_function_visibility: self
+                .type_name_mapping_value_function_visibility,
+            type_name_mapping_value_function_state_mutability: self
+                .type_name_mapping_value_function_state_mutability,
+            type_name_mapping_value_name: &self.type_name_mapping_value_name,
+            type_name_mapping_value_name_location: &self.type_name_mapping_value_name_location,
+            type_name_mapping_details: &self.type_name_mapping_details,
+            name: &self.name,
+            name_location: &self.name_location,
+            visibility: self.visibility,
+            mutability: self.mutability,
+            variable_location: self.variable_location,
+            indexed: self.indexed,
+        }
+    }
+
+    fn into_wire(self) -> ffi::WireVariableDeclarationResult {
+        ffi::WireVariableDeclarationResult {
+            variable_declaration: self.variable_declaration,
+            type_name: self.type_name,
+            type_expression: self.type_expression,
+            type_expression_detail: self.type_expression_detail.into_wire(),
+            documentation: self.documentation,
+            overrides: self.overrides,
+            override_paths: self.override_paths,
+            override_path_details: self.override_path_details,
+            value: self.value,
+            value_detail: self.value_detail.into_wire(),
+            type_name_elementary_token: self.type_name_elementary_token,
+            type_name_elementary_first_number: self.type_name_elementary_first_number,
+            type_name_elementary_second_number: self.type_name_elementary_second_number,
+            type_name_has_state_mutability: self.type_name_has_state_mutability,
+            type_name_state_mutability: self.type_name_state_mutability,
+            type_name_user_defined_path_node: self.type_name_user_defined_path_node,
+            type_name_user_defined_path: self.type_name_user_defined_path,
+            type_name_user_defined_path_locations: self.type_name_user_defined_path_locations,
+            type_name_array_base_types: self.type_name_array_base_types,
+            type_name_array_lengths: self.type_name_array_lengths,
+            type_name_array_length_details: self
+                .type_name_array_length_details
+                .into_iter()
+                .map(RustExpressionResult::into_wire)
+                .collect(),
+            type_name_function_parameters: self.type_name_function_parameters,
+            type_name_function_parameter_declarations: self
+                .type_name_function_parameter_declarations,
+            type_name_function_parameter_details: self
+                .type_name_function_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            type_name_function_return_parameters: self.type_name_function_return_parameters,
+            type_name_function_return_parameter_declarations: self
+                .type_name_function_return_parameter_declarations,
+            type_name_function_return_parameter_details: self
+                .type_name_function_return_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            type_name_function_visibility: self.type_name_function_visibility,
+            type_name_function_state_mutability: self.type_name_function_state_mutability,
+            type_name_mapping_key_type: self.type_name_mapping_key_type,
+            type_name_mapping_key_elementary_token: self.type_name_mapping_key_elementary_token,
+            type_name_mapping_key_elementary_first_number: self
+                .type_name_mapping_key_elementary_first_number,
+            type_name_mapping_key_elementary_second_number: self
+                .type_name_mapping_key_elementary_second_number,
+            type_name_mapping_key_user_defined_path_node: self
+                .type_name_mapping_key_user_defined_path_node,
+            type_name_mapping_key_user_defined_path: self.type_name_mapping_key_user_defined_path,
+            type_name_mapping_key_user_defined_path_locations: self
+                .type_name_mapping_key_user_defined_path_locations,
+            type_name_mapping_key_name: self.type_name_mapping_key_name,
+            type_name_mapping_key_name_location: self.type_name_mapping_key_name_location,
+            type_name_mapping_value_type: self.type_name_mapping_value_type,
+            type_name_mapping_value_elementary_token: self.type_name_mapping_value_elementary_token,
+            type_name_mapping_value_elementary_first_number: self
+                .type_name_mapping_value_elementary_first_number,
+            type_name_mapping_value_elementary_second_number: self
+                .type_name_mapping_value_elementary_second_number,
+            type_name_mapping_value_has_state_mutability: self
+                .type_name_mapping_value_has_state_mutability,
+            type_name_mapping_value_state_mutability: self.type_name_mapping_value_state_mutability,
+            type_name_mapping_value_user_defined_path_node: self
+                .type_name_mapping_value_user_defined_path_node,
+            type_name_mapping_value_user_defined_path: self
+                .type_name_mapping_value_user_defined_path,
+            type_name_mapping_value_user_defined_path_locations: self
+                .type_name_mapping_value_user_defined_path_locations,
+            type_name_mapping_value_array_base_types: self.type_name_mapping_value_array_base_types,
+            type_name_mapping_value_array_lengths: self.type_name_mapping_value_array_lengths,
+            type_name_mapping_value_array_length_details: self
+                .type_name_mapping_value_array_length_details
+                .into_iter()
+                .map(RustExpressionResult::into_wire)
+                .collect(),
+            type_name_mapping_value_function_parameters: self
+                .type_name_mapping_value_function_parameters,
+            type_name_mapping_value_function_parameter_declarations: self
+                .type_name_mapping_value_function_parameter_declarations,
+            type_name_mapping_value_function_parameter_details: self
+                .type_name_mapping_value_function_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            type_name_mapping_value_function_return_parameters: self
+                .type_name_mapping_value_function_return_parameters,
+            type_name_mapping_value_function_return_parameter_declarations: self
+                .type_name_mapping_value_function_return_parameter_declarations,
+            type_name_mapping_value_function_return_parameter_details: self
+                .type_name_mapping_value_function_return_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            type_name_mapping_value_function_visibility: self
+                .type_name_mapping_value_function_visibility,
+            type_name_mapping_value_function_state_mutability: self
+                .type_name_mapping_value_function_state_mutability,
+            type_name_mapping_value_name: self.type_name_mapping_value_name,
+            type_name_mapping_value_name_location: self.type_name_mapping_value_name_location,
+            type_name_mapping_details: self.type_name_mapping_details,
+            name: self.name,
+            name_location: self.name_location,
+            visibility: self.visibility,
+            mutability: self.mutability,
+            variable_location: self.variable_location,
+            indexed: self.indexed,
+            errors: self.errors,
+        }
+    }
 }
 
 fn parse_variable_declaration_with_type_name_result(
@@ -3464,6 +5207,52 @@ fn parse_variable_declaration_with_type_name_result(
     look_ahead_type_name: ffi::WireTypeNameFromIndexAccessStructureResult,
     current_node_id: i64,
 ) -> ffi::WireVariableDeclarationResult {
+    parse_variable_declaration_parts_with_type_name_result(
+        options,
+        look_ahead_type_name,
+        current_node_id,
+    )
+    .into_wire()
+}
+
+struct CompactVariableDeclarationParseResult {
+    variable_declaration: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_variable_declaration_parse_result(
+    variable_declaration: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactVariableDeclarationParseResult {
+    CompactVariableDeclarationParseResult {
+        variable_declaration,
+        errors,
+    }
+}
+
+fn parse_variable_declaration_compact(
+    builder: crate::compact::CompactVariableDeclarationBuilder<'_>,
+    options: VarDeclParserOptions,
+    look_ahead_array_type: ffi::WireAstNode,
+    current_node_id: i64,
+) -> CompactVariableDeclarationParseResult {
+    let parsed = parse_variable_declaration_parts_with_type_name_result(
+        options,
+        type_name_from_look_ahead_array_type_node(look_ahead_array_type),
+        current_node_id,
+    );
+    let variable_declaration = parsed.variable_declaration.clone();
+    if variable_declaration.present {
+        builder.finish(parsed.as_compact_parts());
+    }
+    compact_variable_declaration_parse_result(variable_declaration, parsed.errors)
+}
+
+fn parse_variable_declaration_parts_with_type_name_result(
+    options: VarDeclParserOptions,
+    look_ahead_type_name: ffi::WireTypeNameFromIndexAccessStructureResult,
+    current_node_id: i64,
+) -> ParsedVariableDeclaration {
     let _recursion_guard = RecursionGuard::new();
     let look_ahead_array_type = look_ahead_type_name.type_name.clone();
 
@@ -3538,12 +5327,16 @@ fn parse_variable_declaration_with_type_name_result(
         type_name_user_defined_path_locations = look_ahead_type_name.user_defined_path_locations;
         type_name_array_base_types = look_ahead_type_name.array_base_types;
         type_name_array_lengths = look_ahead_type_name.array_lengths;
-        type_name_array_length_details = look_ahead_type_name.array_length_details;
+        type_name_array_length_details = look_ahead_type_name
+            .array_length_details
+            .into_iter()
+            .map(RustExpressionResult::from_wire)
+            .collect();
         look_ahead_array_type
     } else {
-        let parsed_type_name = parse_type_name_with_node_id(node_id);
+        let parsed_type_name = parse_type_name_parts_with_node_id(node_id);
         if parser_errors_have_fatal(&parsed_type_name.errors) {
-            return empty_variable_declaration_result(parsed_type_name.errors);
+            return empty_parsed_variable_declaration(parsed_type_name.errors);
         }
         errors.extend(parsed_type_name.errors);
         type_name_elementary_token = parsed_type_name.elementary_type_token;
@@ -3622,7 +5415,7 @@ fn parse_variable_declaration_with_type_name_result(
         parsed_type_name.type_name
     };
     if !type_name.present {
-        return empty_variable_declaration_result(errors);
+        return empty_parsed_variable_declaration(errors);
     }
     location.end = type_name.location.end;
     node_id = max_node_id(node_id, &[documentation.clone(), type_name.clone()]);
@@ -3637,7 +5430,7 @@ fn parse_variable_declaration_with_type_name_result(
 or a function to handle plain ether transactions, use the \"fallback\" keyword \
 or the \"receive\" keyword instead.",
         ));
-        return empty_variable_declaration_result(errors);
+        return empty_parsed_variable_declaration(errors);
     }
 
     let mut is_indexed = false;
@@ -3674,7 +5467,7 @@ or the \"receive\" keyword instead.",
             let parsed_overrides = parse_current_override_specifier_with_node_id(node_id);
             if !parsed_overrides.errors.is_empty() {
                 errors.extend(parsed_overrides.errors);
-                return empty_variable_declaration_result(errors);
+                return empty_parsed_variable_declaration(errors);
             }
             node_id = parsed_overrides.current_node_id;
             overrides = parsed_overrides.override_specifier;
@@ -3746,7 +5539,7 @@ or the \"receive\" keyword instead.",
         advance_by(parsed_identifier.tokens_consumed);
         if !parsed_identifier.errors.is_empty() {
             errors.extend(parsed_identifier.errors);
-            return empty_variable_declaration_result(errors);
+            return empty_parsed_variable_declaration(errors);
         }
         name_location = parsed_identifier.location.clone();
         let identifier = parsed_identifier.identifier;
@@ -3755,19 +5548,19 @@ or the \"receive\" keyword instead.",
     };
 
     let mut value = empty_ast_node();
-    let mut value_detail = empty_expression_result(Vec::new());
+    let mut value_detail = RustExpressionResult::empty(Vec::new());
     if options.allow_initial_value && current_token() == token::TOKEN_ASSIGN {
         advance();
-        let parsed_value = parse_expression();
+        let parsed_value = parse_expression_compact();
         if parser_errors_have_fatal(&parsed_value.errors) {
             errors.extend(parsed_value.errors);
-            return empty_variable_declaration_result(errors);
+            return empty_parsed_variable_declaration(errors);
         }
         errors.extend(parsed_value.errors.clone());
         value = parsed_value.expression.clone();
         value_detail = parsed_value;
         if !value.present {
-            return empty_variable_declaration_result(errors);
+            return empty_parsed_variable_declaration(errors);
         }
         location.end = value.location.end;
     }
@@ -3787,11 +5580,11 @@ or the \"receive\" keyword instead.",
         text: identifier.clone(),
     };
 
-    ffi::WireVariableDeclarationResult {
+    ParsedVariableDeclaration {
         variable_declaration,
         type_name,
         type_expression: empty_ast_node(),
-        type_expression_detail: empty_expression_result(Vec::new()),
+        type_expression_detail: RustExpressionResult::empty(Vec::new()),
         documentation,
         overrides,
         override_paths,
@@ -3878,6 +5671,81 @@ fn type_name_from_look_ahead_array_type_node(
         user_defined_path: Vec::new(),
         user_defined_path_locations: Vec::new(),
         errors: Vec::new(),
+    }
+}
+
+fn empty_parsed_variable_declaration(
+    errors: Vec<ffi::WireParserError>,
+) -> ParsedVariableDeclaration {
+    ParsedVariableDeclaration {
+        variable_declaration: empty_ast_node(),
+        type_name: empty_ast_node(),
+        type_expression: empty_ast_node(),
+        type_expression_detail: RustExpressionResult::empty(Vec::new()),
+        documentation: empty_ast_node(),
+        overrides: empty_ast_node(),
+        override_paths: Vec::new(),
+        override_path_details: Vec::new(),
+        value: empty_ast_node(),
+        value_detail: RustExpressionResult::empty(Vec::new()),
+        type_name_elementary_token: token::TOKEN_ILLEGAL,
+        type_name_elementary_first_number: 0,
+        type_name_elementary_second_number: 0,
+        type_name_has_state_mutability: false,
+        type_name_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        type_name_user_defined_path_node: empty_ast_node(),
+        type_name_user_defined_path: Vec::new(),
+        type_name_user_defined_path_locations: Vec::new(),
+        type_name_array_base_types: Vec::new(),
+        type_name_array_lengths: Vec::new(),
+        type_name_array_length_details: Vec::new(),
+        type_name_function_parameters: empty_ast_node(),
+        type_name_function_parameter_declarations: Vec::new(),
+        type_name_function_parameter_details: Vec::new(),
+        type_name_function_return_parameters: empty_ast_node(),
+        type_name_function_return_parameter_declarations: Vec::new(),
+        type_name_function_return_parameter_details: Vec::new(),
+        type_name_function_visibility: VISIBILITY_DEFAULT,
+        type_name_function_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        type_name_mapping_key_type: empty_ast_node(),
+        type_name_mapping_key_elementary_token: token::TOKEN_ILLEGAL,
+        type_name_mapping_key_elementary_first_number: 0,
+        type_name_mapping_key_elementary_second_number: 0,
+        type_name_mapping_key_user_defined_path_node: empty_ast_node(),
+        type_name_mapping_key_user_defined_path: Vec::new(),
+        type_name_mapping_key_user_defined_path_locations: Vec::new(),
+        type_name_mapping_key_name: empty_string(),
+        type_name_mapping_key_name_location: empty_source_location(),
+        type_name_mapping_value_type: empty_ast_node(),
+        type_name_mapping_value_elementary_token: token::TOKEN_ILLEGAL,
+        type_name_mapping_value_elementary_first_number: 0,
+        type_name_mapping_value_elementary_second_number: 0,
+        type_name_mapping_value_has_state_mutability: false,
+        type_name_mapping_value_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        type_name_mapping_value_user_defined_path_node: empty_ast_node(),
+        type_name_mapping_value_user_defined_path: Vec::new(),
+        type_name_mapping_value_user_defined_path_locations: Vec::new(),
+        type_name_mapping_value_array_base_types: Vec::new(),
+        type_name_mapping_value_array_lengths: Vec::new(),
+        type_name_mapping_value_array_length_details: Vec::new(),
+        type_name_mapping_value_function_parameters: empty_ast_node(),
+        type_name_mapping_value_function_parameter_declarations: Vec::new(),
+        type_name_mapping_value_function_parameter_details: Vec::new(),
+        type_name_mapping_value_function_return_parameters: empty_ast_node(),
+        type_name_mapping_value_function_return_parameter_declarations: Vec::new(),
+        type_name_mapping_value_function_return_parameter_details: Vec::new(),
+        type_name_mapping_value_function_visibility: VISIBILITY_DEFAULT,
+        type_name_mapping_value_function_state_mutability: STATE_MUTABILITY_NON_PAYABLE,
+        type_name_mapping_value_name: empty_string(),
+        type_name_mapping_value_name_location: empty_source_location(),
+        type_name_mapping_details: Vec::new(),
+        name: empty_string(),
+        name_location: empty_source_location(),
+        visibility: VISIBILITY_DEFAULT,
+        mutability: VARIABLE_DECLARATION_MUTABILITY_MUTABLE,
+        variable_location: VARIABLE_DECLARATION_LOCATION_UNSPECIFIED,
+        indexed: false,
+        errors,
     }
 }
 
@@ -4136,12 +6004,12 @@ pub fn parse_modifier_definition() -> ffi::WireModifierDefinitionResult {
     let mut block_statement_details = Vec::new();
     location.end = current_location().end;
     if current_token() != token::TOKEN_SEMICOLON {
-        let parsed_block = parse_block();
+        let parsed_block = parse_block_with_options(false, empty_string());
         errors.extend(parsed_block.errors);
         block = parsed_block.block;
         block_unchecked = parsed_block.unchecked;
         block_statements = parsed_block.statements;
-        block_statement_details = parsed_block.statement_details;
+        block_statement_details = into_wire_statement_details(parsed_block.statement_details);
         if !block.present {
             return empty_modifier_definition_result(errors);
         }
@@ -4182,6 +6050,170 @@ pub fn parse_modifier_definition() -> ffi::WireModifierDefinitionResult {
         block_statement_details,
         errors,
     }
+}
+
+struct CompactModifierDefinitionParseResult {
+    modifier_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_modifier_definition_parse_result(
+    modifier_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactModifierDefinitionParseResult {
+    CompactModifierDefinitionParseResult {
+        modifier_definition,
+        errors,
+    }
+}
+
+fn parse_modifier_definition_compact(
+    modifier_builder: crate::compact::CompactModifierDefinitionBuilder<'_>,
+) -> CompactModifierDefinitionParseResult {
+    let _recursion_guard = RecursionGuard::new();
+    let _inside_modifier_guard = InsideModifierGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let modifier = expect_token(token::TOKEN_MODIFIER);
+    if !modifier.errors.is_empty() {
+        return compact_modifier_definition_parse_result(empty_ast_node(), modifier.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return compact_modifier_definition_parse_result(empty_ast_node(), parsed_name.errors);
+    }
+
+    let (parameters, parameter_declarations, parameter_details) =
+        if current_token() == token::TOKEN_LPAREN {
+            let options = VarDeclParserOptions {
+                allow_location_specifier: true,
+                ..VarDeclParserOptions::default()
+            };
+            let parameters = parse_parameter_list_parts_with_options_and_node_id(
+                options,
+                true,
+                documentation.node_id.max(current_node_id()),
+            );
+            if parser_errors_have_fatal(&parameters.errors) {
+                errors.extend(parameters.errors);
+                return compact_modifier_definition_parse_result(empty_ast_node(), errors);
+            }
+            errors.extend(parameters.errors);
+            if !parameters.parameter_list.present {
+                return compact_modifier_definition_parse_result(empty_ast_node(), errors);
+            }
+            (
+                parameters.parameter_list,
+                parameters.parameters,
+                parameters.parameter_details,
+            )
+        } else {
+            let parameters = create_current_empty_parameter_list_with_node_id(
+                current_location(),
+                documentation.node_id.max(current_node_id()),
+            );
+            (parameters.parameter_list, parameters.parameters, Vec::new())
+        };
+
+    let mut overrides = empty_ast_node();
+    let mut override_paths = Vec::new();
+    let mut override_path_details = Vec::new();
+    let mut is_virtual = false;
+    let mut node_id = max_node_id(
+        current_node_id(),
+        &[documentation.clone(), parameters.clone()],
+    );
+
+    loop {
+        if current_token() == token::TOKEN_OVERRIDE {
+            if overrides.present {
+                errors.push(parser_error(9102, "Override already specified."));
+            }
+
+            let parsed_overrides = parse_current_override_specifier_with_node_id(node_id);
+            if !parsed_overrides.errors.is_empty() {
+                errors.extend(parsed_overrides.errors);
+                return compact_modifier_definition_parse_result(empty_ast_node(), errors);
+            }
+            node_id = parsed_overrides.current_node_id;
+            overrides = parsed_overrides.override_specifier;
+            override_paths = parsed_overrides.overrides;
+            override_path_details = parsed_overrides.override_details;
+        } else if current_token() == token::TOKEN_VIRTUAL {
+            if is_virtual {
+                errors.push(parser_error(2662, "Virtual already specified."));
+            }
+
+            is_virtual = true;
+            advance();
+        } else {
+            break;
+        }
+    }
+
+    let mut block = empty_ast_node();
+    let mut block_unchecked = false;
+    let mut block_statements = Vec::new();
+    let mut block_statement_details = Vec::new();
+    location.end = current_location().end;
+    if current_token() != token::TOKEN_SEMICOLON {
+        let parsed_block = parse_block_with_options(false, empty_string());
+        errors.extend(parsed_block.errors);
+        block = parsed_block.block;
+        block_unchecked = parsed_block.unchecked;
+        block_statements = parsed_block.statements;
+        block_statement_details = parsed_block.statement_details;
+        if !block.present {
+            return compact_modifier_definition_parse_result(empty_ast_node(), errors);
+        }
+        location.end = block.location.end;
+    } else {
+        advance();
+    }
+
+    let nodes = [
+        documentation.clone(),
+        parameters.clone(),
+        overrides.clone(),
+        block.clone(),
+    ];
+    let modifier_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(node_id, &nodes)),
+        kind: AST_NODE_KIND_MODIFIER_DEFINITION,
+        location,
+        text: parsed_name.identifier.clone(),
+    };
+
+    modifier_builder.finish(
+        &modifier_definition,
+        &parsed_name.identifier,
+        &parsed_name.location,
+        &documentation,
+        &parameters,
+        &parameter_declarations,
+        &parameter_details,
+        is_virtual,
+        &overrides,
+        &override_paths,
+        &override_path_details,
+        &block,
+        block_unchecked,
+        &block_statements,
+        &block_statement_details,
+    );
+
+    compact_modifier_definition_parse_result(modifier_definition, errors)
 }
 
 pub fn parse_event_definition() -> ffi::WireEventDefinitionResult {
@@ -4326,6 +6358,188 @@ pub fn parse_error_definition() -> ffi::WireErrorDefinitionResult {
     }
 }
 
+struct CompactEventDefinitionParseResult {
+    event_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_event_definition_parse_result(
+    event_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactEventDefinitionParseResult {
+    CompactEventDefinitionParseResult {
+        event_definition,
+        errors,
+    }
+}
+
+fn parse_event_definition_compact(
+    event_builder: crate::compact::CompactEventDefinitionBuilder<'_>,
+) -> CompactEventDefinitionParseResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let event = expect_token(token::TOKEN_EVENT);
+    if !event.errors.is_empty() {
+        return compact_event_definition_parse_result(empty_ast_node(), event.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return compact_event_definition_parse_result(empty_ast_node(), parsed_name.errors);
+    }
+
+    let options = VarDeclParserOptions {
+        allow_indexed: true,
+        ..VarDeclParserOptions::default()
+    };
+    let parsed_parameters = parse_parameter_list_parts_with_options_and_node_id(
+        options,
+        true,
+        documentation.node_id.max(current_node_id()),
+    );
+    if parser_errors_have_fatal(&parsed_parameters.errors) {
+        return compact_event_definition_parse_result(empty_ast_node(), parsed_parameters.errors);
+    }
+    errors.extend(parsed_parameters.errors);
+    let parameter_declarations = parsed_parameters.parameters;
+    let parameter_details = parsed_parameters.parameter_details;
+    let parameters = parsed_parameters.parameter_list;
+    if !parameters.present {
+        return compact_event_definition_parse_result(empty_ast_node(), errors);
+    }
+
+    let mut anonymous = false;
+    if current_token() == token::TOKEN_ANONYMOUS {
+        anonymous = true;
+        advance();
+    }
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return compact_event_definition_parse_result(empty_ast_node(), errors);
+    }
+
+    let nodes = [documentation.clone(), parameters.clone()];
+    let event_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+        kind: AST_NODE_KIND_EVENT_DEFINITION,
+        location,
+        text: parsed_name.identifier.clone(),
+    };
+
+    event_builder.finish(
+        &event_definition,
+        &parsed_name.identifier,
+        &parsed_name.location,
+        &documentation,
+        &parameters,
+        &parameter_declarations,
+        &parameter_details,
+        anonymous,
+    );
+
+    compact_event_definition_parse_result(event_definition, errors)
+}
+
+struct CompactErrorDefinitionParseResult {
+    error_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_error_definition_parse_result(
+    error_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactErrorDefinitionParseResult {
+    CompactErrorDefinitionParseResult {
+        error_definition,
+        errors,
+    }
+}
+
+fn parse_error_definition_compact(
+    error_builder: crate::compact::CompactErrorDefinitionBuilder<'_>,
+) -> CompactErrorDefinitionParseResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let documentation = parse_current_structured_documentation().documentation;
+
+    let error_marker =
+        expect_identifier_token(current_token(), current_literal(), current_token_name());
+    advance_by(error_marker.tokens_consumed);
+    if !error_marker.errors.is_empty() {
+        return compact_error_definition_parse_result(empty_ast_node(), error_marker.errors);
+    }
+    assert_eq!(error_marker.value.bytes, b"error");
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return compact_error_definition_parse_result(empty_ast_node(), parsed_name.errors);
+    }
+
+    let parsed_parameters = parse_parameter_list_parts_with_options_and_node_id(
+        VarDeclParserOptions::default(),
+        true,
+        documentation.node_id.max(current_node_id()),
+    );
+    if parser_errors_have_fatal(&parsed_parameters.errors) {
+        return compact_error_definition_parse_result(empty_ast_node(), parsed_parameters.errors);
+    }
+    errors.extend(parsed_parameters.errors);
+    let parameter_declarations = parsed_parameters.parameters;
+    let parameter_details = parsed_parameters.parameter_details;
+    let parameters = parsed_parameters.parameter_list;
+    if !parameters.present {
+        return compact_error_definition_parse_result(empty_ast_node(), errors);
+    }
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return compact_error_definition_parse_result(empty_ast_node(), errors);
+    }
+
+    let nodes = [documentation.clone(), parameters.clone()];
+    let error_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+        kind: AST_NODE_KIND_ERROR_DEFINITION,
+        location,
+        text: parsed_name.identifier.clone(),
+    };
+
+    error_builder.finish(
+        &error_definition,
+        &parsed_name.identifier,
+        &parsed_name.location,
+        &documentation,
+        &parameters,
+        &parameter_declarations,
+        &parameter_details,
+    );
+
+    compact_error_definition_parse_result(error_definition, errors)
+}
+
 pub fn parse_using_directive() -> ffi::WireUsingDirectiveResult {
     let _recursion_guard = RecursionGuard::new();
 
@@ -4458,6 +6672,150 @@ pub fn parse_using_directive() -> ffi::WireUsingDirectiveResult {
     }
 }
 
+struct CompactUsingDirectiveParseResult {
+    using_directive: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_using_directive_parse_result(
+    using_directive: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactUsingDirectiveParseResult {
+    CompactUsingDirectiveParseResult {
+        using_directive,
+        errors,
+    }
+}
+
+fn parse_using_directive_compact(
+    mut using_builder: crate::compact::CompactUsingDirectiveBuilder<'_>,
+) -> CompactUsingDirectiveParseResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut location = current_location();
+    let mut node_id = current_node_id();
+    let mut errors = Vec::new();
+    let using = expect_token(token::TOKEN_USING);
+    if !using.errors.is_empty() {
+        return compact_using_directive_parse_result(empty_ast_node(), using.errors);
+    }
+
+    let mut functions = Vec::new();
+    let uses_braces = current_token() == token::TOKEN_LBRACE;
+    if uses_braces {
+        loop {
+            advance();
+            let function = parse_current_identifier_path_with_node_id(node_id);
+            if !function.errors.is_empty() {
+                errors.extend(function.errors);
+                return compact_using_directive_parse_result(empty_ast_node(), errors);
+            }
+            node_id = function.current_node_id;
+            functions.push(function.identifier_path.clone());
+
+            let operator = if current_token() == token::TOKEN_AS {
+                advance();
+                let operator = current_token();
+                if !is_user_definable_operator(operator) {
+                    let operator_name = if !current_literal().bytes.is_empty() {
+                        String::from_utf8_lossy(&current_literal().bytes).into_owned()
+                    } else {
+                        token_to_string(operator).unwrap_or_default().to_string()
+                    };
+                    errors.push(parser_error(
+                        4403,
+                        &format!(
+                            "Not a user-definable operator: {}. Only the following operators can be user-defined: {}",
+                            operator_name,
+                            user_definable_operator_list()
+                        ),
+                    ));
+                }
+                advance();
+                Some(operator)
+            } else {
+                None
+            };
+            using_builder.add_function(&function, operator);
+
+            if current_token() != token::TOKEN_COMMA {
+                break;
+            }
+        }
+
+        let rbrace = expect_token(token::TOKEN_RBRACE);
+        if !rbrace.errors.is_empty() {
+            errors.extend(rbrace.errors);
+            return compact_using_directive_parse_result(empty_ast_node(), errors);
+        }
+    } else {
+        let function = parse_current_identifier_path_with_node_id(node_id);
+        if !function.errors.is_empty() {
+            errors.extend(function.errors);
+            return compact_using_directive_parse_result(empty_ast_node(), errors);
+        }
+        node_id = function.current_node_id;
+        functions.push(function.identifier_path.clone());
+        using_builder.add_function(&function, None);
+    }
+
+    let for_token = expect_token(token::TOKEN_FOR);
+    if !for_token.errors.is_empty() {
+        errors.extend(for_token.errors);
+        return compact_using_directive_parse_result(empty_ast_node(), errors);
+    }
+
+    let type_name_detail = if current_token() == token::TOKEN_MUL {
+        advance();
+        empty_parsed_type_name_result(Vec::new())
+    } else {
+        let parsed_type_name = parse_type_name_parts_with_node_id(node_id);
+        if parser_errors_have_fatal(&parsed_type_name.errors) {
+            errors.extend(parsed_type_name.errors);
+            return compact_using_directive_parse_result(empty_ast_node(), errors);
+        }
+        errors.extend(parsed_type_name.errors.clone());
+        if !parsed_type_name.type_name.present {
+            return compact_using_directive_parse_result(empty_ast_node(), errors);
+        }
+        parsed_type_name
+    };
+    let type_name = type_name_detail.type_name.clone();
+
+    let mut global = false;
+    if current_token() == token::TOKEN_IDENTIFIER && current_literal().bytes == b"global" {
+        global = true;
+        advance();
+    }
+
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return compact_using_directive_parse_result(empty_ast_node(), errors);
+    }
+
+    let mut child_nodes = functions;
+    child_nodes.push(type_name.clone());
+    let using_directive = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(node_id, &child_nodes)),
+        kind: AST_NODE_KIND_USING_FOR_DIRECTIVE,
+        location,
+        text: empty_string(),
+    };
+
+    using_builder.finish(
+        &using_directive,
+        uses_braces,
+        &type_name,
+        &type_name_detail,
+        global,
+    );
+
+    compact_using_directive_parse_result(using_directive, errors)
+}
+
 fn empty_using_directive_result(
     errors: Vec<ffi::WireParserError>,
 ) -> ffi::WireUsingDirectiveResult {
@@ -4508,18 +6866,17 @@ pub fn parse_user_defined_value_type_definition() -> ffi::WireUserDefinedValueTy
         return empty_user_defined_value_type_definition_result(is_token.errors);
     }
 
-    let parsed_type_name = parse_type_name();
-    if parser_errors_have_fatal(&parsed_type_name.errors) {
-        return empty_user_defined_value_type_definition_result(parsed_type_name.errors);
+    let type_name_detail = parse_type_name();
+    if parser_errors_have_fatal(&type_name_detail.errors) {
+        return empty_user_defined_value_type_definition_result(type_name_detail.errors);
     }
-    let type_name_detail = parsed_type_name.clone();
-    errors.extend(parsed_type_name.errors);
-    let type_name_elementary_token = parsed_type_name.elementary_type_token;
-    let type_name_elementary_first_number = parsed_type_name.elementary_type_first_number;
-    let type_name_elementary_second_number = parsed_type_name.elementary_type_second_number;
-    let type_name_has_state_mutability = parsed_type_name.has_state_mutability;
-    let type_name_state_mutability = parsed_type_name.state_mutability;
-    let type_name = parsed_type_name.type_name;
+    errors.extend(type_name_detail.errors.clone());
+    let type_name_elementary_token = type_name_detail.elementary_type_token;
+    let type_name_elementary_first_number = type_name_detail.elementary_type_first_number;
+    let type_name_elementary_second_number = type_name_detail.elementary_type_second_number;
+    let type_name_has_state_mutability = type_name_detail.has_state_mutability;
+    let type_name_state_mutability = type_name_detail.state_mutability;
+    let type_name = type_name_detail.type_name.clone();
     if !type_name.present {
         return empty_user_defined_value_type_definition_result(errors);
     }
@@ -4551,6 +6908,104 @@ pub fn parse_user_defined_value_type_definition() -> ffi::WireUserDefinedValueTy
     }
 }
 
+struct CompactUserDefinedValueTypeDefinitionParseResult {
+    user_defined_value_type_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_user_defined_value_type_definition_parse_result(
+    user_defined_value_type_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactUserDefinedValueTypeDefinitionParseResult {
+    CompactUserDefinedValueTypeDefinitionParseResult {
+        user_defined_value_type_definition,
+        errors,
+    }
+}
+
+fn parse_user_defined_value_type_definition_compact(
+    value_type_builder: crate::compact::CompactUserDefinedValueTypeDefinitionBuilder<'_>,
+) -> CompactUserDefinedValueTypeDefinitionParseResult {
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let type_token = expect_token(token::TOKEN_TYPE);
+    if !type_token.errors.is_empty() {
+        return compact_user_defined_value_type_definition_parse_result(
+            empty_ast_node(),
+            type_token.errors,
+        );
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return compact_user_defined_value_type_definition_parse_result(
+            empty_ast_node(),
+            parsed_name.errors,
+        );
+    }
+
+    let is_token = expect_token(token::TOKEN_IS);
+    if !is_token.errors.is_empty() {
+        return compact_user_defined_value_type_definition_parse_result(
+            empty_ast_node(),
+            is_token.errors,
+        );
+    }
+
+    let type_name_detail = parse_type_name_parts_with_node_id(current_node_id());
+    if parser_errors_have_fatal(&type_name_detail.errors) {
+        return compact_user_defined_value_type_definition_parse_result(
+            empty_ast_node(),
+            type_name_detail.errors,
+        );
+    }
+    errors.extend(type_name_detail.errors.clone());
+    let type_name_elementary_token = type_name_detail.elementary_type_token;
+    let type_name_elementary_first_number = type_name_detail.elementary_type_first_number;
+    let type_name_elementary_second_number = type_name_detail.elementary_type_second_number;
+    let type_name_has_state_mutability = type_name_detail.has_state_mutability;
+    let type_name_state_mutability = type_name_detail.state_mutability;
+    let type_name = type_name_detail.type_name.clone();
+    if !type_name.present {
+        return compact_user_defined_value_type_definition_parse_result(empty_ast_node(), errors);
+    }
+    location.end = current_location().end;
+    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+    if !semicolon.errors.is_empty() {
+        errors.extend(semicolon.errors);
+        return compact_user_defined_value_type_definition_parse_result(empty_ast_node(), errors);
+    }
+
+    let value_type_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(type_name.node_id.max(current_node_id())),
+        kind: AST_NODE_KIND_USER_DEFINED_VALUE_TYPE_DEFINITION,
+        location,
+        text: parsed_name.identifier.clone(),
+    };
+
+    value_type_builder.finish(
+        &value_type_definition,
+        &parsed_name.identifier,
+        &parsed_name.location,
+        &type_name,
+        type_name_elementary_token,
+        type_name_elementary_first_number,
+        type_name_elementary_second_number,
+        type_name_has_state_mutability,
+        type_name_state_mutability,
+        &type_name_detail,
+    );
+
+    compact_user_defined_value_type_definition_parse_result(value_type_definition, errors)
+}
+
 fn empty_user_defined_value_type_definition_result(
     errors: Vec<ffi::WireParserError>,
 ) -> ffi::WireUserDefinedValueTypeDefinitionResult {
@@ -4569,14 +7024,266 @@ fn empty_user_defined_value_type_definition_result(
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ParsedTypeNameResult {
+    type_name: ffi::WireAstNode,
+    array_base_type: ffi::WireAstNode,
+    array_length: ffi::WireAstNode,
+    array_base_types: Vec<ffi::WireAstNode>,
+    array_lengths: Vec<ffi::WireAstNode>,
+    array_length_details: Vec<RustExpressionResult>,
+    elementary_type_token: u32,
+    elementary_type_first_number: u32,
+    elementary_type_second_number: u32,
+    has_state_mutability: bool,
+    state_mutability: u8,
+    user_defined_path_node: ffi::WireAstNode,
+    user_defined_path: Vec<ffi::WireString>,
+    user_defined_path_locations: Vec<ffi::WireSourceLocation>,
+    function_parameters: ffi::WireAstNode,
+    function_parameter_declarations: Vec<ffi::WireAstNode>,
+    function_parameter_details: Vec<ParsedVariableDeclaration>,
+    function_return_parameters: ffi::WireAstNode,
+    function_return_parameter_declarations: Vec<ffi::WireAstNode>,
+    function_return_parameter_details: Vec<ParsedVariableDeclaration>,
+    function_visibility: u8,
+    function_state_mutability: u8,
+    mapping_key_type: ffi::WireAstNode,
+    mapping_key_elementary_token: u32,
+    mapping_key_elementary_first_number: u32,
+    mapping_key_elementary_second_number: u32,
+    mapping_key_user_defined_path_node: ffi::WireAstNode,
+    mapping_key_user_defined_path: Vec<ffi::WireString>,
+    mapping_key_user_defined_path_locations: Vec<ffi::WireSourceLocation>,
+    mapping_key_name: ffi::WireString,
+    mapping_key_name_location: ffi::WireSourceLocation,
+    mapping_value_type: ffi::WireAstNode,
+    mapping_value_elementary_token: u32,
+    mapping_value_elementary_first_number: u32,
+    mapping_value_elementary_second_number: u32,
+    mapping_value_has_state_mutability: bool,
+    mapping_value_state_mutability: u8,
+    mapping_value_user_defined_path_node: ffi::WireAstNode,
+    mapping_value_user_defined_path: Vec<ffi::WireString>,
+    mapping_value_user_defined_path_locations: Vec<ffi::WireSourceLocation>,
+    mapping_value_array_base_types: Vec<ffi::WireAstNode>,
+    mapping_value_array_lengths: Vec<ffi::WireAstNode>,
+    mapping_value_array_length_details: Vec<RustExpressionResult>,
+    mapping_value_function_parameters: ffi::WireAstNode,
+    mapping_value_function_parameter_declarations: Vec<ffi::WireAstNode>,
+    mapping_value_function_parameter_details: Vec<ParsedVariableDeclaration>,
+    mapping_value_function_return_parameters: ffi::WireAstNode,
+    mapping_value_function_return_parameter_declarations: Vec<ffi::WireAstNode>,
+    mapping_value_function_return_parameter_details: Vec<ParsedVariableDeclaration>,
+    mapping_value_function_visibility: u8,
+    mapping_value_function_state_mutability: u8,
+    mapping_value_name: ffi::WireString,
+    mapping_value_name_location: ffi::WireSourceLocation,
+    mapping_details: Vec<ffi::WireMappingTypeName>,
+    errors: Vec<ffi::WireParserError>,
+}
+
+impl ParsedTypeNameResult {
+    pub(crate) fn as_compact_parts(&self) -> crate::compact::CompactTypeNameParts<'_> {
+        crate::compact::CompactTypeNameParts {
+            type_name: &self.type_name,
+            array_base_type: &self.array_base_type,
+            array_length: &self.array_length,
+            array_base_types: &self.array_base_types,
+            array_lengths: &self.array_lengths,
+            array_length_details: crate::compact::CompactExpressionDetailsRef::Rust(
+                &self.array_length_details,
+            ),
+            elementary_type_token: self.elementary_type_token,
+            elementary_type_first_number: self.elementary_type_first_number,
+            elementary_type_second_number: self.elementary_type_second_number,
+            has_state_mutability: self.has_state_mutability,
+            state_mutability: self.state_mutability,
+            user_defined_path_node: &self.user_defined_path_node,
+            user_defined_path: &self.user_defined_path,
+            user_defined_path_locations: &self.user_defined_path_locations,
+            function_parameters: &self.function_parameters,
+            function_parameter_declarations: &self.function_parameter_declarations,
+            function_parameter_details: crate::compact::CompactVariableDetailsRef::Parsed(
+                &self.function_parameter_details,
+            ),
+            function_return_parameters: &self.function_return_parameters,
+            function_return_parameter_declarations: &self.function_return_parameter_declarations,
+            function_return_parameter_details: crate::compact::CompactVariableDetailsRef::Parsed(
+                &self.function_return_parameter_details,
+            ),
+            function_visibility: self.function_visibility,
+            function_state_mutability: self.function_state_mutability,
+            mapping_key_type: &self.mapping_key_type,
+            mapping_key_elementary_token: self.mapping_key_elementary_token,
+            mapping_key_elementary_first_number: self.mapping_key_elementary_first_number,
+            mapping_key_elementary_second_number: self.mapping_key_elementary_second_number,
+            mapping_key_user_defined_path_node: &self.mapping_key_user_defined_path_node,
+            mapping_key_user_defined_path: &self.mapping_key_user_defined_path,
+            mapping_key_user_defined_path_locations: &self.mapping_key_user_defined_path_locations,
+            mapping_key_name: &self.mapping_key_name,
+            mapping_key_name_location: &self.mapping_key_name_location,
+            mapping_value_type: &self.mapping_value_type,
+            mapping_value_elementary_token: self.mapping_value_elementary_token,
+            mapping_value_elementary_first_number: self.mapping_value_elementary_first_number,
+            mapping_value_elementary_second_number: self.mapping_value_elementary_second_number,
+            mapping_value_has_state_mutability: self.mapping_value_has_state_mutability,
+            mapping_value_state_mutability: self.mapping_value_state_mutability,
+            mapping_value_user_defined_path_node: &self.mapping_value_user_defined_path_node,
+            mapping_value_user_defined_path: &self.mapping_value_user_defined_path,
+            mapping_value_user_defined_path_locations: &self
+                .mapping_value_user_defined_path_locations,
+            mapping_value_array_base_types: &self.mapping_value_array_base_types,
+            mapping_value_array_lengths: &self.mapping_value_array_lengths,
+            mapping_value_array_length_details: crate::compact::CompactExpressionDetailsRef::Rust(
+                &self.mapping_value_array_length_details,
+            ),
+            mapping_value_function_parameters: &self.mapping_value_function_parameters,
+            mapping_value_function_parameter_declarations: &self
+                .mapping_value_function_parameter_declarations,
+            mapping_value_function_parameter_details:
+                crate::compact::CompactVariableDetailsRef::Parsed(
+                    &self.mapping_value_function_parameter_details,
+                ),
+            mapping_value_function_return_parameters: &self
+                .mapping_value_function_return_parameters,
+            mapping_value_function_return_parameter_declarations: &self
+                .mapping_value_function_return_parameter_declarations,
+            mapping_value_function_return_parameter_details:
+                crate::compact::CompactVariableDetailsRef::Parsed(
+                    &self.mapping_value_function_return_parameter_details,
+                ),
+            mapping_value_function_visibility: self.mapping_value_function_visibility,
+            mapping_value_function_state_mutability: self.mapping_value_function_state_mutability,
+            mapping_value_name: &self.mapping_value_name,
+            mapping_value_name_location: &self.mapping_value_name_location,
+            mapping_details: &self.mapping_details,
+        }
+    }
+
+    fn into_wire(self) -> ffi::WireTypeNameResult {
+        ffi::WireTypeNameResult {
+            type_name: self.type_name,
+            array_base_type: self.array_base_type,
+            array_length: self.array_length,
+            array_base_types: self.array_base_types,
+            array_lengths: self.array_lengths,
+            array_length_details: self
+                .array_length_details
+                .into_iter()
+                .map(RustExpressionResult::into_wire)
+                .collect(),
+            elementary_type_token: self.elementary_type_token,
+            elementary_type_first_number: self.elementary_type_first_number,
+            elementary_type_second_number: self.elementary_type_second_number,
+            has_state_mutability: self.has_state_mutability,
+            state_mutability: self.state_mutability,
+            user_defined_path_node: self.user_defined_path_node,
+            user_defined_path: self.user_defined_path,
+            user_defined_path_locations: self.user_defined_path_locations,
+            function_parameters: self.function_parameters,
+            function_parameter_declarations: self.function_parameter_declarations,
+            function_parameter_details: self
+                .function_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            function_return_parameters: self.function_return_parameters,
+            function_return_parameter_declarations: self.function_return_parameter_declarations,
+            function_return_parameter_details: self
+                .function_return_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            function_visibility: self.function_visibility,
+            function_state_mutability: self.function_state_mutability,
+            mapping_key_type: self.mapping_key_type,
+            mapping_key_elementary_token: self.mapping_key_elementary_token,
+            mapping_key_elementary_first_number: self.mapping_key_elementary_first_number,
+            mapping_key_elementary_second_number: self.mapping_key_elementary_second_number,
+            mapping_key_user_defined_path_node: self.mapping_key_user_defined_path_node,
+            mapping_key_user_defined_path: self.mapping_key_user_defined_path,
+            mapping_key_user_defined_path_locations: self.mapping_key_user_defined_path_locations,
+            mapping_key_name: self.mapping_key_name,
+            mapping_key_name_location: self.mapping_key_name_location,
+            mapping_value_type: self.mapping_value_type,
+            mapping_value_elementary_token: self.mapping_value_elementary_token,
+            mapping_value_elementary_first_number: self.mapping_value_elementary_first_number,
+            mapping_value_elementary_second_number: self.mapping_value_elementary_second_number,
+            mapping_value_has_state_mutability: self.mapping_value_has_state_mutability,
+            mapping_value_state_mutability: self.mapping_value_state_mutability,
+            mapping_value_user_defined_path_node: self.mapping_value_user_defined_path_node,
+            mapping_value_user_defined_path: self.mapping_value_user_defined_path,
+            mapping_value_user_defined_path_locations: self
+                .mapping_value_user_defined_path_locations,
+            mapping_value_array_base_types: self.mapping_value_array_base_types,
+            mapping_value_array_lengths: self.mapping_value_array_lengths,
+            mapping_value_array_length_details: self
+                .mapping_value_array_length_details
+                .into_iter()
+                .map(RustExpressionResult::into_wire)
+                .collect(),
+            mapping_value_function_parameters: self.mapping_value_function_parameters,
+            mapping_value_function_parameter_declarations: self
+                .mapping_value_function_parameter_declarations,
+            mapping_value_function_parameter_details: self
+                .mapping_value_function_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            mapping_value_function_return_parameters: self.mapping_value_function_return_parameters,
+            mapping_value_function_return_parameter_declarations: self
+                .mapping_value_function_return_parameter_declarations,
+            mapping_value_function_return_parameter_details: self
+                .mapping_value_function_return_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            mapping_value_function_visibility: self.mapping_value_function_visibility,
+            mapping_value_function_state_mutability: self.mapping_value_function_state_mutability,
+            mapping_value_name: self.mapping_value_name,
+            mapping_value_name_location: self.mapping_value_name_location,
+            mapping_details: self.mapping_details,
+            errors: self.errors,
+        }
+    }
+}
+
+fn clone_rust_expression_details_into_wire(
+    details: &[RustExpressionResult],
+) -> Vec<ffi::WireExpressionResult> {
+    details
+        .iter()
+        .cloned()
+        .map(RustExpressionResult::into_wire)
+        .collect()
+}
+
+fn clone_parsed_variable_details_into_wire(
+    details: &[ParsedVariableDeclaration],
+) -> Vec<ffi::WireVariableDeclarationResult> {
+    details
+        .iter()
+        .cloned()
+        .map(ParsedVariableDeclaration::into_wire)
+        .collect()
+}
+
 pub fn parse_type_name_suffix() -> ffi::WireTypeNameResult {
-    parse_type_name_suffix_with_type(empty_ast_node(), current_node_id())
+    parse_type_name_suffix_parts_with_type(empty_ast_node(), current_node_id()).into_wire()
 }
 
 fn parse_type_name_suffix_with_type(
+    type_name: ffi::WireAstNode,
+    node_id: i64,
+) -> ffi::WireTypeNameResult {
+    parse_type_name_suffix_parts_with_type(type_name, node_id).into_wire()
+}
+
+fn parse_type_name_suffix_parts_with_type(
     mut type_name: ffi::WireAstNode,
     mut node_id: i64,
-) -> ffi::WireTypeNameResult {
+) -> ParsedTypeNameResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut errors = Vec::new();
@@ -4591,26 +7298,26 @@ fn parse_type_name_suffix_with_type(
         advance();
 
         let length = if current_token() != token::TOKEN_RBRACK {
-            let length = parse_expression();
+            let length = parse_expression_compact();
             if parser_errors_have_fatal(&length.errors) {
                 errors.extend(length.errors);
-                return empty_type_name_result(errors);
+                return empty_parsed_type_name_result(errors);
             }
             errors.extend(length.errors.clone());
             let length_node = length.expression.clone();
             if !length_node.present {
-                return empty_type_name_result(errors);
+                return empty_parsed_type_name_result(errors);
             }
             (length_node, length)
         } else {
-            (empty_ast_node(), empty_expression_result(Vec::new()))
+            (empty_ast_node(), RustExpressionResult::empty(Vec::new()))
         };
 
         location.end = current_location().end;
         let rbrack = expect_token(token::TOKEN_RBRACK);
         if !rbrack.errors.is_empty() {
             errors.extend(rbrack.errors);
-            return empty_type_name_result(errors);
+            return empty_parsed_type_name_result(errors);
         }
 
         array_base_type = type_name.clone();
@@ -4629,7 +7336,7 @@ fn parse_type_name_suffix_with_type(
         node_id = type_name.node_id;
     }
 
-    ffi::WireTypeNameResult {
+    ParsedTypeNameResult {
         type_name,
         array_base_type,
         array_length,
@@ -4693,6 +7400,10 @@ pub fn parse_type_name() -> ffi::WireTypeNameResult {
 }
 
 fn parse_type_name_with_node_id(current_node_id: i64) -> ffi::WireTypeNameResult {
+    parse_type_name_parts_with_node_id(current_node_id).into_wire()
+}
+
+fn parse_type_name_parts_with_node_id(current_node_id: i64) -> ParsedTypeNameResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut errors = Vec::new();
@@ -4786,7 +7497,7 @@ fn parse_type_name_with_node_id(current_node_id: i64) -> ffi::WireTypeNameResult
             text: ffi::WireString { bytes: text },
         }
     } else if token == token::TOKEN_FUNCTION {
-        let function_type = parse_function_type_with_node_id(current_node_id);
+        let function_type = parse_function_type_parts_with_node_id(current_node_id);
         errors.extend(function_type.errors);
         function_parameters = function_type.parameters;
         function_parameter_declarations = function_type.parameter_declarations;
@@ -4798,7 +7509,7 @@ fn parse_type_name_with_node_id(current_node_id: i64) -> ffi::WireTypeNameResult
         function_state_mutability = function_type.state_mutability;
         function_type.function_type
     } else if token == token::TOKEN_MAPPING {
-        let mapping = parse_mapping_with_node_id(current_node_id);
+        let mapping = parse_mapping_parts_with_node_id(current_node_id);
         errors.extend(mapping.errors);
         mapping_details = mapping.mapping_details.clone();
         mapping_key_type = mapping.key_type;
@@ -4844,15 +7555,15 @@ fn parse_type_name_with_node_id(current_node_id: i64) -> ffi::WireTypeNameResult
         user_defined_path_locations = type_name.path_locations;
         type_name.type_name
     } else {
-        return empty_type_name_result(vec![fatal_parser_error(3546, "Expected type name")]);
+        return empty_parsed_type_name_result(vec![fatal_parser_error(3546, "Expected type name")]);
     };
 
     if !type_name.present {
-        return empty_type_name_result(errors);
+        return empty_parsed_type_name_result(errors);
     }
-    let type_name = parse_type_name_suffix_with_type(type_name, current_node_id);
+    let type_name = parse_type_name_suffix_parts_with_type(type_name, current_node_id);
     errors.extend(type_name.errors);
-    ffi::WireTypeNameResult {
+    ParsedTypeNameResult {
         type_name: type_name.type_name,
         array_base_type: type_name.array_base_type,
         array_length: type_name.array_length,
@@ -4912,7 +7623,11 @@ fn parse_type_name_with_node_id(current_node_id: i64) -> ffi::WireTypeNameResult
 }
 
 fn empty_type_name_result(errors: Vec<ffi::WireParserError>) -> ffi::WireTypeNameResult {
-    ffi::WireTypeNameResult {
+    empty_parsed_type_name_result(errors).into_wire()
+}
+
+fn empty_parsed_type_name_result(errors: Vec<ffi::WireParserError>) -> ParsedTypeNameResult {
+    ParsedTypeNameResult {
         type_name: empty_ast_node(),
         array_base_type: empty_ast_node(),
         array_length: empty_ast_node(),
@@ -4975,7 +7690,50 @@ pub fn parse_function_type() -> ffi::WireFunctionTypeResult {
     parse_function_type_with_node_id(current_node_id())
 }
 
+#[derive(Clone, Debug)]
+struct ParsedFunctionTypeResult {
+    function_type: ffi::WireAstNode,
+    parameters: ffi::WireAstNode,
+    parameter_declarations: Vec<ffi::WireAstNode>,
+    parameter_details: Vec<ParsedVariableDeclaration>,
+    return_parameters: ffi::WireAstNode,
+    return_parameter_declarations: Vec<ffi::WireAstNode>,
+    return_parameter_details: Vec<ParsedVariableDeclaration>,
+    visibility: u8,
+    state_mutability: u8,
+    errors: Vec<ffi::WireParserError>,
+}
+
+impl ParsedFunctionTypeResult {
+    fn into_wire(self) -> ffi::WireFunctionTypeResult {
+        ffi::WireFunctionTypeResult {
+            function_type: self.function_type,
+            parameters: self.parameters,
+            parameter_declarations: self.parameter_declarations,
+            parameter_details: self
+                .parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            return_parameters: self.return_parameters,
+            return_parameter_declarations: self.return_parameter_declarations,
+            return_parameter_details: self
+                .return_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            visibility: self.visibility,
+            state_mutability: self.state_mutability,
+            errors: self.errors,
+        }
+    }
+}
+
 fn parse_function_type_with_node_id(current_node_id: i64) -> ffi::WireFunctionTypeResult {
+    parse_function_type_parts_with_node_id(current_node_id).into_wire()
+}
+
+fn parse_function_type_parts_with_node_id(current_node_id: i64) -> ParsedFunctionTypeResult {
     assert!(!experimental_solidity_enabled_in_current_source_unit());
 
     let _recursion_guard = RecursionGuard::new();
@@ -4984,19 +7742,19 @@ fn parse_function_type_with_node_id(current_node_id: i64) -> ffi::WireFunctionTy
     let mut errors = Vec::new();
     let function = expect_token(token::TOKEN_FUNCTION);
     if !function.errors.is_empty() {
-        return empty_function_type_result(function.errors);
+        return empty_parsed_function_type_result(function.errors);
     }
 
-    let header = parse_function_header_with_node_id(true, current_node_id);
+    let header = parse_function_header_parts_with_node_id(true, current_node_id);
     if parser_errors_have_fatal(&header.errors) {
-        return empty_function_type_result(header.errors);
+        return empty_parsed_function_type_result(header.errors);
     }
     errors.extend(header.errors);
     assert!(!header.experimental_return_expression.present);
 
     location.end = current_location().end;
     let nodes = [header.parameters.clone(), header.return_parameters.clone()];
-    ffi::WireFunctionTypeResult {
+    ParsedFunctionTypeResult {
         function_type: ffi::WireAstNode {
             present: true,
             node_id: allocate_node_id_after(max_node_id(current_node_id, &nodes)),
@@ -5017,7 +7775,13 @@ fn parse_function_type_with_node_id(current_node_id: i64) -> ffi::WireFunctionTy
 }
 
 fn empty_function_type_result(errors: Vec<ffi::WireParserError>) -> ffi::WireFunctionTypeResult {
-    ffi::WireFunctionTypeResult {
+    empty_parsed_function_type_result(errors).into_wire()
+}
+
+fn empty_parsed_function_type_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ParsedFunctionTypeResult {
+    ParsedFunctionTypeResult {
         function_type: empty_ast_node(),
         parameters: empty_ast_node(),
         parameter_declarations: Vec::new(),
@@ -5035,19 +7799,116 @@ pub fn parse_mapping() -> ffi::WireMappingResult {
     parse_mapping_with_node_id(current_node_id())
 }
 
+#[derive(Clone, Debug)]
+struct ParsedMappingResult {
+    mapping: ffi::WireAstNode,
+    key_type: ffi::WireAstNode,
+    key_type_elementary_token: u32,
+    key_type_elementary_first_number: u32,
+    key_type_elementary_second_number: u32,
+    key_type_user_defined_path_node: ffi::WireAstNode,
+    key_type_user_defined_path: Vec<ffi::WireString>,
+    key_type_user_defined_path_locations: Vec<ffi::WireSourceLocation>,
+    key_name: ffi::WireString,
+    key_name_location: ffi::WireSourceLocation,
+    value_type: ffi::WireAstNode,
+    value_type_elementary_token: u32,
+    value_type_elementary_first_number: u32,
+    value_type_elementary_second_number: u32,
+    value_type_has_state_mutability: bool,
+    value_type_state_mutability: u8,
+    value_type_user_defined_path_node: ffi::WireAstNode,
+    value_type_user_defined_path: Vec<ffi::WireString>,
+    value_type_user_defined_path_locations: Vec<ffi::WireSourceLocation>,
+    value_type_array_base_types: Vec<ffi::WireAstNode>,
+    value_type_array_lengths: Vec<ffi::WireAstNode>,
+    value_type_array_length_details: Vec<RustExpressionResult>,
+    value_type_function_parameters: ffi::WireAstNode,
+    value_type_function_parameter_declarations: Vec<ffi::WireAstNode>,
+    value_type_function_parameter_details: Vec<ParsedVariableDeclaration>,
+    value_type_function_return_parameters: ffi::WireAstNode,
+    value_type_function_return_parameter_declarations: Vec<ffi::WireAstNode>,
+    value_type_function_return_parameter_details: Vec<ParsedVariableDeclaration>,
+    value_type_function_visibility: u8,
+    value_type_function_state_mutability: u8,
+    value_name: ffi::WireString,
+    value_name_location: ffi::WireSourceLocation,
+    mapping_details: Vec<ffi::WireMappingTypeName>,
+    errors: Vec<ffi::WireParserError>,
+}
+
+impl ParsedMappingResult {
+    fn into_wire(self) -> ffi::WireMappingResult {
+        ffi::WireMappingResult {
+            mapping: self.mapping,
+            key_type: self.key_type,
+            key_type_elementary_token: self.key_type_elementary_token,
+            key_type_elementary_first_number: self.key_type_elementary_first_number,
+            key_type_elementary_second_number: self.key_type_elementary_second_number,
+            key_type_user_defined_path_node: self.key_type_user_defined_path_node,
+            key_type_user_defined_path: self.key_type_user_defined_path,
+            key_type_user_defined_path_locations: self.key_type_user_defined_path_locations,
+            key_name: self.key_name,
+            key_name_location: self.key_name_location,
+            value_type: self.value_type,
+            value_type_elementary_token: self.value_type_elementary_token,
+            value_type_elementary_first_number: self.value_type_elementary_first_number,
+            value_type_elementary_second_number: self.value_type_elementary_second_number,
+            value_type_has_state_mutability: self.value_type_has_state_mutability,
+            value_type_state_mutability: self.value_type_state_mutability,
+            value_type_user_defined_path_node: self.value_type_user_defined_path_node,
+            value_type_user_defined_path: self.value_type_user_defined_path,
+            value_type_user_defined_path_locations: self.value_type_user_defined_path_locations,
+            value_type_array_base_types: self.value_type_array_base_types,
+            value_type_array_lengths: self.value_type_array_lengths,
+            value_type_array_length_details: self
+                .value_type_array_length_details
+                .into_iter()
+                .map(RustExpressionResult::into_wire)
+                .collect(),
+            value_type_function_parameters: self.value_type_function_parameters,
+            value_type_function_parameter_declarations: self
+                .value_type_function_parameter_declarations,
+            value_type_function_parameter_details: self
+                .value_type_function_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            value_type_function_return_parameters: self.value_type_function_return_parameters,
+            value_type_function_return_parameter_declarations: self
+                .value_type_function_return_parameter_declarations,
+            value_type_function_return_parameter_details: self
+                .value_type_function_return_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            value_type_function_visibility: self.value_type_function_visibility,
+            value_type_function_state_mutability: self.value_type_function_state_mutability,
+            value_name: self.value_name,
+            value_name_location: self.value_name_location,
+            mapping_details: self.mapping_details,
+            errors: self.errors,
+        }
+    }
+}
+
 fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
+    parse_mapping_parts_with_node_id(current_node_id).into_wire()
+}
+
+fn parse_mapping_parts_with_node_id(current_node_id: i64) -> ParsedMappingResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut location = current_location();
     let mut errors = Vec::new();
     let mapping = expect_token(token::TOKEN_MAPPING);
     if !mapping.errors.is_empty() {
-        return empty_mapping_result(mapping.errors);
+        return empty_parsed_mapping_result(mapping.errors);
     }
 
     let lparen = expect_token(token::TOKEN_LPAREN);
     if !lparen.errors.is_empty() {
-        return empty_mapping_result(lparen.errors);
+        return empty_parsed_mapping_result(lparen.errors);
     }
 
     let key_token = current_token();
@@ -5061,7 +7922,7 @@ fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
         let key_type = parse_current_user_defined_type_name_with_node_id(current_node_id);
         if parser_errors_have_fatal(&key_type.errors) {
             errors.extend(key_type.errors);
-            return empty_mapping_result(errors);
+            return empty_parsed_mapping_result(errors);
         }
         errors.extend(key_type.errors);
         key_type_user_defined_path_node = key_type.path_node;
@@ -5084,13 +7945,13 @@ fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
             text: ffi::WireString { bytes: key_text },
         }
     } else {
-        return empty_mapping_result(vec![fatal_parser_error(
+        return empty_parsed_mapping_result(vec![fatal_parser_error(
             1005,
             "Expected elementary type name or identifier for mapping key type",
         )]);
     };
     if !key_type.present {
-        return empty_mapping_result(errors);
+        return empty_parsed_mapping_result(errors);
     }
 
     let mut key_name = empty_string();
@@ -5105,7 +7966,7 @@ fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
         advance_by(parsed_key_name.tokens_consumed);
         if !parsed_key_name.errors.is_empty() {
             errors.extend(parsed_key_name.errors);
-            return empty_mapping_result(errors);
+            return empty_parsed_mapping_result(errors);
         }
         key_name = parsed_key_name.identifier;
         key_name_location = parsed_key_name.location;
@@ -5114,14 +7975,14 @@ fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
     let arrow = expect_token(token::TOKEN_DOUBLE_ARROW);
     if !arrow.errors.is_empty() {
         errors.extend(arrow.errors);
-        return empty_mapping_result(errors);
+        return empty_parsed_mapping_result(errors);
     }
 
     let node_id = key_type.node_id.max(current_node_id);
-    let parsed_value_type = parse_type_name_with_node_id(node_id);
+    let parsed_value_type = parse_type_name_parts_with_node_id(node_id);
     if parser_errors_have_fatal(&parsed_value_type.errors) {
         errors.extend(parsed_value_type.errors);
-        return empty_mapping_result(errors);
+        return empty_parsed_mapping_result(errors);
     }
     errors.extend(parsed_value_type.errors);
     let mut mapping_details = parsed_value_type.mapping_details;
@@ -5149,7 +8010,7 @@ fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
     let value_type_function_state_mutability = parsed_value_type.function_state_mutability;
     let value_type = parsed_value_type.type_name;
     if !value_type.present {
-        return empty_mapping_result(errors);
+        return empty_parsed_mapping_result(errors);
     }
 
     let mut value_name = empty_string();
@@ -5164,7 +8025,7 @@ fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
         advance_by(parsed_value_name.tokens_consumed);
         if !parsed_value_name.errors.is_empty() {
             errors.extend(parsed_value_name.errors);
-            return empty_mapping_result(errors);
+            return empty_parsed_mapping_result(errors);
         }
         value_name = parsed_value_name.identifier;
         value_name_location = parsed_value_name.location;
@@ -5174,7 +8035,7 @@ fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
     let rparen = expect_token(token::TOKEN_RPAREN);
     if !rparen.errors.is_empty() {
         errors.extend(rparen.errors);
-        return empty_mapping_result(errors);
+        return empty_parsed_mapping_result(errors);
     }
 
     let nodes = [key_type.clone(), value_type.clone()];
@@ -5209,16 +8070,21 @@ fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
             value_type_user_defined_path_locations: value_type_user_defined_path_locations.clone(),
             value_type_array_base_types: value_type_array_base_types.clone(),
             value_type_array_lengths: value_type_array_lengths.clone(),
-            value_type_array_length_details: value_type_array_length_details.clone(),
+            value_type_array_length_details: clone_rust_expression_details_into_wire(
+                &value_type_array_length_details,
+            ),
             value_type_function_parameters: value_type_function_parameters.clone(),
             value_type_function_parameter_declarations: value_type_function_parameter_declarations
                 .clone(),
-            value_type_function_parameter_details: value_type_function_parameter_details.clone(),
+            value_type_function_parameter_details: clone_parsed_variable_details_into_wire(
+                &value_type_function_parameter_details,
+            ),
             value_type_function_return_parameters: value_type_function_return_parameters.clone(),
             value_type_function_return_parameter_declarations:
                 value_type_function_return_parameter_declarations.clone(),
-            value_type_function_return_parameter_details:
-                value_type_function_return_parameter_details.clone(),
+            value_type_function_return_parameter_details: clone_parsed_variable_details_into_wire(
+                &value_type_function_return_parameter_details,
+            ),
             value_type_function_visibility,
             value_type_function_state_mutability,
             value_name: value_name.clone(),
@@ -5226,7 +8092,7 @@ fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
         },
     );
 
-    ffi::WireMappingResult {
+    ParsedMappingResult {
         mapping,
         key_type,
         key_type_elementary_token,
@@ -5265,7 +8131,11 @@ fn parse_mapping_with_node_id(current_node_id: i64) -> ffi::WireMappingResult {
 }
 
 fn empty_mapping_result(errors: Vec<ffi::WireParserError>) -> ffi::WireMappingResult {
-    ffi::WireMappingResult {
+    empty_parsed_mapping_result(errors).into_wire()
+}
+
+fn empty_parsed_mapping_result(errors: Vec<ffi::WireParserError>) -> ParsedMappingResult {
+    ParsedMappingResult {
         mapping: empty_ast_node(),
         key_type: empty_ast_node(),
         key_type_elementary_token: token::TOKEN_ILLEGAL,
@@ -5304,24 +8174,28 @@ fn empty_mapping_result(errors: Vec<ffi::WireParserError>) -> ffi::WireMappingRe
 }
 
 pub fn parse_function_call_list_arguments() -> ffi::WireFunctionCallArguments {
-    parse_function_call_list_arguments_with_errors()
+    parse_function_call_list_arguments_with_errors_compact().into_wire()
 }
 
 fn parse_function_call_list_arguments_with_errors() -> ffi::WireFunctionCallArguments {
+    parse_function_call_list_arguments_with_errors_compact().into_wire()
+}
+
+fn parse_function_call_list_arguments_with_errors_compact() -> RustFunctionCallArguments {
     let _recursion_guard = RecursionGuard::new();
 
     let start_cursor = parser_cursor();
-    let mut ret = empty_function_call_arguments();
+    let mut ret = empty_rust_function_call_arguments();
     if current_token() != token::TOKEN_RPAREN {
-        let argument = parse_expression();
+        let argument = parse_expression_compact();
         if parser_errors_have_fatal(&argument.errors) {
             ret.errors.extend(argument.errors);
-            return function_call_arguments_with_consumed(ret, start_cursor);
+            return rust_function_call_arguments_with_consumed(ret, start_cursor);
         }
         ret.errors.extend(argument.errors.clone());
         let argument_node = argument.expression.clone();
         if !argument_node.present {
-            return function_call_arguments_with_consumed(ret, start_cursor);
+            return rust_function_call_arguments_with_consumed(ret, start_cursor);
         }
         ret.arguments.push(argument_node);
         ret.argument_details.push(argument);
@@ -5331,21 +8205,21 @@ fn parse_function_call_list_arguments_with_errors() -> ffi::WireFunctionCallArgu
                 ret.errors.extend(comma.errors);
                 break;
             }
-            let argument = parse_expression();
+            let argument = parse_expression_compact();
             if parser_errors_have_fatal(&argument.errors) {
                 ret.errors.extend(argument.errors);
-                return function_call_arguments_with_consumed(ret, start_cursor);
+                return rust_function_call_arguments_with_consumed(ret, start_cursor);
             }
             ret.errors.extend(argument.errors.clone());
             let argument_node = argument.expression.clone();
             if !argument_node.present {
-                return function_call_arguments_with_consumed(ret, start_cursor);
+                return rust_function_call_arguments_with_consumed(ret, start_cursor);
             }
             ret.arguments.push(argument_node);
             ret.argument_details.push(argument);
         }
     }
-    function_call_arguments_with_consumed(ret, start_cursor)
+    rust_function_call_arguments_with_consumed(ret, start_cursor)
 }
 
 pub fn create_empty_parameter_list(
@@ -5402,10 +8276,42 @@ fn parse_parameter_list_with_options(
 }
 
 fn parse_parameter_list_with_options_and_node_id(
-    mut options: VarDeclParserOptions,
+    options: VarDeclParserOptions,
     allow_empty: bool,
     current_node_id: i64,
 ) -> ffi::WireParameterListParseResult {
+    parse_parameter_list_parts_with_options_and_node_id(options, allow_empty, current_node_id)
+        .into_wire()
+}
+
+#[derive(Clone, Debug)]
+struct ParsedParameterListParseResult {
+    parameter_list: ffi::WireAstNode,
+    parameters: Vec<ffi::WireAstNode>,
+    parameter_details: Vec<ParsedVariableDeclaration>,
+    errors: Vec<ffi::WireParserError>,
+}
+
+impl ParsedParameterListParseResult {
+    fn into_wire(self) -> ffi::WireParameterListParseResult {
+        ffi::WireParameterListParseResult {
+            parameter_list: self.parameter_list,
+            parameters: self.parameters,
+            parameter_details: self
+                .parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            errors: self.errors,
+        }
+    }
+}
+
+fn parse_parameter_list_parts_with_options_and_node_id(
+    mut options: VarDeclParserOptions,
+    allow_empty: bool,
+    current_node_id: i64,
+) -> ParsedParameterListParseResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut location = current_location();
@@ -5421,18 +8327,13 @@ fn parse_parameter_list_with_options_and_node_id(
         let parameter = parse_postfix_variable_declaration_with_node_id(node_id);
         if parser_errors_have_fatal(&parameter.errors) {
             errors.extend(parameter.errors);
-            return empty_parameter_list_parse_result(errors);
+            return empty_parsed_parameter_list_parse_result(errors);
         }
-        errors.extend(parameter.errors);
-        let mut parameter_detail = empty_variable_declaration_result(Vec::new());
-        parameter_detail.variable_declaration = parameter.variable_declaration;
-        parameter_detail.type_expression = parameter.type_expression;
-        parameter_detail.type_expression_detail = parameter.type_expression_detail;
-        parameter_detail.documentation = parameter.documentation;
-        parameter_detail.name = parameter.name;
-        parameter_detail.name_location = parameter.name_location;
+        let mut parameter = parameter;
+        errors.append(&mut parameter.errors);
+        let parameter_detail = parsed_variable_declaration_from_postfix(parameter, Vec::new());
         if !parameter_detail.variable_declaration.present {
-            return empty_parameter_list_parse_result(errors);
+            return empty_parsed_parameter_list_parse_result(errors);
         }
         location.end = parameter_detail.variable_declaration.location.end;
         node_id = parameter_detail.variable_declaration.node_id.max(node_id);
@@ -5445,7 +8346,7 @@ fn parse_parameter_list_with_options_and_node_id(
             location,
             text: empty_string(),
         };
-        return ffi::WireParameterListParseResult {
+        return ParsedParameterListParseResult {
             parameter_list,
             parameters,
             parameter_details,
@@ -5455,7 +8356,7 @@ fn parse_parameter_list_with_options_and_node_id(
 
     let lparen = expect_token(token::TOKEN_LPAREN);
     if !lparen.errors.is_empty() {
-        return empty_parameter_list_parse_result(lparen.errors);
+        return empty_parsed_parameter_list_parse_result(lparen.errors);
     }
 
     if !allow_empty || current_token() != token::TOKEN_RPAREN {
@@ -5463,28 +8364,22 @@ fn parse_parameter_list_with_options_and_node_id(
             let parameter = parse_postfix_variable_declaration_with_node_id(node_id);
             if parser_errors_have_fatal(&parameter.errors) {
                 errors.extend(parameter.errors);
-                return empty_parameter_list_parse_result(errors);
+                return empty_parsed_parameter_list_parse_result(errors);
             }
-            errors.extend(parameter.errors);
-            let mut parameter_detail = empty_variable_declaration_result(Vec::new());
-            parameter_detail.variable_declaration = parameter.variable_declaration;
-            parameter_detail.type_expression = parameter.type_expression;
-            parameter_detail.type_expression_detail = parameter.type_expression_detail;
-            parameter_detail.documentation = parameter.documentation;
-            parameter_detail.name = parameter.name;
-            parameter_detail.name_location = parameter.name_location;
-            parameter_detail
+            let mut parameter = parameter;
+            errors.append(&mut parameter.errors);
+            parsed_variable_declaration_from_postfix(parameter, Vec::new())
         } else {
-            let parameter = parse_single_parameter_declaration_with_node_id(options, node_id);
+            let parameter = parse_single_parameter_declaration_parts_with_node_id(options, node_id);
             if parser_errors_have_fatal(&parameter.errors) {
                 errors.extend(parameter.errors);
-                return empty_parameter_list_parse_result(errors);
+                return empty_parsed_parameter_list_parse_result(errors);
             }
             errors.extend(parameter.errors.clone());
             parameter
         };
         if !parameter.variable_declaration.present {
-            return empty_parameter_list_parse_result(errors);
+            return empty_parsed_parameter_list_parse_result(errors);
         }
         node_id = parameter.variable_declaration.node_id.max(node_id);
         parameters.push(parameter.variable_declaration.clone());
@@ -5495,41 +8390,36 @@ fn parse_parameter_list_with_options_and_node_id(
                     7591,
                     "Unexpected trailing comma in parameter list.",
                 ));
-                return empty_parameter_list_parse_result(errors);
+                return empty_parsed_parameter_list_parse_result(errors);
             }
 
             let comma = expect_token(token::TOKEN_COMMA);
             if !comma.errors.is_empty() {
                 errors.extend(comma.errors);
-                return empty_parameter_list_parse_result(errors);
+                return empty_parsed_parameter_list_parse_result(errors);
             }
 
             let parameter = if experimental_solidity_enabled_in_current_source_unit() {
                 let parameter = parse_postfix_variable_declaration_with_node_id(node_id);
                 if parser_errors_have_fatal(&parameter.errors) {
                     errors.extend(parameter.errors);
-                    return empty_parameter_list_parse_result(errors);
+                    return empty_parsed_parameter_list_parse_result(errors);
                 }
-                errors.extend(parameter.errors);
-                let mut parameter_detail = empty_variable_declaration_result(Vec::new());
-                parameter_detail.variable_declaration = parameter.variable_declaration;
-                parameter_detail.type_expression = parameter.type_expression;
-                parameter_detail.type_expression_detail = parameter.type_expression_detail;
-                parameter_detail.documentation = parameter.documentation;
-                parameter_detail.name = parameter.name;
-                parameter_detail.name_location = parameter.name_location;
-                parameter_detail
+                let mut parameter = parameter;
+                errors.append(&mut parameter.errors);
+                parsed_variable_declaration_from_postfix(parameter, Vec::new())
             } else {
-                let parameter = parse_single_parameter_declaration_with_node_id(options, node_id);
+                let parameter =
+                    parse_single_parameter_declaration_parts_with_node_id(options, node_id);
                 if parser_errors_have_fatal(&parameter.errors) {
                     errors.extend(parameter.errors);
-                    return empty_parameter_list_parse_result(errors);
+                    return empty_parsed_parameter_list_parse_result(errors);
                 }
                 errors.extend(parameter.errors.clone());
                 parameter
             };
             if !parameter.variable_declaration.present {
-                return empty_parameter_list_parse_result(errors);
+                return empty_parsed_parameter_list_parse_result(errors);
             }
             node_id = parameter.variable_declaration.node_id.max(node_id);
             parameters.push(parameter.variable_declaration.clone());
@@ -5541,7 +8431,7 @@ fn parse_parameter_list_with_options_and_node_id(
     let rparen = expect_token(token::TOKEN_RPAREN);
     if !rparen.errors.is_empty() {
         errors.extend(rparen.errors);
-        return empty_parameter_list_parse_result(errors);
+        return empty_parsed_parameter_list_parse_result(errors);
     }
 
     let parameter_list = ffi::WireAstNode {
@@ -5552,7 +8442,7 @@ fn parse_parameter_list_with_options_and_node_id(
         text: empty_string(),
     };
 
-    ffi::WireParameterListParseResult {
+    ParsedParameterListParseResult {
         parameter_list,
         parameters,
         parameter_details,
@@ -5563,7 +8453,13 @@ fn parse_parameter_list_with_options_and_node_id(
 fn empty_parameter_list_parse_result(
     errors: Vec<ffi::WireParserError>,
 ) -> ffi::WireParameterListParseResult {
-    ffi::WireParameterListParseResult {
+    empty_parsed_parameter_list_parse_result(errors).into_wire()
+}
+
+fn empty_parsed_parameter_list_parse_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ParsedParameterListParseResult {
+    ParsedParameterListParseResult {
         parameter_list: empty_ast_node(),
         parameters: Vec::new(),
         parameter_details: Vec::new(),
@@ -5581,32 +8477,372 @@ fn parse_single_parameter_declaration_with_node_id(
     options: VarDeclParserOptions,
     current_node_id: i64,
 ) -> ffi::WireVariableDeclarationResult {
+    parse_single_parameter_declaration_parts_with_node_id(options, current_node_id).into_wire()
+}
+
+fn parse_single_parameter_declaration_parts_with_node_id(
+    options: VarDeclParserOptions,
+    current_node_id: i64,
+) -> ParsedVariableDeclaration {
     if experimental_solidity_enabled_in_current_source_unit() {
         let parameter = parse_postfix_variable_declaration_with_node_id(current_node_id);
         if parser_errors_have_fatal(&parameter.errors) {
-            return empty_variable_declaration_result(parameter.errors);
+            return empty_parsed_variable_declaration(parameter.errors);
         }
-        let mut result = empty_variable_declaration_result(parameter.errors);
-        result.variable_declaration = parameter.variable_declaration;
-        result.type_expression = parameter.type_expression;
-        result.type_expression_detail = parameter.type_expression_detail;
-        result.documentation = parameter.documentation;
-        result.name = parameter.name;
-        result.name_location = parameter.name_location;
-        result
+        let mut parameter = parameter;
+        let errors = std::mem::take(&mut parameter.errors);
+        parsed_variable_declaration_from_postfix(parameter, errors)
     } else {
-        parse_variable_declaration_with_options(options, empty_ast_node(), current_node_id)
+        parse_variable_declaration_parts_with_options(options, empty_ast_node(), current_node_id)
     }
 }
 
-pub fn parse_block() -> ffi::WireBlockResult {
-    parse_block_with_options(false, empty_string())
+fn parsed_variable_declaration_from_postfix(
+    parameter: ffi::WirePostfixVariableDeclarationResult,
+    errors: Vec<ffi::WireParserError>,
+) -> ParsedVariableDeclaration {
+    let mut result = empty_parsed_variable_declaration(errors);
+    result.variable_declaration = parameter.variable_declaration;
+    result.type_expression = parameter.type_expression;
+    result.type_expression_detail =
+        RustExpressionResult::from_wire(parameter.type_expression_detail);
+    result.documentation = parameter.documentation;
+    result.name = parameter.name;
+    result.name_location = parameter.name_location;
+    result
 }
 
-fn parse_block_with_options(
-    allow_unchecked: bool,
-    doc_string: ffi::WireString,
-) -> ffi::WireBlockResult {
+#[derive(Clone, Debug)]
+pub(crate) struct RustBlockResult {
+    pub(crate) block: ffi::WireAstNode,
+    pub(crate) unchecked: bool,
+    pub(crate) statements: Vec<ffi::WireAstNode>,
+    pub(crate) statement_details: Vec<RustStatementResult>,
+    pub(crate) errors: Vec<ffi::WireParserError>,
+}
+
+impl RustBlockResult {
+    fn into_wire(self) -> ffi::WireBlockResult {
+        ffi::WireBlockResult {
+            block: self.block,
+            unchecked: self.unchecked,
+            statements: self.statements,
+            statement_details: into_wire_statement_details(self.statement_details),
+            errors: self.errors,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RustTryCatchClauseResult {
+    pub(crate) try_catch_clause: ffi::WireAstNode,
+    pub(crate) error_name: ffi::WireString,
+    pub(crate) error_parameters: ffi::WireAstNode,
+    pub(crate) error_parameter_declarations: Vec<ffi::WireAstNode>,
+    pub(crate) error_parameter_details: Vec<ParsedVariableDeclaration>,
+    pub(crate) block: ffi::WireAstNode,
+    pub(crate) block_unchecked: bool,
+    pub(crate) block_statements: Vec<ffi::WireAstNode>,
+    pub(crate) block_statement_details: Vec<RustStatementResult>,
+    pub(crate) errors: Vec<ffi::WireParserError>,
+}
+
+impl RustTryCatchClauseResult {
+    fn into_wire(self) -> ffi::WireTryCatchClauseResult {
+        ffi::WireTryCatchClauseResult {
+            try_catch_clause: self.try_catch_clause,
+            error_name: self.error_name,
+            error_parameters: self.error_parameters,
+            error_parameter_declarations: self.error_parameter_declarations,
+            error_parameter_details: self
+                .error_parameter_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            block: self.block,
+            block_unchecked: self.block_unchecked,
+            block_statements: self.block_statements,
+            block_statement_details: into_wire_statement_details(self.block_statement_details),
+            errors: self.errors,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RustStatementResult {
+    pub(crate) statement: ffi::WireAstNode,
+    pub(crate) data: RustStatementData,
+    pub(crate) errors: Vec<ffi::WireParserError>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum RustStatementData {
+    Empty,
+    Block {
+        unchecked: bool,
+        statements: Vec<ffi::WireAstNode>,
+        statement_details: Vec<RustStatementResult>,
+    },
+    InlineAssembly {
+        flags: Vec<ffi::WireString>,
+        block_location: ffi::WireSourceLocation,
+    },
+    If {
+        condition_expression: ffi::WireAstNode,
+        condition_expression_detail: RustExpressionResult,
+        true_body: ffi::WireAstNode,
+        true_body_detail: Box<RustStatementResult>,
+        false_body: ffi::WireAstNode,
+        false_body_detail: Option<Box<RustStatementResult>>,
+    },
+    Loop {
+        condition_expression: ffi::WireAstNode,
+        condition_expression_detail: RustExpressionResult,
+        body: ffi::WireAstNode,
+        body_detail: Box<RustStatementResult>,
+        is_do_while: bool,
+    },
+    Try {
+        external_call: ffi::WireAstNode,
+        external_call_detail: RustExpressionResult,
+        clauses: Vec<ffi::WireAstNode>,
+        clause_details: Vec<RustTryCatchClauseResult>,
+        clause_block_statement_details: Vec<RustStatementResult>,
+        clause_error_names: Vec<ffi::WireString>,
+        clause_error_parameters: Vec<ffi::WireAstNode>,
+        clause_blocks: Vec<ffi::WireAstNode>,
+    },
+    For {
+        init_expression: ffi::WireAstNode,
+        init_expression_detail: Option<Box<RustStatementResult>>,
+        condition_expression: ffi::WireAstNode,
+        condition_expression_detail: Option<RustExpressionResult>,
+        loop_expression: ffi::WireAstNode,
+        loop_expression_detail: Option<Box<RustStatementResult>>,
+        body: ffi::WireAstNode,
+        body_detail: Box<RustStatementResult>,
+    },
+    Emit {
+        event_call: ffi::WireAstNode,
+        event_call_callee: ffi::WireAstNode,
+        event_call_callee_detail: RustExpressionResult,
+        event_call_arguments: Vec<ffi::WireAstNode>,
+        event_call_argument_details: Vec<RustExpressionResult>,
+        event_call_parameter_names: Vec<ffi::WireString>,
+        event_call_parameter_name_locations: Vec<ffi::WireSourceLocation>,
+    },
+    Revert {
+        error_call: ffi::WireAstNode,
+        error_call_callee: ffi::WireAstNode,
+        error_call_callee_detail: RustExpressionResult,
+        error_call_arguments: Vec<ffi::WireAstNode>,
+        error_call_argument_details: Vec<RustExpressionResult>,
+        error_call_parameter_names: Vec<ffi::WireString>,
+        error_call_parameter_name_locations: Vec<ffi::WireSourceLocation>,
+    },
+    Expression {
+        expression: ffi::WireAstNode,
+        expression_detail: Option<RustExpressionResult>,
+    },
+    VariableDeclaration {
+        variables: Vec<ffi::WireAstNode>,
+        variable_details: Vec<ParsedVariableDeclaration>,
+        initial_value: ffi::WireAstNode,
+        initial_value_detail: Option<RustExpressionResult>,
+    },
+}
+
+impl RustStatementResult {
+    fn new(statement: ffi::WireAstNode, errors: Vec<ffi::WireParserError>) -> Self {
+        Self {
+            statement,
+            data: RustStatementData::Empty,
+            errors,
+        }
+    }
+
+    fn empty(errors: Vec<ffi::WireParserError>) -> Self {
+        Self::new(empty_ast_node(), errors)
+    }
+
+    fn into_wire(self) -> ffi::WireStatementResult {
+        let mut result = statement_result(self.statement, self.errors);
+        match self.data {
+            RustStatementData::Empty => {}
+            RustStatementData::Block {
+                unchecked,
+                statements,
+                statement_details,
+            } => {
+                result.block_unchecked = unchecked;
+                result.block_statements = statements;
+                result.block_statement_details = into_wire_statement_details(statement_details);
+            }
+            RustStatementData::InlineAssembly {
+                flags,
+                block_location,
+            } => {
+                result.inline_assembly_flags = flags;
+                result.inline_assembly_block_location = block_location;
+            }
+            RustStatementData::If {
+                condition_expression,
+                condition_expression_detail,
+                true_body,
+                true_body_detail,
+                false_body,
+                false_body_detail,
+            } => {
+                result.condition_expression = condition_expression;
+                result.condition_expression_detail = vec![condition_expression_detail.into_wire()];
+                result.true_body = true_body;
+                result.true_body_detail = vec![(*true_body_detail).into_wire()];
+                result.false_body = false_body;
+                result.false_body_detail = false_body_detail
+                    .map(|detail| vec![(*detail).into_wire()])
+                    .unwrap_or_default();
+            }
+            RustStatementData::Loop {
+                condition_expression,
+                condition_expression_detail,
+                body,
+                body_detail,
+                is_do_while,
+            } => {
+                result.condition_expression = condition_expression;
+                result.condition_expression_detail = vec![condition_expression_detail.into_wire()];
+                result.body = body;
+                result.body_detail = vec![(*body_detail).into_wire()];
+                result.is_do_while = is_do_while;
+            }
+            RustStatementData::Try {
+                external_call,
+                external_call_detail,
+                clauses,
+                clause_details,
+                clause_block_statement_details,
+                clause_error_names,
+                clause_error_parameters,
+                clause_blocks,
+            } => {
+                result.external_call = external_call;
+                result.external_call_detail = vec![external_call_detail.into_wire()];
+                result.clauses = clauses;
+                result.clause_details = clause_details
+                    .into_iter()
+                    .map(RustTryCatchClauseResult::into_wire)
+                    .collect();
+                result.clause_block_statement_details =
+                    into_wire_statement_details(clause_block_statement_details);
+                result.clause_error_names = clause_error_names;
+                result.clause_error_parameters = clause_error_parameters;
+                result.clause_blocks = clause_blocks;
+            }
+            RustStatementData::For {
+                init_expression,
+                init_expression_detail,
+                condition_expression,
+                condition_expression_detail,
+                loop_expression,
+                loop_expression_detail,
+                body,
+                body_detail,
+            } => {
+                result.init_expression = init_expression;
+                result.init_expression_detail = init_expression_detail
+                    .map(|detail| vec![(*detail).into_wire()])
+                    .unwrap_or_default();
+                result.condition_expression = condition_expression;
+                result.condition_expression_detail = condition_expression_detail
+                    .map(|detail| vec![detail.into_wire()])
+                    .unwrap_or_default();
+                result.loop_expression = loop_expression;
+                result.loop_expression_detail = loop_expression_detail
+                    .map(|detail| vec![(*detail).into_wire()])
+                    .unwrap_or_default();
+                result.body = body;
+                result.body_detail = vec![(*body_detail).into_wire()];
+            }
+            RustStatementData::Emit {
+                event_call,
+                event_call_callee,
+                event_call_callee_detail,
+                event_call_arguments,
+                event_call_argument_details,
+                event_call_parameter_names,
+                event_call_parameter_name_locations,
+            } => {
+                result.event_call = event_call;
+                result.event_call_callee = event_call_callee;
+                result.event_call_callee_detail = vec![event_call_callee_detail.into_wire()];
+                result.event_call_arguments = event_call_arguments;
+                result.event_call_argument_details =
+                    into_wire_expression_details(event_call_argument_details);
+                result.event_call_parameter_names = event_call_parameter_names;
+                result.event_call_parameter_name_locations = event_call_parameter_name_locations;
+            }
+            RustStatementData::Revert {
+                error_call,
+                error_call_callee,
+                error_call_callee_detail,
+                error_call_arguments,
+                error_call_argument_details,
+                error_call_parameter_names,
+                error_call_parameter_name_locations,
+            } => {
+                result.error_call = error_call;
+                result.error_call_callee = error_call_callee;
+                result.error_call_callee_detail = vec![error_call_callee_detail.into_wire()];
+                result.error_call_arguments = error_call_arguments;
+                result.error_call_argument_details =
+                    into_wire_expression_details(error_call_argument_details);
+                result.error_call_parameter_names = error_call_parameter_names;
+                result.error_call_parameter_name_locations = error_call_parameter_name_locations;
+            }
+            RustStatementData::Expression {
+                expression,
+                expression_detail,
+            } => {
+                result.expression = expression;
+                result.expression_detail = expression_detail
+                    .map(|detail| vec![detail.into_wire()])
+                    .unwrap_or_default();
+            }
+            RustStatementData::VariableDeclaration {
+                variables,
+                variable_details,
+                initial_value,
+                initial_value_detail,
+            } => {
+                result.variables = variables;
+                result.variable_details = variable_details
+                    .into_iter()
+                    .map(ParsedVariableDeclaration::into_wire)
+                    .collect();
+                result.initial_value = initial_value;
+                result.initial_value_detail = initial_value_detail
+                    .map(|detail| vec![detail.into_wire()])
+                    .unwrap_or_default();
+            }
+        }
+        result
+    }
+}
+
+fn into_wire_statement_details(
+    statement_details: Vec<RustStatementResult>,
+) -> Vec<ffi::WireStatementResult> {
+    statement_details
+        .into_iter()
+        .map(RustStatementResult::into_wire)
+        .collect()
+}
+
+pub fn parse_block() -> ffi::WireBlockResult {
+    parse_block_with_options(false, empty_string()).into_wire()
+}
+
+fn parse_block_with_options(allow_unchecked: bool, doc_string: ffi::WireString) -> RustBlockResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut location = current_location();
@@ -5651,7 +8887,7 @@ fn parse_block_with_options(
         return empty_block_result(errors);
     }
 
-    ffi::WireBlockResult {
+    RustBlockResult {
         block: ffi::WireAstNode {
             present: true,
             node_id: allocate_node_id_after(max_node_id(current_node_id(), &statements)),
@@ -5670,8 +8906,8 @@ fn parse_block_with_options(
     }
 }
 
-fn empty_block_result(errors: Vec<ffi::WireParserError>) -> ffi::WireBlockResult {
-    ffi::WireBlockResult {
+fn empty_block_result(errors: Vec<ffi::WireParserError>) -> RustBlockResult {
+    RustBlockResult {
         block: empty_ast_node(),
         unchecked: false,
         statements: Vec::new(),
@@ -5681,10 +8917,10 @@ fn empty_block_result(errors: Vec<ffi::WireParserError>) -> ffi::WireBlockResult
 }
 
 pub fn parse_statement() -> ffi::WireStatementResult {
-    parse_statement_with_options(false)
+    parse_statement_with_options(false).into_wire()
 }
 
-fn parse_statement_with_options(allow_unchecked: bool) -> ffi::WireStatementResult {
+fn parse_statement_with_options(allow_unchecked: bool) -> RustStatementResult {
     let _recursion_guard = RecursionGuard::new();
 
     let doc_string = current_comment_literal();
@@ -5695,46 +8931,48 @@ fn parse_statement_with_options(allow_unchecked: bool) -> ffi::WireStatementResu
         token::TOKEN_IF => {
             let statement = parse_if_statement_with_doc(doc_string);
             if parser_errors_have_fatal(&statement.errors) {
-                return empty_statement_result(statement.errors);
+                return RustStatementResult::empty(statement.errors);
             }
             return statement;
         }
         token::TOKEN_WHILE => {
             let statement = parse_while_statement_with_doc(doc_string);
             if parser_errors_have_fatal(&statement.errors) {
-                return empty_statement_result(statement.errors);
+                return RustStatementResult::empty(statement.errors);
             }
             return statement;
         }
         token::TOKEN_DO => {
             let statement = parse_do_while_statement_with_doc(doc_string);
             if parser_errors_have_fatal(&statement.errors) {
-                return empty_statement_result(statement.errors);
+                return RustStatementResult::empty(statement.errors);
             }
             return statement;
         }
         token::TOKEN_FOR => {
             let statement = parse_for_statement_with_doc(doc_string);
             if parser_errors_have_fatal(&statement.errors) {
-                return empty_statement_result(statement.errors);
+                return RustStatementResult::empty(statement.errors);
             }
             return statement;
         }
         token::TOKEN_UNCHECKED | token::TOKEN_LBRACE => {
             let block = parse_block_with_options(allow_unchecked, doc_string);
             if parser_errors_have_fatal(&block.errors) {
-                return empty_statement_result(block.errors);
+                return RustStatementResult::empty(block.errors);
             }
-            let mut result = statement_result(block.block, block.errors);
-            result.block_unchecked = block.unchecked;
-            result.block_statements = block.statements;
-            result.block_statement_details = block.statement_details;
+            let mut result = RustStatementResult::new(block.block, block.errors);
+            result.data = RustStatementData::Block {
+                unchecked: block.unchecked,
+                statements: block.statements,
+                statement_details: block.statement_details,
+            };
             return result;
         }
         token::TOKEN_CONTINUE => {
             let location = current_location();
             advance();
-            statement_result(
+            RustStatementResult::new(
                 ffi::WireAstNode {
                     present: true,
                     node_id: allocate_node_id_after(current_node_id()),
@@ -5748,7 +8986,7 @@ fn parse_statement_with_options(allow_unchecked: bool) -> ffi::WireStatementResu
         token::TOKEN_BREAK => {
             let location = current_location();
             advance();
-            statement_result(
+            RustStatementResult::new(
                 ffi::WireAstNode {
                     present: true,
                     node_id: allocate_node_id_after(current_node_id()),
@@ -5764,19 +9002,19 @@ fn parse_statement_with_options(allow_unchecked: bool) -> ffi::WireStatementResu
             let mut return_errors = Vec::new();
             advance();
             let (expression, expression_detail) = if current_token() != token::TOKEN_SEMICOLON {
-                let parsed_expression = parse_expression();
+                let parsed_expression = parse_expression_compact();
                 if parser_errors_have_fatal(&parsed_expression.errors) {
-                    return empty_statement_result(parsed_expression.errors);
+                    return RustStatementResult::empty(parsed_expression.errors);
                 }
                 return_errors.extend(parsed_expression.errors.clone());
                 let expression = parsed_expression.expression.clone();
                 if !expression.present {
-                    return empty_statement_result(return_errors);
+                    return RustStatementResult::empty(return_errors);
                 }
-                (expression, parsed_expression)
+                (expression, Some(parsed_expression))
             } else {
                 location.end = current_location().end;
-                (empty_ast_node(), empty_expression_result(Vec::new()))
+                (empty_ast_node(), None)
             };
             if expression.present {
                 location.end = expression.location.end;
@@ -5788,15 +9026,17 @@ fn parse_statement_with_options(allow_unchecked: bool) -> ffi::WireStatementResu
                 location,
                 text: doc_string.clone(),
             };
-            let mut result = statement_result(statement, return_errors);
-            result.expression = expression;
-            result.expression_detail = expression_detail;
+            let mut result = RustStatementResult::new(statement, return_errors);
+            result.data = RustStatementData::Expression {
+                expression,
+                expression_detail,
+            };
             result
         }
         token::TOKEN_THROW => {
             let location = current_location();
             advance();
-            statement_result(
+            RustStatementResult::new(
                 ffi::WireAstNode {
                     present: true,
                     node_id: allocate_node_id_after(current_node_id()),
@@ -5810,26 +9050,28 @@ fn parse_statement_with_options(allow_unchecked: bool) -> ffi::WireStatementResu
         token::TOKEN_TRY => {
             let statement = parse_try_statement_with_doc(doc_string);
             if parser_errors_have_fatal(&statement.errors) {
-                return empty_statement_result(statement.errors);
+                return RustStatementResult::empty(statement.errors);
             }
             return statement;
         }
         token::TOKEN_ASSEMBLY => {
             let inline_assembly = parse_inline_assembly_with_doc(doc_string);
             if parser_errors_have_fatal(&inline_assembly.errors) {
-                return empty_statement_result(inline_assembly.errors);
+                return RustStatementResult::empty(inline_assembly.errors);
             }
             let mut result =
-                statement_result(inline_assembly.inline_assembly, inline_assembly.errors);
-            result.inline_assembly_flags = inline_assembly.flags;
-            result.inline_assembly_block_location = inline_assembly.block_location;
+                RustStatementResult::new(inline_assembly.inline_assembly, inline_assembly.errors);
+            result.data = RustStatementData::InlineAssembly {
+                flags: inline_assembly.flags,
+                block_location: inline_assembly.block_location,
+            };
             return result;
         }
         token::TOKEN_EMIT => {
             let mut emit_statement = parse_emit_statement_with_doc(doc_string.clone());
             if parser_errors_have_fatal(&emit_statement.errors) {
                 errors.extend(std::mem::take(&mut emit_statement.errors));
-                return empty_statement_result(errors);
+                return RustStatementResult::empty(errors);
             }
             emit_statement
         }
@@ -5839,13 +9081,13 @@ fn parse_statement_with_options(allow_unchecked: bool) -> ffi::WireStatementResu
                 let mut revert_statement = parse_revert_statement_with_doc(doc_string.clone());
                 if parser_errors_have_fatal(&revert_statement.errors) {
                     errors.extend(std::mem::take(&mut revert_statement.errors));
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 revert_statement
             } else if inside_modifier() && current_literal().bytes == b"_" {
                 let location = current_location();
                 advance();
-                statement_result(
+                RustStatementResult::new(
                     ffi::WireAstNode {
                         present: true,
                         node_id: allocate_node_id_after(current_node_id()),
@@ -5859,7 +9101,7 @@ fn parse_statement_with_options(allow_unchecked: bool) -> ffi::WireStatementResu
                 let mut statement = parse_simple_statement_with_doc(doc_string.clone());
                 if parser_errors_have_fatal(&statement.errors) {
                     errors.extend(std::mem::take(&mut statement.errors));
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 statement
             }
@@ -5868,20 +9110,20 @@ fn parse_statement_with_options(allow_unchecked: bool) -> ffi::WireStatementResu
             let mut statement = parse_simple_statement_with_doc(doc_string.clone());
             if parser_errors_have_fatal(&statement.errors) {
                 errors.extend(std::mem::take(&mut statement.errors));
-                return empty_statement_result(errors);
+                return RustStatementResult::empty(errors);
             }
             statement
         }
     };
     errors.extend(std::mem::take(&mut result.errors));
     if !result.statement.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
     let semicolon = expect_token(token::TOKEN_SEMICOLON);
     if !semicolon.errors.is_empty() {
         errors.extend(semicolon.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
     if result.statement.text.bytes.is_empty() {
@@ -5938,7 +9180,8 @@ fn parse_inline_assembly_with_doc(doc_string: ffi::WireString) -> ffi::WireInlin
     }
 
     set_scanner_mode_yul_for_current_inline_block();
-    let yul_result = match parse_yul_inline() {
+    let yul_result = parse_yul_inline();
+    let yul_result = match yul_result {
         Ok(result) => result,
         Err(yul_errors) => {
             errors.extend(yul_errors);
@@ -7829,8 +11072,8 @@ fn yul_unsupported_type_error() -> ffi::WireParserError {
 }
 
 fn current_yul_type_annotation_location() -> ffi::WireSourceLocation {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state_mut(|state| {
+        state.ensure_current_token();
         let Some(current) = state.tokens.get(state.cursor) else {
             return empty_source_location();
         };
@@ -8148,66 +11391,66 @@ fn check_yul_break_continue_position(
 }
 
 pub fn parse_if_statement() -> ffi::WireStatementResult {
-    parse_if_statement_with_doc(empty_string())
+    parse_if_statement_with_doc(empty_string()).into_wire()
 }
 
-fn parse_if_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+fn parse_if_statement_with_doc(doc_string: ffi::WireString) -> RustStatementResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut location = current_location();
     let mut errors = Vec::new();
     let if_token = expect_token(token::TOKEN_IF);
     if !if_token.errors.is_empty() {
-        return empty_statement_result(if_token.errors);
+        return RustStatementResult::empty(if_token.errors);
     }
 
     let lparen = expect_token(token::TOKEN_LPAREN);
     if !lparen.errors.is_empty() {
-        return empty_statement_result(lparen.errors);
+        return RustStatementResult::empty(lparen.errors);
     }
 
-    let condition_detail = parse_expression();
+    let condition_detail = parse_expression_compact();
     if parser_errors_have_fatal(&condition_detail.errors) {
         errors.extend(condition_detail.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     errors.extend(condition_detail.errors.clone());
     let condition = condition_detail.expression.clone();
     if !condition.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     let rparen = expect_token(token::TOKEN_RPAREN);
     if !rparen.errors.is_empty() {
         errors.extend(rparen.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
-    let true_body_detail = parse_statement();
+    let true_body_detail = parse_statement_with_options(false);
     if parser_errors_have_fatal(&true_body_detail.errors) {
         errors.extend(true_body_detail.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     errors.extend(true_body_detail.errors.clone());
     let true_body = true_body_detail.statement.clone();
     if !true_body.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
     let mut false_body = empty_ast_node();
-    let mut false_body_detail = Vec::new();
+    let mut false_body_detail = None;
     if current_token() == token::TOKEN_ELSE {
         advance();
-        let parsed_false_body = parse_statement();
+        let parsed_false_body = parse_statement_with_options(false);
         if parser_errors_have_fatal(&parsed_false_body.errors) {
             errors.extend(parsed_false_body.errors);
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         errors.extend(parsed_false_body.errors.clone());
         false_body = parsed_false_body.statement.clone();
         if !false_body.present {
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
-        false_body_detail.push(parsed_false_body);
+        false_body_detail = Some(Box::new(parsed_false_body));
         location.end = false_body.location.end;
     } else {
         location.end = true_body.location.end;
@@ -8221,39 +11464,41 @@ fn parse_if_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatemen
         location,
         text: doc_string,
     };
-    let mut result = statement_result(statement, errors);
-    result.condition_expression = condition;
-    result.condition_expression_detail = condition_detail;
-    result.true_body = true_body;
-    result.true_body_detail.push(true_body_detail);
-    result.false_body = false_body;
-    result.false_body_detail = false_body_detail;
+    let mut result = RustStatementResult::new(statement, errors);
+    result.data = RustStatementData::If {
+        condition_expression: condition,
+        condition_expression_detail: condition_detail,
+        true_body,
+        true_body_detail: Box::new(true_body_detail),
+        false_body,
+        false_body_detail,
+    };
     result
 }
 
 pub fn parse_try_statement() -> ffi::WireStatementResult {
-    parse_try_statement_with_doc(empty_string())
+    parse_try_statement_with_doc(empty_string()).into_wire()
 }
 
-fn parse_try_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+fn parse_try_statement_with_doc(doc_string: ffi::WireString) -> RustStatementResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut location = current_location();
     let mut errors = Vec::new();
     let try_token = expect_token(token::TOKEN_TRY);
     if !try_token.errors.is_empty() {
-        return empty_statement_result(try_token.errors);
+        return RustStatementResult::empty(try_token.errors);
     }
 
-    let external_call_detail = parse_expression();
+    let external_call_detail = parse_expression_compact();
     if parser_errors_have_fatal(&external_call_detail.errors) {
         errors.extend(external_call_detail.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     errors.extend(external_call_detail.errors.clone());
     let external_call = external_call_detail.expression.clone();
     if !external_call.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     let mut clauses = Vec::new();
     let mut clause_details = Vec::new();
@@ -8272,18 +11517,18 @@ fn parse_try_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStateme
             allow_location_specifier: true,
             ..VarDeclParserOptions::default()
         };
-        let returns_parameters = parse_parameter_list_with_options_and_node_id(
+        let returns_parameters = parse_parameter_list_parts_with_options_and_node_id(
             options,
             false,
             external_call.node_id.max(current_node_id()),
         );
         if parser_errors_have_fatal(&returns_parameters.errors) {
             errors.extend(returns_parameters.errors);
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         errors.extend(returns_parameters.errors);
         if !returns_parameters.parameter_list.present {
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         returns_parameter_declarations = returns_parameters.parameters;
         returns_parameter_details = returns_parameters.parameter_details;
@@ -8292,15 +11537,15 @@ fn parse_try_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStateme
         empty_ast_node()
     };
 
-    let success_block = parse_block();
+    let success_block = parse_block_with_options(false, empty_string());
     if parser_errors_have_fatal(&success_block.errors) {
         errors.extend(success_block.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     errors.extend(success_block.errors.clone());
     let success_block_node = success_block.block.clone();
     if !success_block_node.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     let success_clause = create_try_catch_clause(
         success_clause_location,
@@ -8308,9 +11553,9 @@ fn parse_try_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStateme
         returns_parameters.clone(),
         success_block_node.clone(),
     );
-    clauses.push(success_clause);
-    clause_details.push(ffi::WireTryCatchClauseResult {
-        try_catch_clause: clauses.last().cloned().unwrap_or_else(empty_ast_node),
+    clauses.push(success_clause.clone());
+    clause_details.push(RustTryCatchClauseResult {
+        try_catch_clause: success_clause,
         error_name: empty_string(),
         error_parameters: returns_parameters.clone(),
         error_parameter_declarations: returns_parameter_declarations,
@@ -8327,52 +11572,58 @@ fn parse_try_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStateme
     clause_blocks.push(success_block_node);
 
     loop {
-        let clause_result = parse_catch_clause();
+        let clause_result = parse_catch_clause_compact();
         if parser_errors_have_fatal(&clause_result.errors) {
             errors.extend(clause_result.errors);
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         errors.extend(clause_result.errors.clone());
         let clause = clause_result.try_catch_clause.clone();
         if !clause.present {
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         location.end = clause.location.end;
         clause_block_statement_details.extend(clause_result.block_statement_details.clone());
-        clause_details.push(clause_result.clone());
         clauses.push(clause);
-        clause_error_names.push(clause_result.error_name);
-        clause_error_parameters.push(clause_result.error_parameters);
+        clause_error_names.push(clause_result.error_name.clone());
+        clause_error_parameters.push(clause_result.error_parameters.clone());
         clause_blocks.push(clause_result.block.clone());
+        clause_details.push(clause_result);
 
         if current_token() != token::TOKEN_CATCH {
             break;
         }
     }
 
-    let mut nodes = Vec::with_capacity(clauses.len() + 1);
-    nodes.push(external_call.clone());
-    nodes.extend(clauses.clone());
     let statement = ffi::WireAstNode {
         present: true,
-        node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
+        node_id: allocate_node_id_after(max_node_id(
+            current_node_id().max(external_call.node_id),
+            &clauses,
+        )),
         kind: AST_NODE_KIND_TRY_STATEMENT,
         location,
         text: doc_string,
     };
-    let mut result = statement_result(statement, errors);
-    result.external_call = external_call;
-    result.external_call_detail = external_call_detail;
-    result.clauses = clauses;
-    result.clause_details = clause_details;
-    result.clause_block_statement_details = clause_block_statement_details;
-    result.clause_error_names = clause_error_names;
-    result.clause_error_parameters = clause_error_parameters;
-    result.clause_blocks = clause_blocks;
+    let mut result = RustStatementResult::new(statement, errors);
+    result.data = RustStatementData::Try {
+        external_call,
+        external_call_detail,
+        clauses,
+        clause_details,
+        clause_block_statement_details,
+        clause_error_names,
+        clause_error_parameters,
+        clause_blocks,
+    };
     result
 }
 
 pub fn parse_catch_clause() -> ffi::WireTryCatchClauseResult {
+    parse_catch_clause_compact().into_wire()
+}
+
+fn parse_catch_clause_compact() -> RustTryCatchClauseResult {
     let _recursion_guard = RecursionGuard::new();
 
     let clause_location = current_location();
@@ -8403,7 +11654,7 @@ pub fn parse_catch_clause() -> ffi::WireTryCatchClauseResult {
             allow_location_specifier: true,
             ..VarDeclParserOptions::default()
         };
-        let parsed_error_parameters = parse_parameter_list_with_options_and_node_id(
+        let parsed_error_parameters = parse_parameter_list_parts_with_options_and_node_id(
             options,
             !error_name.bytes.is_empty(),
             current_node_id(),
@@ -8421,7 +11672,7 @@ pub fn parse_catch_clause() -> ffi::WireTryCatchClauseResult {
         error_parameters = parsed_error_parameters.parameter_list;
     }
 
-    let block = parse_block();
+    let block = parse_block_with_options(false, empty_string());
     if parser_errors_have_fatal(&block.errors) {
         errors.extend(block.errors);
         return empty_try_catch_clause_result(errors);
@@ -8432,7 +11683,7 @@ pub fn parse_catch_clause() -> ffi::WireTryCatchClauseResult {
         return empty_try_catch_clause_result(errors);
     }
 
-    ffi::WireTryCatchClauseResult {
+    RustTryCatchClauseResult {
         try_catch_clause: create_try_catch_clause(
             clause_location,
             error_name.clone(),
@@ -8451,10 +11702,8 @@ pub fn parse_catch_clause() -> ffi::WireTryCatchClauseResult {
     }
 }
 
-fn empty_try_catch_clause_result(
-    errors: Vec<ffi::WireParserError>,
-) -> ffi::WireTryCatchClauseResult {
-    ffi::WireTryCatchClauseResult {
+fn empty_try_catch_clause_result(errors: Vec<ffi::WireParserError>) -> RustTryCatchClauseResult {
+    RustTryCatchClauseResult {
         try_catch_clause: empty_ast_node(),
         error_name: empty_string(),
         error_parameters: empty_ast_node(),
@@ -8486,10 +11735,10 @@ fn create_try_catch_clause(
 }
 
 pub fn parse_while_statement() -> ffi::WireStatementResult {
-    parse_while_statement_with_doc(empty_string())
+    parse_while_statement_with_doc(empty_string()).into_wire()
 }
 
-fn parse_while_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+fn parse_while_statement_with_doc(doc_string: ffi::WireString) -> RustStatementResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut location = current_location();
@@ -8497,40 +11746,40 @@ fn parse_while_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireState
     let while_token = expect_token(token::TOKEN_WHILE);
     if !while_token.errors.is_empty() {
         errors.extend(while_token.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
     let lparen = expect_token(token::TOKEN_LPAREN);
     if !lparen.errors.is_empty() {
         errors.extend(lparen.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
-    let condition_detail = parse_expression();
+    let condition_detail = parse_expression_compact();
     if parser_errors_have_fatal(&condition_detail.errors) {
         errors.extend(condition_detail.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     errors.extend(condition_detail.errors.clone());
     let condition = condition_detail.expression.clone();
     if !condition.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     let rparen = expect_token(token::TOKEN_RPAREN);
     if !rparen.errors.is_empty() {
         errors.extend(rparen.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
-    let body_detail = parse_statement();
+    let body_detail = parse_statement_with_options(false);
     if parser_errors_have_fatal(&body_detail.errors) {
         errors.extend(body_detail.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     errors.extend(body_detail.errors.clone());
     let body = body_detail.statement.clone();
     if !body.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     location.end = body.location.end;
 
@@ -8542,73 +11791,75 @@ fn parse_while_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireState
         location,
         text: doc_string,
     };
-    let mut result = statement_result(statement, errors);
-    result.condition_expression = condition;
-    result.condition_expression_detail = condition_detail;
-    result.body = body;
-    result.body_detail.push(body_detail);
-    result.is_do_while = false;
+    let mut result = RustStatementResult::new(statement, errors);
+    result.data = RustStatementData::Loop {
+        condition_expression: condition,
+        condition_expression_detail: condition_detail,
+        body,
+        body_detail: Box::new(body_detail),
+        is_do_while: false,
+    };
     result
 }
 
 pub fn parse_do_while_statement() -> ffi::WireStatementResult {
-    parse_do_while_statement_with_doc(empty_string())
+    parse_do_while_statement_with_doc(empty_string()).into_wire()
 }
 
-fn parse_do_while_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+fn parse_do_while_statement_with_doc(doc_string: ffi::WireString) -> RustStatementResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut location = current_location();
     let mut errors = Vec::new();
     let do_token = expect_token(token::TOKEN_DO);
     if !do_token.errors.is_empty() {
-        return empty_statement_result(do_token.errors);
+        return RustStatementResult::empty(do_token.errors);
     }
 
-    let body_detail = parse_statement();
+    let body_detail = parse_statement_with_options(false);
     if parser_errors_have_fatal(&body_detail.errors) {
         errors.extend(body_detail.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     errors.extend(body_detail.errors.clone());
     let body = body_detail.statement.clone();
     if !body.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
     let while_token = expect_token(token::TOKEN_WHILE);
     if !while_token.errors.is_empty() {
         errors.extend(while_token.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
     let lparen = expect_token(token::TOKEN_LPAREN);
     if !lparen.errors.is_empty() {
         errors.extend(lparen.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
-    let condition_detail = parse_expression();
+    let condition_detail = parse_expression_compact();
     if parser_errors_have_fatal(&condition_detail.errors) {
         errors.extend(condition_detail.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     errors.extend(condition_detail.errors.clone());
     let condition = condition_detail.expression.clone();
     if !condition.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     let rparen = expect_token(token::TOKEN_RPAREN);
     if !rparen.errors.is_empty() {
         errors.extend(rparen.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
     location.end = current_location().end;
     let semicolon = expect_token(token::TOKEN_SEMICOLON);
     if !semicolon.errors.is_empty() {
         errors.extend(semicolon.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
     let nodes = [condition.clone(), body.clone()];
@@ -8619,47 +11870,49 @@ fn parse_do_while_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireSt
         location,
         text: doc_string,
     };
-    let mut result = statement_result(statement, errors);
-    result.condition_expression = condition;
-    result.condition_expression_detail = condition_detail;
-    result.body = body;
-    result.body_detail.push(body_detail);
-    result.is_do_while = true;
+    let mut result = RustStatementResult::new(statement, errors);
+    result.data = RustStatementData::Loop {
+        condition_expression: condition,
+        condition_expression_detail: condition_detail,
+        body,
+        body_detail: Box::new(body_detail),
+        is_do_while: true,
+    };
     result
 }
 
 pub fn parse_for_statement() -> ffi::WireStatementResult {
-    parse_for_statement_with_doc(empty_string())
+    parse_for_statement_with_doc(empty_string()).into_wire()
 }
 
-fn parse_for_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+fn parse_for_statement_with_doc(doc_string: ffi::WireString) -> RustStatementResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut location = current_location();
     let mut errors = Vec::new();
     let for_token = expect_token(token::TOKEN_FOR);
     if !for_token.errors.is_empty() {
-        return empty_statement_result(for_token.errors);
+        return RustStatementResult::empty(for_token.errors);
     }
 
     let lparen = expect_token(token::TOKEN_LPAREN);
     if !lparen.errors.is_empty() {
-        return empty_statement_result(lparen.errors);
+        return RustStatementResult::empty(lparen.errors);
     }
 
-    let mut init_expression_detail = Vec::new();
+    let mut init_expression_detail = None;
     let init_expression = if current_token() != token::TOKEN_SEMICOLON {
-        let parsed_init_expression = parse_simple_statement();
+        let parsed_init_expression = parse_simple_statement_with_doc(empty_string());
         if parser_errors_have_fatal(&parsed_init_expression.errors) {
             errors.extend(parsed_init_expression.errors);
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         errors.extend(parsed_init_expression.errors.clone());
         let init_expression = parsed_init_expression.statement.clone();
         if !init_expression.present {
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
-        init_expression_detail.push(parsed_init_expression);
+        init_expression_detail = Some(Box::new(parsed_init_expression));
         init_expression
     } else {
         empty_ast_node()
@@ -8667,22 +11920,22 @@ fn parse_for_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStateme
     let first_semicolon = expect_token(token::TOKEN_SEMICOLON);
     if !first_semicolon.errors.is_empty() {
         errors.extend(first_semicolon.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
-    let mut condition_expression_detail = empty_expression_result(Vec::new());
+    let mut condition_expression_detail = None;
     let condition_expression = if current_token() != token::TOKEN_SEMICOLON {
-        let parsed_condition_expression = parse_expression();
+        let parsed_condition_expression = parse_expression_compact();
         if parser_errors_have_fatal(&parsed_condition_expression.errors) {
             errors.extend(parsed_condition_expression.errors);
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         errors.extend(parsed_condition_expression.errors.clone());
         let condition_expression = parsed_condition_expression.expression.clone();
         if !condition_expression.present {
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
-        condition_expression_detail = parsed_condition_expression;
+        condition_expression_detail = Some(parsed_condition_expression);
         condition_expression
     } else {
         empty_ast_node()
@@ -8690,22 +11943,23 @@ fn parse_for_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStateme
     let second_semicolon = expect_token(token::TOKEN_SEMICOLON);
     if !second_semicolon.errors.is_empty() {
         errors.extend(second_semicolon.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
-    let mut loop_expression_detail = Vec::new();
+    let mut loop_expression_detail = None;
     let loop_expression = if current_token() != token::TOKEN_RPAREN {
-        let parsed_loop_expression = parse_expression_statement();
+        let parsed_loop_expression =
+            parse_expression_statement_with_partial(empty_string(), empty_ast_node());
         if parser_errors_have_fatal(&parsed_loop_expression.errors) {
             errors.extend(parsed_loop_expression.errors);
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         errors.extend(parsed_loop_expression.errors.clone());
         let loop_expression = parsed_loop_expression.statement.clone();
         if !loop_expression.present {
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
-        loop_expression_detail.push(parsed_loop_expression);
+        loop_expression_detail = Some(Box::new(parsed_loop_expression));
         loop_expression
     } else {
         empty_ast_node()
@@ -8713,18 +11967,18 @@ fn parse_for_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStateme
     let rparen = expect_token(token::TOKEN_RPAREN);
     if !rparen.errors.is_empty() {
         errors.extend(rparen.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
-    let body_detail = parse_statement();
+    let body_detail = parse_statement_with_options(false);
     if parser_errors_have_fatal(&body_detail.errors) {
         errors.extend(body_detail.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     errors.extend(body_detail.errors.clone());
     let body = body_detail.statement.clone();
     if !body.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     location.end = body.location.end;
 
@@ -8741,35 +11995,37 @@ fn parse_for_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStateme
         location,
         text: doc_string,
     };
-    let mut result = statement_result(statement, errors);
-    result.init_expression = init_expression;
-    result.init_expression_detail = init_expression_detail;
-    result.condition_expression = condition_expression;
-    result.condition_expression_detail = condition_expression_detail;
-    result.loop_expression = loop_expression;
-    result.loop_expression_detail = loop_expression_detail;
-    result.body = body;
-    result.body_detail.push(body_detail);
+    let mut result = RustStatementResult::new(statement, errors);
+    result.data = RustStatementData::For {
+        init_expression,
+        init_expression_detail,
+        condition_expression,
+        condition_expression_detail,
+        loop_expression,
+        loop_expression_detail,
+        body,
+        body_detail: Box::new(body_detail),
+    };
     result
 }
 
 pub fn parse_emit_statement() -> ffi::WireStatementResult {
-    parse_emit_statement_with_doc(empty_string())
+    parse_emit_statement_with_doc(empty_string()).into_wire()
 }
 
-fn parse_emit_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+fn parse_emit_statement_with_doc(doc_string: ffi::WireString) -> RustStatementResult {
     let mut location = current_location();
     let mut errors = Vec::new();
     let emit = expect_token(token::TOKEN_EMIT);
     if !emit.errors.is_empty() {
-        return empty_statement_result(emit.errors);
+        return RustStatementResult::empty(emit.errors);
     }
 
     let mut event_call = parse_path_function_call(true);
     errors.extend(std::mem::take(&mut event_call.errors));
     let event_call_node = event_call.function_call.clone();
     if !event_call_node.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     location.end = event_call_node.location.end;
 
@@ -8780,28 +12036,34 @@ fn parse_emit_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatem
         location,
         text: doc_string,
     };
-    let mut result = statement_result(statement, errors);
-    result.event_call = event_call_node;
-    result.event_call_callee = event_call.callee;
-    result.event_call_callee_detail = event_call.callee_detail;
-    result.event_call_arguments = event_call.arguments;
-    result.event_call_argument_details = event_call.argument_details;
-    result.event_call_parameter_names = event_call.parameter_names;
-    result.event_call_parameter_name_locations = event_call.parameter_name_locations;
+    let mut result = RustStatementResult::new(statement, errors);
+    result.data = RustStatementData::Emit {
+        event_call: event_call_node,
+        event_call_callee: event_call.callee,
+        event_call_callee_detail: RustExpressionResult::from_wire(event_call.callee_detail),
+        event_call_arguments: event_call.arguments,
+        event_call_argument_details: event_call
+            .argument_details
+            .into_iter()
+            .map(RustExpressionResult::from_wire)
+            .collect(),
+        event_call_parameter_names: event_call.parameter_names,
+        event_call_parameter_name_locations: event_call.parameter_name_locations,
+    };
     result
 }
 
 pub fn parse_revert_statement() -> ffi::WireStatementResult {
-    parse_revert_statement_with_doc(empty_string())
+    parse_revert_statement_with_doc(empty_string()).into_wire()
 }
 
-fn parse_revert_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+fn parse_revert_statement_with_doc(doc_string: ffi::WireString) -> RustStatementResult {
     let mut location = current_location();
     let mut errors = Vec::new();
     let revert = expect_identifier_token(current_token(), current_literal(), current_token_name());
     advance_by(revert.tokens_consumed);
     if !revert.errors.is_empty() {
-        return empty_statement_result(revert.errors);
+        return RustStatementResult::empty(revert.errors);
     }
     assert_eq!(revert.value.bytes, b"revert");
 
@@ -8810,7 +12072,7 @@ fn parse_revert_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
     errors.extend(std::mem::take(&mut error_call.errors));
     let error_call_node = error_call.function_call.clone();
     if !error_call_node.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     location.end = error_call_node.location.end;
 
@@ -8821,14 +12083,20 @@ fn parse_revert_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
         location,
         text: doc_string,
     };
-    let mut result = statement_result(statement, errors);
-    result.error_call = error_call_node;
-    result.error_call_callee = error_call.callee;
-    result.error_call_callee_detail = error_call.callee_detail;
-    result.error_call_arguments = error_call.arguments;
-    result.error_call_argument_details = error_call.argument_details;
-    result.error_call_parameter_names = error_call.parameter_names;
-    result.error_call_parameter_name_locations = error_call.parameter_name_locations;
+    let mut result = RustStatementResult::new(statement, errors);
+    result.data = RustStatementData::Revert {
+        error_call: error_call_node,
+        error_call_callee: error_call.callee,
+        error_call_callee_detail: RustExpressionResult::from_wire(error_call.callee_detail),
+        error_call_arguments: error_call.arguments,
+        error_call_argument_details: error_call
+            .argument_details
+            .into_iter()
+            .map(RustExpressionResult::from_wire)
+            .collect(),
+        error_call_parameter_names: error_call.parameter_names,
+        error_call_parameter_name_locations: error_call.parameter_name_locations,
+    };
     result
 }
 
@@ -8924,56 +12192,57 @@ fn empty_path_function_call_result(
 }
 
 pub fn parse_postfix_variable_declaration_statement() -> ffi::WireStatementResult {
-    parse_postfix_variable_declaration_statement_with_doc(empty_string())
+    parse_postfix_variable_declaration_statement_with_doc(empty_string()).into_wire()
 }
 
 fn parse_postfix_variable_declaration_statement_with_doc(
     doc_string: ffi::WireString,
-) -> ffi::WireStatementResult {
+) -> RustStatementResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut location = current_location();
     let mut errors = Vec::new();
     let let_token = expect_token(token::TOKEN_LET);
     if !let_token.errors.is_empty() {
-        return empty_statement_result(let_token.errors);
+        return RustStatementResult::empty(let_token.errors);
     }
 
     let variable = parse_postfix_variable_declaration_with_node_id(current_node_id());
     if parser_errors_have_fatal(&variable.errors) {
         errors.extend(variable.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     errors.extend(variable.errors.clone());
     let variable_node = variable.variable_declaration.clone();
     if !variable_node.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     location.end = variable_node.location.end;
-    let mut variable_detail = empty_variable_declaration_result(Vec::new());
+    let mut variable_detail = empty_parsed_variable_declaration(Vec::new());
     variable_detail.variable_declaration = variable.variable_declaration;
     variable_detail.type_expression = variable.type_expression;
-    variable_detail.type_expression_detail = variable.type_expression_detail;
+    variable_detail.type_expression_detail =
+        RustExpressionResult::from_wire(variable.type_expression_detail);
     variable_detail.documentation = variable.documentation;
     variable_detail.name = variable.name;
     variable_detail.name_location = variable.name_location;
 
     let (value, value_detail) = if current_token() == token::TOKEN_ASSIGN {
         advance();
-        let parsed_value = parse_expression();
+        let parsed_value = parse_expression_compact();
         if parser_errors_have_fatal(&parsed_value.errors) {
             errors.extend(parsed_value.errors);
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         errors.extend(parsed_value.errors.clone());
         let value = parsed_value.expression.clone();
         if !value.present {
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         location.end = value.location.end;
-        (value, parsed_value)
+        (value, Some(parsed_value))
     } else {
-        (empty_ast_node(), empty_expression_result(Vec::new()))
+        (empty_ast_node(), None)
     };
 
     let nodes = [variable_node.clone(), value.clone()];
@@ -8984,11 +12253,13 @@ fn parse_postfix_variable_declaration_statement_with_doc(
         location,
         text: doc_string,
     };
-    let mut result = statement_result(statement, errors);
-    result.variables = vec![variable_node];
-    result.variable_details = vec![variable_detail];
-    result.initial_value = value;
-    result.initial_value_detail = value_detail;
+    let mut result = RustStatementResult::new(statement, errors);
+    result.data = RustStatementData::VariableDeclaration {
+        variables: vec![variable_node],
+        variable_details: vec![variable_detail],
+        initial_value: value,
+        initial_value_detail: value_detail,
+    };
     result
 }
 
@@ -9181,6 +12452,136 @@ pub fn parse_type_class_definition() -> ffi::WireTypeClassDefinitionResult {
     }
 }
 
+struct CompactTypeClassDefinitionParseResult {
+    type_class_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_type_class_definition_parse_result(
+    type_class_definition: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactTypeClassDefinitionParseResult {
+    CompactTypeClassDefinitionParseResult {
+        type_class_definition,
+        errors,
+    }
+}
+
+fn parse_type_class_definition_compact(
+    builder: crate::compact::CompactTypeClassDefinitionBuilder<'_>,
+) -> CompactTypeClassDefinitionParseResult {
+    assert!(experimental_solidity_enabled_in_current_source_unit());
+
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut builder = builder;
+    let mut errors = Vec::new();
+    let documentation_result = parse_current_structured_documentation();
+    let documentation = documentation_result.documentation;
+    let mut node_id = documentation_result.current_node_id;
+
+    let mut location = current_location();
+    let class = expect_token(token::TOKEN_CLASS);
+    if !class.errors.is_empty() {
+        return compact_type_class_definition_parse_result(empty_ast_node(), class.errors);
+    }
+
+    let parsed_type_variable = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_type_variable.tokens_consumed);
+    if !parsed_type_variable.errors.is_empty() {
+        return compact_type_class_definition_parse_result(
+            empty_ast_node(),
+            parsed_type_variable.errors,
+        );
+    }
+    let type_variable = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(node_id),
+        kind: AST_NODE_KIND_VARIABLE_DECLARATION,
+        location: parsed_type_variable.location.clone(),
+        text: parsed_type_variable.identifier.clone(),
+    };
+    node_id = type_variable.node_id;
+
+    let colon = expect_token(token::TOKEN_COLON);
+    if !colon.errors.is_empty() {
+        return compact_type_class_definition_parse_result(empty_ast_node(), colon.errors);
+    }
+
+    let parsed_name = expect_identifier_with_location(
+        current_token(),
+        current_literal(),
+        current_token_name(),
+        current_location(),
+    );
+    advance_by(parsed_name.tokens_consumed);
+    if !parsed_name.errors.is_empty() {
+        return compact_type_class_definition_parse_result(empty_ast_node(), parsed_name.errors);
+    }
+
+    let lbrace = expect_token(token::TOKEN_LBRACE);
+    if !lbrace.errors.is_empty() {
+        return compact_type_class_definition_parse_result(empty_ast_node(), lbrace.errors);
+    }
+
+    let mut sub_nodes = Vec::new();
+    while current_token() != token::TOKEN_RBRACE {
+        let function = expect_token_no_advance(token::TOKEN_FUNCTION);
+        if !function.errors.is_empty() {
+            errors.extend(function.errors);
+            return compact_type_class_definition_parse_result(empty_ast_node(), errors);
+        }
+        let function_definition =
+            parse_function_definition_compact(builder.start_function(), false, false);
+        if parser_errors_have_fatal(&function_definition.errors) {
+            report_parser_warnings(&function_definition.warnings);
+            errors.extend(function_definition.errors);
+            return compact_type_class_definition_parse_result(empty_ast_node(), errors);
+        }
+        errors.extend(function_definition.errors.clone());
+        report_parser_warnings(&function_definition.warnings);
+        if !function_definition.function_definition.present {
+            return compact_type_class_definition_parse_result(empty_ast_node(), errors);
+        }
+        sub_nodes.push(function_definition.function_definition);
+    }
+
+    location.end = current_location().end;
+    let rbrace = expect_token(token::TOKEN_RBRACE);
+    if !rbrace.errors.is_empty() {
+        errors.extend(rbrace.errors);
+        return compact_type_class_definition_parse_result(empty_ast_node(), errors);
+    }
+
+    let mut node_children = sub_nodes;
+    node_children.push(type_variable.clone());
+    node_children.push(documentation.clone());
+    let type_class_definition = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(node_id, &node_children)),
+        kind: AST_NODE_KIND_TYPE_CLASS_DEFINITION,
+        location,
+        text: parsed_name.identifier.clone(),
+    };
+
+    builder.finish(
+        &type_class_definition,
+        &type_variable,
+        &parsed_type_variable.identifier,
+        &parsed_type_variable.location,
+        &parsed_name.identifier,
+        &parsed_name.location,
+        &documentation,
+    );
+
+    compact_type_class_definition_parse_result(type_class_definition, errors)
+}
+
 fn empty_type_class_definition_result(
     errors: Vec<ffi::WireParserError>,
 ) -> ffi::WireTypeClassDefinitionResult {
@@ -9323,6 +12724,155 @@ pub fn parse_type_class_instantiation() -> ffi::WireTypeClassInstantiationResult
     }
 }
 
+struct CompactTypeClassInstantiationParseResult {
+    type_class_instantiation: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_type_class_instantiation_parse_result(
+    type_class_instantiation: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactTypeClassInstantiationParseResult {
+    CompactTypeClassInstantiationParseResult {
+        type_class_instantiation,
+        errors,
+    }
+}
+
+fn parse_type_class_instantiation_compact(
+    builder: crate::compact::CompactTypeClassInstantiationBuilder<'_>,
+) -> CompactTypeClassInstantiationParseResult {
+    assert!(experimental_solidity_enabled_in_current_source_unit());
+
+    let _recursion_guard = RecursionGuard::new();
+
+    let mut builder = builder;
+    let mut location = current_location();
+    let mut errors = Vec::new();
+    let instantiation = expect_token(token::TOKEN_INSTANTIATION);
+    if !instantiation.errors.is_empty() {
+        return compact_type_class_instantiation_parse_result(
+            empty_ast_node(),
+            instantiation.errors,
+        );
+    }
+
+    let type_constructor_detail = parse_type_name_parts_with_node_id(current_node_id());
+    if parser_errors_have_fatal(&type_constructor_detail.errors) {
+        return compact_type_class_instantiation_parse_result(
+            empty_ast_node(),
+            type_constructor_detail.errors,
+        );
+    }
+    errors.extend(type_constructor_detail.errors.clone());
+    let type_constructor = type_constructor_detail.type_name.clone();
+    if !type_constructor.present {
+        return compact_type_class_instantiation_parse_result(empty_ast_node(), errors);
+    }
+    let mut argument_sort_parameters = Vec::new();
+    let mut argument_sort_details = Vec::new();
+    let argument_sorts = if current_token() == token::TOKEN_LPAREN {
+        let argument_sorts = parse_parameter_list_parts_with_options_and_node_id(
+            VarDeclParserOptions::default(),
+            true,
+            type_constructor.node_id.max(current_node_id()),
+        );
+        if parser_errors_have_fatal(&argument_sorts.errors) {
+            errors.extend(argument_sorts.errors);
+            return compact_type_class_instantiation_parse_result(empty_ast_node(), errors);
+        }
+        errors.extend(argument_sorts.errors);
+        if !argument_sorts.parameter_list.present {
+            return compact_type_class_instantiation_parse_result(empty_ast_node(), errors);
+        }
+        argument_sort_parameters = argument_sorts.parameters;
+        argument_sort_details = argument_sorts.parameter_details;
+        argument_sorts.parameter_list
+    } else {
+        empty_ast_node()
+    };
+
+    let colon = expect_token(token::TOKEN_COLON);
+    if !colon.errors.is_empty() {
+        errors.extend(colon.errors);
+        return compact_type_class_instantiation_parse_result(empty_ast_node(), errors);
+    }
+
+    let type_class_name_detail = parse_current_type_class_name_with_node_id(max_node_id(
+        current_node_id(),
+        &[type_constructor.clone(), argument_sorts.clone()],
+    ));
+    if parser_errors_have_fatal(&type_class_name_detail.errors) {
+        errors.extend(type_class_name_detail.errors.clone());
+        return compact_type_class_instantiation_parse_result(empty_ast_node(), errors);
+    }
+    errors.extend(type_class_name_detail.errors.clone());
+    let type_class_name = type_class_name_detail.type_class_name.clone();
+    if !type_class_name.present {
+        return compact_type_class_instantiation_parse_result(empty_ast_node(), errors);
+    }
+
+    let lbrace = expect_token(token::TOKEN_LBRACE);
+    if !lbrace.errors.is_empty() {
+        errors.extend(lbrace.errors);
+        return compact_type_class_instantiation_parse_result(empty_ast_node(), errors);
+    }
+
+    let mut sub_nodes = Vec::new();
+    while current_token() != token::TOKEN_RBRACE {
+        let function = expect_token_no_advance(token::TOKEN_FUNCTION);
+        if !function.errors.is_empty() {
+            errors.extend(function.errors);
+            return compact_type_class_instantiation_parse_result(empty_ast_node(), errors);
+        }
+        let function_definition =
+            parse_function_definition_compact(builder.start_function(), false, true);
+        if parser_errors_have_fatal(&function_definition.errors) {
+            report_parser_warnings(&function_definition.warnings);
+            errors.extend(function_definition.errors.clone());
+            return compact_type_class_instantiation_parse_result(empty_ast_node(), errors);
+        }
+        errors.extend(function_definition.errors.clone());
+        report_parser_warnings(&function_definition.warnings);
+        if !function_definition.function_definition.present {
+            return compact_type_class_instantiation_parse_result(empty_ast_node(), errors);
+        }
+        sub_nodes.push(function_definition.function_definition);
+    }
+
+    location.end = current_location().end;
+    let rbrace = expect_token(token::TOKEN_RBRACE);
+    if !rbrace.errors.is_empty() {
+        errors.extend(rbrace.errors);
+        return compact_type_class_instantiation_parse_result(empty_ast_node(), errors);
+    }
+
+    let mut node_children = sub_nodes;
+    node_children.push(type_constructor.clone());
+    node_children.push(argument_sorts.clone());
+    node_children.push(type_class_name.clone());
+    let type_class_instantiation = ffi::WireAstNode {
+        present: true,
+        node_id: allocate_node_id_after(max_node_id(current_node_id(), &node_children)),
+        kind: AST_NODE_KIND_TYPE_CLASS_INSTANTIATION,
+        location,
+        text: empty_string(),
+    };
+
+    builder.finish(
+        &type_class_instantiation,
+        &type_constructor,
+        &type_constructor_detail,
+        &argument_sorts,
+        &argument_sort_parameters,
+        &argument_sort_details,
+        &type_class_name,
+        &type_class_name_detail,
+    );
+
+    compact_type_class_instantiation_parse_result(type_class_instantiation, errors)
+}
+
 fn empty_type_class_instantiation_result(
     errors: Vec<ffi::WireParserError>,
 ) -> ffi::WireTypeClassInstantiationResult {
@@ -9342,6 +12892,49 @@ fn empty_type_class_instantiation_result(
 }
 
 pub fn parse_type_definition() -> ffi::WireTypeDefinitionResult {
+    parse_type_definition_compact().into_wire()
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ParsedTypeDefinitionResult {
+    pub(crate) type_definition: ffi::WireAstNode,
+    pub(crate) name: ffi::WireString,
+    pub(crate) name_location: ffi::WireSourceLocation,
+    pub(crate) arguments: ffi::WireAstNode,
+    pub(crate) argument_parameters: Vec<ffi::WireAstNode>,
+    pub(crate) argument_details: Vec<ParsedVariableDeclaration>,
+    pub(crate) expression: ffi::WireAstNode,
+    pub(crate) expression_detail: RustExpressionResult,
+    pub(crate) has_builtin_name_parameter: bool,
+    pub(crate) builtin_name_parameter: ffi::WireString,
+    pub(crate) builtin_name_parameter_location: ffi::WireSourceLocation,
+    pub(crate) errors: Vec<ffi::WireParserError>,
+}
+
+impl ParsedTypeDefinitionResult {
+    fn into_wire(self) -> ffi::WireTypeDefinitionResult {
+        ffi::WireTypeDefinitionResult {
+            type_definition: self.type_definition,
+            name: self.name,
+            name_location: self.name_location,
+            arguments: self.arguments,
+            argument_parameters: self.argument_parameters,
+            argument_details: self
+                .argument_details
+                .into_iter()
+                .map(ParsedVariableDeclaration::into_wire)
+                .collect(),
+            expression: self.expression,
+            expression_detail: self.expression_detail.into_wire(),
+            has_builtin_name_parameter: self.has_builtin_name_parameter,
+            builtin_name_parameter: self.builtin_name_parameter,
+            builtin_name_parameter_location: self.builtin_name_parameter_location,
+            errors: self.errors,
+        }
+    }
+}
+
+fn parse_type_definition_compact() -> ParsedTypeDefinitionResult {
     assert!(experimental_solidity_enabled_in_current_source_unit());
 
     let mut location = current_location();
@@ -9351,7 +12944,7 @@ pub fn parse_type_definition() -> ffi::WireTypeDefinitionResult {
     let mut builtin_name_parameter_location = empty_source_location();
     let type_token = expect_token(token::TOKEN_TYPE);
     if !type_token.errors.is_empty() {
-        return empty_type_definition_result(type_token.errors);
+        return empty_parsed_type_definition_result(type_token.errors);
     }
 
     let parsed_name = expect_identifier_with_location(
@@ -9362,19 +12955,23 @@ pub fn parse_type_definition() -> ffi::WireTypeDefinitionResult {
     );
     advance_by(parsed_name.tokens_consumed);
     if !parsed_name.errors.is_empty() {
-        return empty_type_definition_result(parsed_name.errors);
+        return empty_parsed_type_definition_result(parsed_name.errors);
     }
 
     let mut argument_parameters = Vec::new();
     let mut argument_details = Vec::new();
     let arguments = if current_token() == token::TOKEN_LPAREN {
-        let arguments = parse_parameter_list();
+        let arguments = parse_parameter_list_parts_with_options_and_node_id(
+            VarDeclParserOptions::default(),
+            true,
+            current_node_id(),
+        );
         if parser_errors_have_fatal(&arguments.errors) {
-            return empty_type_definition_result(arguments.errors);
+            return empty_parsed_type_definition_result(arguments.errors);
         }
         errors.extend(arguments.errors);
         if !arguments.parameter_list.present {
-            return empty_type_definition_result(errors);
+            return empty_parsed_type_definition_result(errors);
         }
         argument_parameters = arguments.parameters;
         argument_details = arguments.parameter_details;
@@ -9383,23 +12980,23 @@ pub fn parse_type_definition() -> ffi::WireTypeDefinitionResult {
         empty_ast_node()
     };
 
-    let mut expression_detail = empty_expression_result(Vec::new());
+    let mut expression_detail = RustExpressionResult::empty(Vec::new());
     let expression = if current_token() == token::TOKEN_ASSIGN {
         let assign = expect_token(token::TOKEN_ASSIGN);
         if !assign.errors.is_empty() {
             errors.extend(assign.errors);
-            return empty_type_definition_result(errors);
+            return empty_parsed_type_definition_result(errors);
         }
 
         if current_token() != token::TOKEN_BUILTIN {
-            let expression = parse_expression();
+            let expression = parse_expression_compact();
             if parser_errors_have_fatal(&expression.errors) {
                 errors.extend(expression.errors);
-                return empty_type_definition_result(errors);
+                return empty_parsed_type_definition_result(errors);
             }
             errors.extend(expression.errors.clone());
             if !expression.expression.present {
-                return empty_type_definition_result(errors);
+                return empty_parsed_type_definition_result(errors);
             }
             let expression_node = expression.expression.clone();
             expression_detail = expression;
@@ -9408,12 +13005,12 @@ pub fn parse_type_definition() -> ffi::WireTypeDefinitionResult {
             let builtin = expect_token(token::TOKEN_BUILTIN);
             if !builtin.errors.is_empty() {
                 errors.extend(builtin.errors);
-                return empty_type_definition_result(errors);
+                return empty_parsed_type_definition_result(errors);
             }
             let lparen = expect_token(token::TOKEN_LPAREN);
             if !lparen.errors.is_empty() {
                 errors.extend(lparen.errors);
-                return empty_type_definition_result(errors);
+                return empty_parsed_type_definition_result(errors);
             }
 
             let mut builtin_location = location.clone();
@@ -9432,12 +13029,12 @@ pub fn parse_type_definition() -> ffi::WireTypeDefinitionResult {
             let string_literal = expect_token(token::TOKEN_STRING_LITERAL);
             if !string_literal.errors.is_empty() {
                 errors.extend(string_literal.errors);
-                return empty_type_definition_result(errors);
+                return empty_parsed_type_definition_result(errors);
             }
             let rparen = expect_token(token::TOKEN_RPAREN);
             if !rparen.errors.is_empty() {
                 errors.extend(rparen.errors);
-                return empty_type_definition_result(errors);
+                return empty_parsed_type_definition_result(errors);
             }
 
             builtin_expression
@@ -9450,11 +13047,11 @@ pub fn parse_type_definition() -> ffi::WireTypeDefinitionResult {
     let semicolon = expect_token(token::TOKEN_SEMICOLON);
     if !semicolon.errors.is_empty() {
         errors.extend(semicolon.errors);
-        return empty_type_definition_result(errors);
+        return empty_parsed_type_definition_result(errors);
     }
 
     let nodes = [arguments.clone(), expression.clone()];
-    ffi::WireTypeDefinitionResult {
+    ParsedTypeDefinitionResult {
         type_definition: ffi::WireAstNode {
             present: true,
             node_id: allocate_node_id_after(max_node_id(current_node_id(), &nodes)),
@@ -9479,7 +13076,13 @@ pub fn parse_type_definition() -> ffi::WireTypeDefinitionResult {
 fn empty_type_definition_result(
     errors: Vec<ffi::WireParserError>,
 ) -> ffi::WireTypeDefinitionResult {
-    ffi::WireTypeDefinitionResult {
+    empty_parsed_type_definition_result(errors).into_wire()
+}
+
+fn empty_parsed_type_definition_result(
+    errors: Vec<ffi::WireParserError>,
+) -> ParsedTypeDefinitionResult {
+    ParsedTypeDefinitionResult {
         type_definition: empty_ast_node(),
         name: empty_string(),
         name_location: empty_source_location(),
@@ -9487,7 +13090,7 @@ fn empty_type_definition_result(
         argument_parameters: Vec::new(),
         argument_details: Vec::new(),
         expression: empty_ast_node(),
-        expression_detail: empty_expression_result(Vec::new()),
+        expression_detail: RustExpressionResult::empty(Vec::new()),
         has_builtin_name_parameter: false,
         builtin_name_parameter: empty_string(),
         builtin_name_parameter_location: empty_source_location(),
@@ -9496,10 +13099,10 @@ fn empty_type_definition_result(
 }
 
 pub fn parse_simple_statement() -> ffi::WireStatementResult {
-    parse_simple_statement_with_doc(empty_string())
+    parse_simple_statement_with_doc(empty_string()).into_wire()
 }
 
-fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStatementResult {
+fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> RustStatementResult {
     let _recursion_guard = RecursionGuard::new();
     let mut errors = Vec::new();
 
@@ -9512,7 +13115,7 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
         let tuple_location = current_location();
         let lparen = expect_token(token::TOKEN_LPAREN);
         if !lparen.errors.is_empty() {
-            return empty_statement_result(lparen.errors);
+            return RustStatementResult::empty(lparen.errors);
         }
 
         let mut empty_components = 0usize;
@@ -9525,7 +13128,7 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
         let path_errors = std::mem::take(&mut lookahead.path.errors);
         if parser_errors_have_fatal(&path_errors) {
             errors.extend(path_errors);
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         errors.extend(path_errors);
         match lookahead.kind {
@@ -9533,7 +13136,7 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                 let type_name_result = type_name_from_index_access_structure(lookahead.path);
                 if parser_errors_have_fatal(&type_name_result.errors) {
                     errors.extend(type_name_result.errors);
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 errors.extend(type_name_result.errors.clone());
 
@@ -9544,18 +13147,18 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                 let mut variables = vec![empty_ast_node(); empty_components];
                 let mut variable_details = Vec::new();
                 let mut node_id = type_name_result.type_name.node_id.max(current_node_id());
-                let variable = parse_variable_declaration_with_type_name_result(
+                let variable = parse_variable_declaration_parts_with_type_name_result(
                     options,
                     type_name_result,
                     node_id,
                 );
                 if parser_errors_have_fatal(&variable.errors) {
                     errors.extend(variable.errors);
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 errors.extend(variable.errors.clone());
                 if !variable.variable_declaration.present {
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 node_id = variable.variable_declaration.node_id.max(node_id);
                 variables.push(variable.variable_declaration.clone());
@@ -9565,7 +13168,7 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                     let comma = expect_token(token::TOKEN_COMMA);
                     if !comma.errors.is_empty() {
                         errors.extend(comma.errors);
-                        return empty_statement_result(errors);
+                        return RustStatementResult::empty(errors);
                     }
 
                     if current_token() == token::TOKEN_COMMA
@@ -9573,18 +13176,18 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                     {
                         variables.push(empty_ast_node());
                     } else {
-                        let variable = parse_variable_declaration_with_options(
+                        let variable = parse_variable_declaration_parts_with_options(
                             options,
                             empty_ast_node(),
                             node_id,
                         );
                         if parser_errors_have_fatal(&variable.errors) {
                             errors.extend(variable.errors);
-                            return empty_statement_result(errors);
+                            return RustStatementResult::empty(errors);
                         }
                         errors.extend(variable.errors.clone());
                         if !variable.variable_declaration.present {
-                            return empty_statement_result(errors);
+                            return RustStatementResult::empty(errors);
                         }
                         node_id = variable.variable_declaration.node_id.max(node_id);
                         variables.push(variable.variable_declaration.clone());
@@ -9595,22 +13198,22 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                 let rparen = expect_token(token::TOKEN_RPAREN);
                 if !rparen.errors.is_empty() {
                     errors.extend(rparen.errors);
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 let assign = expect_token(token::TOKEN_ASSIGN);
                 if !assign.errors.is_empty() {
                     errors.extend(assign.errors);
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
-                let value = parse_expression();
+                let value = parse_expression_compact();
                 if parser_errors_have_fatal(&value.errors) {
                     errors.extend(value.errors);
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 errors.extend(value.errors.clone());
                 let value_node = value.expression.clone();
                 if !value_node.present {
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 let statement = create_variable_declaration_statement_with_start(
                     doc_string,
@@ -9618,28 +13221,31 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                     value_node.clone(),
                     tuple_location,
                 );
-                let mut result = statement_result(statement, errors);
-                result.variables = variables;
-                result.variable_details = variable_details;
-                result.initial_value = value_node;
-                result.initial_value_detail = value;
+                let mut result = RustStatementResult::new(statement, errors);
+                result.data = RustStatementData::VariableDeclaration {
+                    variables,
+                    variable_details,
+                    initial_value: value_node,
+                    initial_value_detail: Some(value),
+                };
                 result
             }
             LOOK_AHEAD_EXPRESSION => {
                 let mut components = vec![empty_ast_node(); empty_components];
                 let mut component_details =
-                    vec![empty_expression_result(Vec::new()); empty_components];
-                let expression = parse_expression_with_partial_result(
-                    expression_from_index_access_structure(lookahead.path),
-                );
+                    vec![RustExpressionResult::empty(Vec::new()); empty_components];
+                let expression =
+                    parse_expression_with_partial_result_compact(RustExpressionResult::from_wire(
+                        expression_from_index_access_structure(lookahead.path),
+                    ));
                 if parser_errors_have_fatal(&expression.errors) {
                     errors.extend(expression.errors);
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 errors.extend(expression.errors.clone());
                 let expression_node = expression.expression.clone();
                 if !expression_node.present {
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 components.push(expression_node);
                 component_details.push(expression);
@@ -9647,24 +13253,24 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                     let comma = expect_token(token::TOKEN_COMMA);
                     if !comma.errors.is_empty() {
                         errors.extend(comma.errors);
-                        return empty_statement_result(errors);
+                        return RustStatementResult::empty(errors);
                     }
 
                     if current_token() == token::TOKEN_COMMA
                         || current_token() == token::TOKEN_RPAREN
                     {
                         components.push(empty_ast_node());
-                        component_details.push(empty_expression_result(Vec::new()));
+                        component_details.push(RustExpressionResult::empty(Vec::new()));
                     } else {
-                        let expression = parse_expression();
+                        let expression = parse_expression_compact();
                         if parser_errors_have_fatal(&expression.errors) {
                             errors.extend(expression.errors);
-                            return empty_statement_result(errors);
+                            return RustStatementResult::empty(errors);
                         }
                         errors.extend(expression.errors.clone());
                         let expression_node = expression.expression.clone();
                         if !expression_node.present {
-                            return empty_statement_result(errors);
+                            return RustStatementResult::empty(errors);
                         }
                         components.push(expression_node);
                         component_details.push(expression);
@@ -9676,7 +13282,7 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                 let rparen = expect_token(token::TOKEN_RPAREN);
                 if !rparen.errors.is_empty() {
                     errors.extend(rparen.errors);
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
 
                 let tuple_expression = ffi::WireAstNode {
@@ -9686,20 +13292,24 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                     location,
                     text: empty_string(),
                 };
-                let mut tuple_expression_detail = expression_result(tuple_expression, Vec::new());
-                tuple_expression_detail.components = components;
-                tuple_expression_detail.component_details = component_details;
-                let mut statement = parse_expression_statement_with_partial_result(
+                let mut tuple_expression_detail =
+                    RustExpressionResult::new(tuple_expression, Vec::new());
+                tuple_expression_detail.data = RustExpressionData::Tuple {
+                    components,
+                    component_details,
+                    is_inline_array: false,
+                };
+                let mut statement = parse_expression_statement_with_partial_result_compact(
                     doc_string,
                     tuple_expression_detail,
                 );
                 if parser_errors_have_fatal(&statement.errors) {
                     errors.extend(std::mem::take(&mut statement.errors));
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 errors.extend(std::mem::take(&mut statement.errors));
                 if !statement.statement.present {
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 statement.errors = errors;
                 statement
@@ -9711,7 +13321,7 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
         let path_errors = std::mem::take(&mut lookahead.path.errors);
         if parser_errors_have_fatal(&path_errors) {
             errors.extend(path_errors);
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         errors.extend(path_errors);
         match lookahead.kind {
@@ -9719,7 +13329,7 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                 let type_name = type_name_from_index_access_structure(lookahead.path);
                 if parser_errors_have_fatal(&type_name.errors) {
                     errors.extend(type_name.errors);
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 errors.extend(type_name.errors.clone());
                 let mut statement = parse_variable_declaration_statement_with_type_name_result(
@@ -9727,11 +13337,11 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                 );
                 if parser_errors_have_fatal(&statement.errors) {
                     errors.extend(std::mem::take(&mut statement.errors));
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 errors.extend(std::mem::take(&mut statement.errors));
                 if !statement.statement.present {
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 statement.errors = errors;
                 statement
@@ -9743,11 +13353,11 @@ fn parse_simple_statement_with_doc(doc_string: ffi::WireString) -> ffi::WireStat
                 );
                 if parser_errors_have_fatal(&statement.errors) {
                     errors.extend(std::mem::take(&mut statement.errors));
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 errors.extend(std::mem::take(&mut statement.errors));
                 if !statement.statement.present {
-                    return empty_statement_result(errors);
+                    return RustStatementResult::empty(errors);
                 }
                 statement.errors = errors;
                 statement
@@ -9788,13 +13398,13 @@ fn try_parse_current_index_accessed_path() -> ffi::WireLookAheadResult {
 }
 
 pub fn parse_variable_declaration_statement() -> ffi::WireStatementResult {
-    parse_variable_declaration_statement_with_doc(empty_string(), empty_ast_node())
+    parse_variable_declaration_statement_with_doc(empty_string(), empty_ast_node()).into_wire()
 }
 
 fn parse_variable_declaration_statement_with_doc(
     doc_string: ffi::WireString,
     look_ahead_array_type: ffi::WireAstNode,
-) -> ffi::WireStatementResult {
+) -> RustStatementResult {
     parse_variable_declaration_statement_with_type_name_result(
         doc_string,
         type_name_from_look_ahead_array_type_node(look_ahead_array_type),
@@ -9804,7 +13414,7 @@ fn parse_variable_declaration_statement_with_doc(
 fn parse_variable_declaration_statement_with_type_name_result(
     doc_string: ffi::WireString,
     look_ahead_type_name: ffi::WireTypeNameFromIndexAccessStructureResult,
-) -> ffi::WireStatementResult {
+) -> RustStatementResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut errors = Vec::new();
@@ -9812,7 +13422,7 @@ fn parse_variable_declaration_statement_with_type_name_result(
         allow_location_specifier: true,
         ..VarDeclParserOptions::default()
     };
-    let variable = parse_variable_declaration_with_type_name_result(
+    let variable = parse_variable_declaration_parts_with_type_name_result(
         options,
         look_ahead_type_name.clone(),
         look_ahead_type_name
@@ -9822,39 +13432,41 @@ fn parse_variable_declaration_statement_with_type_name_result(
     );
     if parser_errors_have_fatal(&variable.errors) {
         errors.extend(variable.errors);
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
     errors.extend(variable.errors.clone());
     let variable_node = variable.variable_declaration.clone();
     if !variable_node.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
     let (value, value_detail) = if current_token() == token::TOKEN_ASSIGN {
         advance();
-        let parsed_value = parse_expression();
+        let parsed_value = parse_expression_compact();
         if parser_errors_have_fatal(&parsed_value.errors) {
             errors.extend(parsed_value.errors);
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
         errors.extend(parsed_value.errors.clone());
         let value = parsed_value.expression.clone();
         if !value.present {
-            return empty_statement_result(errors);
+            return RustStatementResult::empty(errors);
         }
-        (value, parsed_value)
+        (value, Some(parsed_value))
     } else {
-        (empty_ast_node(), empty_expression_result(Vec::new()))
+        (empty_ast_node(), None)
     };
 
     let variables = vec![variable_node];
     let statement =
         create_variable_declaration_statement(doc_string, variables.clone(), value.clone());
-    let mut result = statement_result(statement, errors);
-    result.variables = variables;
-    result.variable_details = vec![variable];
-    result.initial_value = value;
-    result.initial_value_detail = value_detail;
+    let mut result = RustStatementResult::new(statement, errors);
+    result.data = RustStatementData::VariableDeclaration {
+        variables,
+        variable_details: vec![variable],
+        initial_value: value,
+        initial_value_detail: value_detail,
+    };
     result
 }
 
@@ -9897,13 +13509,13 @@ fn create_variable_declaration_statement_with_start(
 }
 
 pub fn parse_expression_statement() -> ffi::WireStatementResult {
-    parse_expression_statement_with_partial(empty_string(), empty_ast_node())
+    parse_expression_statement_with_partial(empty_string(), empty_ast_node()).into_wire()
 }
 
 fn parse_expression_statement_with_partial(
     doc_string: ffi::WireString,
     partial_parser_result: ffi::WireAstNode,
-) -> ffi::WireStatementResult {
+) -> RustStatementResult {
     parse_expression_statement_with_partial_result(
         doc_string,
         expression_result(partial_parser_result, Vec::new()),
@@ -9913,18 +13525,28 @@ fn parse_expression_statement_with_partial(
 fn parse_expression_statement_with_partial_result(
     doc_string: ffi::WireString,
     partial_parser_result: ffi::WireExpressionResult,
-) -> ffi::WireStatementResult {
+) -> RustStatementResult {
+    parse_expression_statement_with_partial_result_compact(
+        doc_string,
+        RustExpressionResult::from_wire(partial_parser_result),
+    )
+}
+
+fn parse_expression_statement_with_partial_result_compact(
+    doc_string: ffi::WireString,
+    partial_parser_result: RustExpressionResult,
+) -> RustStatementResult {
     let _recursion_guard = RecursionGuard::new();
 
-    let expression = parse_expression_with_partial_result(partial_parser_result);
+    let expression = parse_expression_with_partial_result_compact(partial_parser_result);
     if parser_errors_have_fatal(&expression.errors) {
-        return empty_statement_result(expression.errors);
+        return RustStatementResult::empty(expression.errors);
     }
     let errors = expression.errors.clone();
     let expression_detail = expression;
     let expression = expression_detail.expression.clone();
     if !expression.present {
-        return empty_statement_result(errors);
+        return RustStatementResult::empty(errors);
     }
 
     let statement = ffi::WireAstNode {
@@ -9934,54 +13556,383 @@ fn parse_expression_statement_with_partial_result(
         location: expression.location.clone(),
         text: doc_string,
     };
-    let mut result = statement_result(statement, errors);
-    result.expression = expression;
-    result.expression_detail = expression_detail;
+    let mut result = RustStatementResult::new(statement, errors);
+    result.data = RustStatementData::Expression {
+        expression,
+        expression_detail: Some(expression_detail),
+    };
     result
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RustExpressionResult {
+    pub(crate) expression: ffi::WireAstNode,
+    pub(crate) data: RustExpressionData,
+    pub(crate) errors: Vec<ffi::WireParserError>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum RustExpressionData {
+    Empty,
+    RawWire(Box<ffi::WireExpressionResult>),
+    Binary {
+        left_expression: ffi::WireAstNode,
+        right_expression: ffi::WireAstNode,
+        expression_details: Box<[RustExpressionResult; 2]>,
+    },
+    Conditional {
+        condition_expression: ffi::WireAstNode,
+        true_expression: ffi::WireAstNode,
+        false_expression: ffi::WireAstNode,
+        expression_details: Box<[RustExpressionResult; 3]>,
+    },
+    Unary {
+        sub_expression: ffi::WireAstNode,
+        sub_expression_detail: Box<RustExpressionResult>,
+        is_prefix_operation: bool,
+    },
+    New {
+        type_name: ffi::WireAstNode,
+        type_name_detail: ParsedTypeNameResult,
+    },
+    ElementaryTypeNameExpression {
+        expression_type: ffi::WireAstNode,
+    },
+    IndexAccess {
+        base_expression: ffi::WireAstNode,
+        base_expression_detail: Box<RustExpressionResult>,
+        base_expression_type: ffi::WireAstNode,
+        index_expression: ffi::WireAstNode,
+        index_expression_detail: Option<Box<RustExpressionResult>>,
+    },
+    IndexRangeAccess {
+        base_expression: ffi::WireAstNode,
+        base_expression_detail: Box<RustExpressionResult>,
+        base_expression_type: ffi::WireAstNode,
+        index_expression: ffi::WireAstNode,
+        index_expression_detail: Option<Box<RustExpressionResult>>,
+        end_index_expression: ffi::WireAstNode,
+        end_index_expression_detail: Option<Box<RustExpressionResult>>,
+    },
+    MemberAccess {
+        base_expression: ffi::WireAstNode,
+        base_expression_detail: Box<RustExpressionResult>,
+        base_expression_type: ffi::WireAstNode,
+        member_name_location: ffi::WireSourceLocation,
+    },
+    FunctionCall {
+        base_expression: ffi::WireAstNode,
+        base_expression_detail: Box<RustExpressionResult>,
+        base_expression_type: ffi::WireAstNode,
+        arguments: Vec<ffi::WireAstNode>,
+        argument_details: Vec<RustExpressionResult>,
+        parameter_names: Vec<ffi::WireString>,
+        parameter_name_locations: Vec<ffi::WireSourceLocation>,
+    },
+    Tuple {
+        components: Vec<ffi::WireAstNode>,
+        component_details: Vec<RustExpressionResult>,
+        is_inline_array: bool,
+    },
+    Literal {
+        literal_token: u32,
+        literal_subdenomination: u32,
+    },
+}
+
+impl RustExpressionResult {
+    fn new(expression: ffi::WireAstNode, errors: Vec<ffi::WireParserError>) -> Self {
+        Self {
+            expression,
+            data: RustExpressionData::Empty,
+            errors,
+        }
+    }
+
+    fn empty(errors: Vec<ffi::WireParserError>) -> Self {
+        Self::new(empty_ast_node(), errors)
+    }
+
+    fn from_wire(mut wire: ffi::WireExpressionResult) -> Self {
+        let expression = wire.expression.clone();
+        let errors = std::mem::take(&mut wire.errors);
+        Self {
+            expression,
+            data: RustExpressionData::RawWire(Box::new(wire)),
+            errors,
+        }
+    }
+
+    fn expression_type(&self) -> ffi::WireAstNode {
+        match &self.data {
+            RustExpressionData::RawWire(wire) => wire.expression_type.clone(),
+            RustExpressionData::ElementaryTypeNameExpression { expression_type } => {
+                expression_type.clone()
+            }
+            _ => empty_ast_node(),
+        }
+    }
+
+    fn into_wire(self) -> ffi::WireExpressionResult {
+        let mut result = match self.data {
+            RustExpressionData::RawWire(mut wire) => {
+                wire.errors = self.errors;
+                return *wire;
+            }
+            _ => expression_result(self.expression, self.errors),
+        };
+
+        match self.data {
+            RustExpressionData::Empty | RustExpressionData::RawWire(_) => {}
+            RustExpressionData::Binary {
+                left_expression,
+                right_expression,
+                expression_details,
+            } => {
+                let [left_expression_detail, right_expression_detail] = *expression_details;
+                result.left_expression = left_expression;
+                result.left_expression_detail = vec![left_expression_detail.into_wire()];
+                result.right_expression = right_expression;
+                result.right_expression_detail = vec![right_expression_detail.into_wire()];
+            }
+            RustExpressionData::Conditional {
+                condition_expression,
+                true_expression,
+                false_expression,
+                expression_details,
+            } => {
+                let [condition_expression_detail, true_expression_detail, false_expression_detail] =
+                    *expression_details;
+                result.condition_expression = condition_expression;
+                result.condition_expression_detail = vec![condition_expression_detail.into_wire()];
+                result.true_expression = true_expression;
+                result.true_expression_detail = vec![true_expression_detail.into_wire()];
+                result.false_expression = false_expression;
+                result.false_expression_detail = vec![false_expression_detail.into_wire()];
+            }
+            RustExpressionData::Unary {
+                sub_expression,
+                sub_expression_detail,
+                is_prefix_operation,
+            } => {
+                result.sub_expression = sub_expression;
+                result.sub_expression_detail = vec![sub_expression_detail.into_wire()];
+                result.is_prefix_operation = is_prefix_operation;
+            }
+            RustExpressionData::New {
+                type_name,
+                type_name_detail,
+            } => {
+                result.type_name = type_name;
+                result.type_name_details = vec![type_name_detail.into_wire()];
+            }
+            RustExpressionData::ElementaryTypeNameExpression { expression_type } => {
+                result.expression_type = expression_type;
+            }
+            RustExpressionData::IndexAccess {
+                base_expression,
+                base_expression_detail,
+                base_expression_type,
+                index_expression,
+                index_expression_detail,
+            } => {
+                result.base_expression = base_expression;
+                result.base_expression_detail = vec![base_expression_detail.into_wire()];
+                result.base_expression_type = base_expression_type;
+                result.index_expression = index_expression;
+                result.index_expression_detail =
+                    option_expression_detail_into_wire_vec(index_expression_detail);
+            }
+            RustExpressionData::IndexRangeAccess {
+                base_expression,
+                base_expression_detail,
+                base_expression_type,
+                index_expression,
+                index_expression_detail,
+                end_index_expression,
+                end_index_expression_detail,
+            } => {
+                result.base_expression = base_expression;
+                result.base_expression_detail = vec![base_expression_detail.into_wire()];
+                result.base_expression_type = base_expression_type;
+                result.index_expression = index_expression;
+                result.index_expression_detail =
+                    option_expression_detail_into_wire_vec(index_expression_detail);
+                result.end_index_expression = end_index_expression;
+                result.end_index_expression_detail =
+                    option_expression_detail_into_wire_vec(end_index_expression_detail);
+            }
+            RustExpressionData::MemberAccess {
+                base_expression,
+                base_expression_detail,
+                base_expression_type,
+                member_name_location,
+            } => {
+                result.base_expression = base_expression;
+                result.base_expression_detail = vec![base_expression_detail.into_wire()];
+                result.base_expression_type = base_expression_type;
+                result.member_name_location = member_name_location;
+            }
+            RustExpressionData::FunctionCall {
+                base_expression,
+                base_expression_detail,
+                base_expression_type,
+                arguments,
+                argument_details,
+                parameter_names,
+                parameter_name_locations,
+            } => {
+                result.base_expression = base_expression;
+                result.base_expression_detail = vec![base_expression_detail.into_wire()];
+                result.base_expression_type = base_expression_type;
+                result.arguments = arguments;
+                result.argument_details = into_wire_expression_details(argument_details);
+                result.parameter_names = parameter_names;
+                result.parameter_name_locations = parameter_name_locations;
+            }
+            RustExpressionData::Tuple {
+                components,
+                component_details,
+                is_inline_array,
+            } => {
+                result.components = components;
+                result.component_details = into_wire_expression_details(component_details);
+                result.is_inline_array = is_inline_array;
+            }
+            RustExpressionData::Literal {
+                literal_token,
+                literal_subdenomination,
+            } => {
+                result.literal_token = literal_token;
+                result.literal_subdenomination = literal_subdenomination;
+            }
+        }
+
+        result
+    }
+}
+
+fn option_expression_detail_into_wire_vec(
+    detail: Option<Box<RustExpressionResult>>,
+) -> Vec<ffi::WireExpressionResult> {
+    detail
+        .map(|detail| vec![detail.into_wire()])
+        .unwrap_or_default()
+}
+
+fn into_wire_expression_details(
+    details: Vec<RustExpressionResult>,
+) -> Vec<ffi::WireExpressionResult> {
+    details
+        .into_iter()
+        .map(RustExpressionResult::into_wire)
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+struct RustFunctionCallArguments {
+    arguments: Vec<ffi::WireAstNode>,
+    argument_details: Vec<RustExpressionResult>,
+    parameter_names: Vec<ffi::WireString>,
+    parameter_name_locations: Vec<ffi::WireSourceLocation>,
+    tokens_consumed: u64,
+    errors: Vec<ffi::WireParserError>,
+}
+
+impl RustFunctionCallArguments {
+    fn into_wire(self) -> ffi::WireFunctionCallArguments {
+        ffi::WireFunctionCallArguments {
+            arguments: self.arguments,
+            argument_details: into_wire_expression_details(self.argument_details),
+            parameter_names: self.parameter_names,
+            parameter_name_locations: self.parameter_name_locations,
+            tokens_consumed: self.tokens_consumed,
+            errors: self.errors,
+        }
+    }
+}
+
+fn empty_rust_function_call_arguments() -> RustFunctionCallArguments {
+    RustFunctionCallArguments {
+        arguments: Vec::new(),
+        argument_details: Vec::new(),
+        parameter_names: Vec::new(),
+        parameter_name_locations: Vec::new(),
+        tokens_consumed: 0,
+        errors: Vec::new(),
+    }
+}
+
 pub fn parse_expression() -> ffi::WireExpressionResult {
-    parse_expression_with_partial(empty_ast_node())
+    parse_expression_compact().into_wire()
+}
+
+fn parse_expression_compact() -> RustExpressionResult {
+    parse_expression_with_partial_compact(empty_ast_node())
 }
 
 pub fn parse_binary_expression() -> ffi::WireExpressionResult {
-    parse_binary_expression_with_precedence_and_partial(4, empty_ast_node())
+    parse_binary_expression_compact().into_wire()
+}
+
+fn parse_binary_expression_compact() -> RustExpressionResult {
+    parse_binary_expression_with_precedence_and_partial_compact(4, empty_ast_node())
 }
 
 fn parse_expression_with_partial(
     partial_parser_result: ffi::WireAstNode,
 ) -> ffi::WireExpressionResult {
-    parse_expression_with_partial_result(expression_result(partial_parser_result, Vec::new()))
+    parse_expression_with_partial_compact(partial_parser_result).into_wire()
+}
+
+fn parse_expression_with_partial_compact(
+    partial_parser_result: ffi::WireAstNode,
+) -> RustExpressionResult {
+    parse_expression_with_partial_result_compact(RustExpressionResult::new(
+        partial_parser_result,
+        Vec::new(),
+    ))
 }
 
 fn parse_expression_with_partial_result(
     partial_parser_result: ffi::WireExpressionResult,
 ) -> ffi::WireExpressionResult {
+    parse_expression_with_partial_result_compact(RustExpressionResult::from_wire(
+        partial_parser_result,
+    ))
+    .into_wire()
+}
+
+fn parse_expression_with_partial_result_compact(
+    partial_parser_result: RustExpressionResult,
+) -> RustExpressionResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut errors = Vec::new();
-    let mut parsed_expression =
-        parse_binary_expression_with_precedence_and_partial_result(4, partial_parser_result);
+    let mut parsed_expression = parse_binary_expression_with_precedence_and_partial_result_compact(
+        4,
+        partial_parser_result,
+    );
     if parser_errors_have_fatal(&parsed_expression.errors) {
         return parsed_expression;
     }
     errors.extend(std::mem::take(&mut parsed_expression.errors));
     let expression = parsed_expression.expression.clone();
     if !expression.present {
-        return empty_expression_result(errors);
+        return RustExpressionResult::empty(errors);
     }
     if is_assignment_operator(current_token()) {
         let assignment_operator = current_token();
         advance();
-        let right_hand_side = parse_expression();
+        let right_hand_side = parse_expression_compact();
         if parser_errors_have_fatal(&right_hand_side.errors) {
             errors.extend(right_hand_side.errors);
-            return empty_expression_result(errors);
+            return RustExpressionResult::empty(errors);
         }
         errors.extend(right_hand_side.errors.clone());
         let right_hand_side_node = right_hand_side.expression.clone();
         if !right_hand_side_node.present {
-            return empty_expression_result(errors);
+            return RustExpressionResult::empty(errors);
         }
         let mut location = expression.location.clone();
         location.end = right_hand_side_node.location.end;
@@ -9993,38 +13944,39 @@ fn parse_expression_with_partial_result(
             location,
             text: token_to_wire_string(assignment_operator),
         };
-        let mut result = expression_result(assignment, errors);
-        result.left_expression = expression;
-        result.left_expression_detail.push(parsed_expression);
-        result.right_expression = right_hand_side_node;
-        result.right_expression_detail.push(right_hand_side);
+        let mut result = RustExpressionResult::new(assignment, errors);
+        result.data = RustExpressionData::Binary {
+            left_expression: expression,
+            right_expression: right_hand_side_node,
+            expression_details: Box::new([parsed_expression, right_hand_side]),
+        };
         result
     } else if current_token() == token::TOKEN_CONDITIONAL {
         advance();
-        let true_expression = parse_expression();
+        let true_expression = parse_expression_compact();
         if parser_errors_have_fatal(&true_expression.errors) {
             errors.extend(true_expression.errors);
-            return empty_expression_result(errors);
+            return RustExpressionResult::empty(errors);
         }
         errors.extend(true_expression.errors.clone());
         let true_expression_node = true_expression.expression.clone();
         if !true_expression_node.present {
-            return empty_expression_result(errors);
+            return RustExpressionResult::empty(errors);
         }
         let colon = expect_token(token::TOKEN_COLON);
         if !colon.errors.is_empty() {
             errors.extend(colon.errors);
-            return empty_expression_result(errors);
+            return RustExpressionResult::empty(errors);
         }
-        let false_expression = parse_expression();
+        let false_expression = parse_expression_compact();
         if parser_errors_have_fatal(&false_expression.errors) {
             errors.extend(false_expression.errors);
-            return empty_expression_result(errors);
+            return RustExpressionResult::empty(errors);
         }
         errors.extend(false_expression.errors.clone());
         let false_expression_node = false_expression.expression.clone();
         if !false_expression_node.present {
-            return empty_expression_result(errors);
+            return RustExpressionResult::empty(errors);
         }
         let mut location = expression.location.clone();
         location.end = false_expression_node.location.end;
@@ -10040,13 +13992,13 @@ fn parse_expression_with_partial_result(
             location,
             text: empty_string(),
         };
-        let mut result = expression_result(conditional, errors);
-        result.condition_expression = expression;
-        result.condition_expression_detail.push(parsed_expression);
-        result.true_expression = true_expression_node;
-        result.true_expression_detail.push(true_expression);
-        result.false_expression = false_expression_node;
-        result.false_expression_detail.push(false_expression);
+        let mut result = RustExpressionResult::new(conditional, errors);
+        result.data = RustExpressionData::Conditional {
+            condition_expression: expression,
+            true_expression: true_expression_node,
+            false_expression: false_expression_node,
+            expression_details: Box::new([parsed_expression, true_expression, false_expression]),
+        };
         result
     } else {
         parsed_expression.errors = errors;
@@ -10058,9 +14010,20 @@ fn parse_binary_expression_with_precedence_and_partial(
     min_precedence: i32,
     partial_parser_result: ffi::WireAstNode,
 ) -> ffi::WireExpressionResult {
-    parse_binary_expression_with_precedence_and_partial_result(
+    parse_binary_expression_with_precedence_and_partial_compact(
         min_precedence,
-        expression_result(partial_parser_result, Vec::new()),
+        partial_parser_result,
+    )
+    .into_wire()
+}
+
+fn parse_binary_expression_with_precedence_and_partial_compact(
+    min_precedence: i32,
+    partial_parser_result: ffi::WireAstNode,
+) -> RustExpressionResult {
+    parse_binary_expression_with_precedence_and_partial_result_compact(
+        min_precedence,
+        RustExpressionResult::new(partial_parser_result, Vec::new()),
     )
 }
 
@@ -10068,17 +14031,29 @@ fn parse_binary_expression_with_precedence_and_partial_result(
     min_precedence: i32,
     partial_parser_result: ffi::WireExpressionResult,
 ) -> ffi::WireExpressionResult {
+    parse_binary_expression_with_precedence_and_partial_result_compact(
+        min_precedence,
+        RustExpressionResult::from_wire(partial_parser_result),
+    )
+    .into_wire()
+}
+
+fn parse_binary_expression_with_precedence_and_partial_result_compact(
+    min_precedence: i32,
+    partial_parser_result: RustExpressionResult,
+) -> RustExpressionResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut errors = Vec::new();
-    let mut parsed_expression = parse_unary_expression_with_partial_result(partial_parser_result);
+    let mut parsed_expression =
+        parse_unary_expression_with_partial_result_compact(partial_parser_result);
     if parser_errors_have_fatal(&parsed_expression.errors) {
         return parsed_expression;
     }
     errors.extend(std::mem::take(&mut parsed_expression.errors));
     let mut expression = parsed_expression.expression.clone();
     if !expression.present {
-        return empty_expression_result(errors);
+        return RustExpressionResult::empty(errors);
     }
     let mut precedence = token_precedence(
         current_token(),
@@ -10098,21 +14073,24 @@ fn parse_binary_expression_with_precedence_and_partial_result(
             advance();
 
             let right = if operator == token::TOKEN_EXP {
-                parse_binary_expression_with_precedence_and_partial(precedence, empty_ast_node())
+                parse_binary_expression_with_precedence_and_partial_compact(
+                    precedence,
+                    empty_ast_node(),
+                )
             } else {
-                parse_binary_expression_with_precedence_and_partial(
+                parse_binary_expression_with_precedence_and_partial_compact(
                     precedence + 1,
                     empty_ast_node(),
                 )
             };
             if parser_errors_have_fatal(&right.errors) {
                 errors.extend(right.errors);
-                return empty_expression_result(errors);
+                return RustExpressionResult::empty(errors);
             }
             errors.extend(right.errors.clone());
             let right_expression = right.expression.clone();
             if !right_expression.present {
-                return empty_expression_result(errors);
+                return RustExpressionResult::empty(errors);
             }
 
             let mut location = expression.location.clone();
@@ -10125,11 +14103,12 @@ fn parse_binary_expression_with_precedence_and_partial_result(
                 location,
                 text: token_to_wire_string(operator),
             };
-            result = expression_result(binary_operation.clone(), Vec::new());
-            result.left_expression = left_expression;
-            result.left_expression_detail.push(left_detail);
-            result.right_expression = right_expression;
-            result.right_expression_detail.push(right);
+            result = RustExpressionResult::new(binary_operation.clone(), Vec::new());
+            result.data = RustExpressionData::Binary {
+                left_expression,
+                right_expression,
+                expression_details: Box::new([left_detail, right]),
+            };
             expression = binary_operation;
         }
         precedence -= 1;
@@ -10140,18 +14119,36 @@ fn parse_binary_expression_with_precedence_and_partial_result(
 }
 
 pub fn parse_unary_expression() -> ffi::WireExpressionResult {
-    parse_unary_expression_with_partial(empty_ast_node())
+    parse_unary_expression_with_partial_compact(empty_ast_node()).into_wire()
 }
 
 fn parse_unary_expression_with_partial(
     partial_parser_result: ffi::WireAstNode,
 ) -> ffi::WireExpressionResult {
-    parse_unary_expression_with_partial_result(expression_result(partial_parser_result, Vec::new()))
+    parse_unary_expression_with_partial_compact(partial_parser_result).into_wire()
+}
+
+fn parse_unary_expression_with_partial_compact(
+    partial_parser_result: ffi::WireAstNode,
+) -> RustExpressionResult {
+    parse_unary_expression_with_partial_result_compact(RustExpressionResult::new(
+        partial_parser_result,
+        Vec::new(),
+    ))
 }
 
 fn parse_unary_expression_with_partial_result(
     partial_parser_result: ffi::WireExpressionResult,
 ) -> ffi::WireExpressionResult {
+    parse_unary_expression_with_partial_result_compact(RustExpressionResult::from_wire(
+        partial_parser_result,
+    ))
+    .into_wire()
+}
+
+fn parse_unary_expression_with_partial_result_compact(
+    partial_parser_result: RustExpressionResult,
+) -> RustExpressionResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut errors = Vec::new();
@@ -10160,20 +14157,20 @@ fn parse_unary_expression_with_partial_result(
 
     if !has_partial && token == token::TOKEN_ADD {
         errors.push(fatal_parser_error(9636, "Use of unary + is disallowed."));
-        return empty_expression_result(errors);
+        return RustExpressionResult::empty(errors);
     }
 
     if !has_partial && (is_unary_operator(token) || is_count_operator(token)) {
         let mut location = current_location();
         advance();
-        let sub_expression = parse_unary_expression();
+        let sub_expression = parse_unary_expression_with_partial_compact(empty_ast_node());
         if parser_errors_have_fatal(&sub_expression.errors) {
             return sub_expression;
         }
         errors.extend(sub_expression.errors.clone());
         let sub_expression_node = sub_expression.expression.clone();
         if !sub_expression_node.present {
-            return empty_expression_result(errors);
+            return RustExpressionResult::empty(errors);
         }
         location.end = sub_expression_node.location.end;
 
@@ -10184,22 +14181,24 @@ fn parse_unary_expression_with_partial_result(
             location,
             text: token_to_wire_string(token),
         };
-        let mut result = expression_result(unary_operation, errors);
-        result.sub_expression = sub_expression_node;
-        result.sub_expression_detail.push(sub_expression);
-        result.is_prefix_operation = true;
+        let mut result = RustExpressionResult::new(unary_operation, errors);
+        result.data = RustExpressionData::Unary {
+            sub_expression: sub_expression_node,
+            sub_expression_detail: Box::new(sub_expression),
+            is_prefix_operation: true,
+        };
         return result;
     }
 
     let mut parsed_sub_expression =
-        parse_left_hand_side_expression_with_partial_result(partial_parser_result);
+        parse_left_hand_side_expression_with_partial_result_compact(partial_parser_result);
     if parser_errors_have_fatal(&parsed_sub_expression.errors) {
         return parsed_sub_expression;
     }
     errors.extend(std::mem::take(&mut parsed_sub_expression.errors));
     let sub_expression = parsed_sub_expression.expression.clone();
     if !sub_expression.present {
-        return empty_expression_result(errors);
+        return RustExpressionResult::empty(errors);
     }
     let token = current_token();
     if !is_count_operator(token) {
@@ -10217,21 +14216,29 @@ fn parse_unary_expression_with_partial_result(
         location,
         text: token_to_wire_string(token),
     };
-    let mut result = expression_result(unary_operation, errors);
-    result.sub_expression = sub_expression;
-    result.sub_expression_detail.push(parsed_sub_expression);
-    result.is_prefix_operation = false;
+    let mut result = RustExpressionResult::new(unary_operation, errors);
+    result.data = RustExpressionData::Unary {
+        sub_expression,
+        sub_expression_detail: Box::new(parsed_sub_expression),
+        is_prefix_operation: false,
+    };
     result
 }
 
 pub fn parse_left_hand_side_expression() -> ffi::WireExpressionResult {
-    parse_left_hand_side_expression_with_partial(empty_ast_node())
+    parse_left_hand_side_expression_with_partial_compact(empty_ast_node()).into_wire()
 }
 
 fn parse_left_hand_side_expression_with_partial(
     partial_parser_result: ffi::WireAstNode,
 ) -> ffi::WireExpressionResult {
-    parse_left_hand_side_expression_with_partial_result(expression_result(
+    parse_left_hand_side_expression_with_partial_compact(partial_parser_result).into_wire()
+}
+
+fn parse_left_hand_side_expression_with_partial_compact(
+    partial_parser_result: ffi::WireAstNode,
+) -> RustExpressionResult {
+    parse_left_hand_side_expression_with_partial_result_compact(RustExpressionResult::new(
         partial_parser_result,
         Vec::new(),
     ))
@@ -10240,6 +14247,15 @@ fn parse_left_hand_side_expression_with_partial(
 fn parse_left_hand_side_expression_with_partial_result(
     partial_parser_result: ffi::WireExpressionResult,
 ) -> ffi::WireExpressionResult {
+    parse_left_hand_side_expression_with_partial_result_compact(RustExpressionResult::from_wire(
+        partial_parser_result,
+    ))
+    .into_wire()
+}
+
+fn parse_left_hand_side_expression_with_partial_result_compact(
+    partial_parser_result: RustExpressionResult,
+) -> RustExpressionResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut errors = Vec::new();
@@ -10249,16 +14265,16 @@ fn parse_left_hand_side_expression_with_partial_result(
         let mut location = current_location();
         let new = expect_token(token::TOKEN_NEW);
         if !new.errors.is_empty() {
-            return empty_expression_result(new.errors);
+            return RustExpressionResult::empty(new.errors);
         }
-        let type_name_detail = parse_type_name();
+        let type_name_detail = parse_type_name_parts_with_node_id(current_node_id());
         if parser_errors_have_fatal(&type_name_detail.errors) {
-            return empty_expression_result(type_name_detail.errors);
+            return RustExpressionResult::empty(type_name_detail.errors);
         }
         errors.extend(type_name_detail.errors.clone());
         let type_name = type_name_detail.type_name.clone();
         if !type_name.present {
-            return empty_expression_result(errors);
+            return RustExpressionResult::empty(errors);
         }
         location.end = type_name.location.end;
         let new_expression = ffi::WireAstNode {
@@ -10268,20 +14284,22 @@ fn parse_left_hand_side_expression_with_partial_result(
             location,
             text: empty_string(),
         };
-        let mut result = expression_result(new_expression, Vec::new());
-        result.type_name = type_name;
-        result.type_name_detail = type_name_detail;
+        let mut result = RustExpressionResult::new(new_expression, Vec::new());
+        result.data = RustExpressionData::New {
+            type_name,
+            type_name_detail,
+        };
         result
     } else if current_token() == token::TOKEN_PAYABLE {
         let mut location = current_location();
         let payable = expect_token(token::TOKEN_PAYABLE);
         if !payable.errors.is_empty() {
-            return empty_expression_result(payable.errors);
+            return RustExpressionResult::empty(payable.errors);
         }
         location.end = current_location().end;
         let lparen = expect_token_no_advance(token::TOKEN_LPAREN);
         if !lparen.errors.is_empty() {
-            return empty_expression_result(lparen.errors);
+            return RustExpressionResult::empty(lparen.errors);
         }
 
         let node_id = allocate_node_id_after_reserving(current_node_id(), 2);
@@ -10301,11 +14319,11 @@ fn parse_left_hand_side_expression_with_partial_result(
             location,
             text: expression_type.text.clone(),
         };
-        let mut result = expression_result(expression, Vec::new());
-        result.expression_type = expression_type;
+        let mut result = RustExpressionResult::new(expression, Vec::new());
+        result.data = RustExpressionData::ElementaryTypeNameExpression { expression_type };
         result
     } else {
-        let mut primary_expression = parse_primary_expression();
+        let mut primary_expression = parse_primary_expression_compact();
         if parser_errors_have_fatal(&primary_expression.errors) {
             return primary_expression;
         }
@@ -10314,61 +14332,61 @@ fn parse_left_hand_side_expression_with_partial_result(
     };
     let mut expression = result.expression.clone();
     if !expression.present {
-        return empty_expression_result(errors);
+        return RustExpressionResult::empty(errors);
     }
 
     loop {
         match current_token() {
             token::TOKEN_LBRACK => {
                 let base_expression = expression.clone();
-                let base_expression_type = result.expression_type.clone();
+                let base_expression_type = result.expression_type();
                 let base_expression_detail = result;
                 let mut location = expression.location.clone();
                 advance();
                 let index = if current_token() != token::TOKEN_RBRACK
                     && current_token() != token::TOKEN_COLON
                 {
-                    let index = parse_expression();
+                    let index = parse_expression_compact();
                     if parser_errors_have_fatal(&index.errors) {
                         errors.extend(index.errors);
-                        return empty_expression_result(errors);
+                        return RustExpressionResult::empty(errors);
                     }
                     errors.extend(index.errors.clone());
                     let index_node = index.expression.clone();
                     if !index_node.present {
-                        return empty_expression_result(errors);
+                        return RustExpressionResult::empty(errors);
                     }
-                    (index_node, vec![index])
+                    (index_node, Some(Box::new(index)))
                 } else {
-                    (empty_ast_node(), Vec::new())
+                    (empty_ast_node(), None)
                 };
 
                 if current_token() == token::TOKEN_COLON {
                     let colon = expect_token(token::TOKEN_COLON);
                     if !colon.errors.is_empty() {
                         errors.extend(colon.errors);
-                        return empty_expression_result(errors);
+                        return RustExpressionResult::empty(errors);
                     }
                     let end_index = if current_token() != token::TOKEN_RBRACK {
-                        let end_index = parse_expression();
+                        let end_index = parse_expression_compact();
                         if parser_errors_have_fatal(&end_index.errors) {
                             errors.extend(end_index.errors);
-                            return empty_expression_result(errors);
+                            return RustExpressionResult::empty(errors);
                         }
                         errors.extend(end_index.errors.clone());
                         let end_index_node = end_index.expression.clone();
                         if !end_index_node.present {
-                            return empty_expression_result(errors);
+                            return RustExpressionResult::empty(errors);
                         }
-                        (end_index_node, vec![end_index])
+                        (end_index_node, Some(Box::new(end_index)))
                     } else {
-                        (empty_ast_node(), Vec::new())
+                        (empty_ast_node(), None)
                     };
                     location.end = current_location().end;
                     let rbrack = expect_token(token::TOKEN_RBRACK);
                     if !rbrack.errors.is_empty() {
                         errors.extend(rbrack.errors);
-                        return empty_expression_result(errors);
+                        return RustExpressionResult::empty(errors);
                     }
                     let nodes = [
                         base_expression.clone(),
@@ -10382,21 +14400,23 @@ fn parse_left_hand_side_expression_with_partial_result(
                         location,
                         text: empty_string(),
                     };
-                    result = expression_result(index_range_access.clone(), Vec::new());
-                    result.base_expression = base_expression;
-                    result.base_expression_detail.push(base_expression_detail);
-                    result.base_expression_type = base_expression_type;
-                    result.index_expression = index.0;
-                    result.index_expression_detail = index.1;
-                    result.end_index_expression = end_index.0;
-                    result.end_index_expression_detail = end_index.1;
+                    result = RustExpressionResult::new(index_range_access.clone(), Vec::new());
+                    result.data = RustExpressionData::IndexRangeAccess {
+                        base_expression,
+                        base_expression_detail: Box::new(base_expression_detail),
+                        base_expression_type,
+                        index_expression: index.0,
+                        index_expression_detail: index.1,
+                        end_index_expression: end_index.0,
+                        end_index_expression_detail: end_index.1,
+                    };
                     expression = index_range_access;
                 } else {
                     location.end = current_location().end;
                     let rbrack = expect_token(token::TOKEN_RBRACK);
                     if !rbrack.errors.is_empty() {
                         errors.extend(rbrack.errors);
-                        return empty_expression_result(errors);
+                        return RustExpressionResult::empty(errors);
                     }
                     let nodes = [base_expression.clone(), index.0.clone()];
                     let index_access = ffi::WireAstNode {
@@ -10406,18 +14426,20 @@ fn parse_left_hand_side_expression_with_partial_result(
                         location,
                         text: empty_string(),
                     };
-                    result = expression_result(index_access.clone(), Vec::new());
-                    result.base_expression = base_expression;
-                    result.base_expression_detail.push(base_expression_detail);
-                    result.base_expression_type = base_expression_type;
-                    result.index_expression = index.0;
-                    result.index_expression_detail = index.1;
+                    result = RustExpressionResult::new(index_access.clone(), Vec::new());
+                    result.data = RustExpressionData::IndexAccess {
+                        base_expression,
+                        base_expression_detail: Box::new(base_expression_detail),
+                        base_expression_type,
+                        index_expression: index.0,
+                        index_expression_detail: index.1,
+                    };
                     expression = index_access;
                 }
             }
             token::TOKEN_PERIOD => {
                 let base_expression = expression.clone();
-                let base_expression_type = result.expression_type.clone();
+                let base_expression_type = result.expression_type();
                 let base_expression_detail = result;
                 advance();
                 let member_location = current_location();
@@ -10429,7 +14451,7 @@ fn parse_left_hand_side_expression_with_partial_result(
                 advance_by(member_name.tokens_consumed);
                 if !member_name.errors.is_empty() {
                     errors.extend(member_name.errors);
-                    return empty_expression_result(errors);
+                    return RustExpressionResult::empty(errors);
                 }
                 let mut location = expression.location.clone();
                 location.end = member_location.end;
@@ -10440,22 +14462,24 @@ fn parse_left_hand_side_expression_with_partial_result(
                     location,
                     text: member_name.value,
                 };
-                result = expression_result(member_access.clone(), Vec::new());
-                result.base_expression = base_expression;
-                result.base_expression_detail.push(base_expression_detail);
-                result.base_expression_type = base_expression_type;
-                result.member_name_location = member_location;
+                result = RustExpressionResult::new(member_access.clone(), Vec::new());
+                result.data = RustExpressionData::MemberAccess {
+                    base_expression,
+                    base_expression_detail: Box::new(base_expression_detail),
+                    base_expression_type,
+                    member_name_location: member_location,
+                };
                 expression = member_access;
             }
             token::TOKEN_LPAREN => {
                 let callee = expression.clone();
-                let callee_expression_type = result.expression_type.clone();
+                let callee_expression_type = result.expression_type();
                 let callee_detail = result;
                 advance();
-                let mut function_call_arguments = parse_function_call_arguments();
+                let mut function_call_arguments = parse_function_call_arguments_compact();
                 if parser_errors_have_fatal(&function_call_arguments.errors) {
                     errors.extend(std::mem::take(&mut function_call_arguments.errors));
-                    return empty_expression_result(errors);
+                    return RustExpressionResult::empty(errors);
                 }
                 errors.extend(std::mem::take(&mut function_call_arguments.errors));
                 let mut location = expression.location.clone();
@@ -10463,7 +14487,7 @@ fn parse_left_hand_side_expression_with_partial_result(
                 let rparen = expect_token(token::TOKEN_RPAREN);
                 if !rparen.errors.is_empty() {
                     errors.extend(rparen.errors);
-                    return empty_expression_result(errors);
+                    return RustExpressionResult::empty(errors);
                 }
                 let mut nodes = function_call_arguments.arguments.clone();
                 nodes.push(callee.clone());
@@ -10474,14 +14498,16 @@ fn parse_left_hand_side_expression_with_partial_result(
                     location,
                     text: empty_string(),
                 };
-                result = expression_result(function_call.clone(), Vec::new());
-                result.base_expression = callee;
-                result.base_expression_detail.push(callee_detail);
-                result.base_expression_type = callee_expression_type;
-                result.arguments = function_call_arguments.arguments;
-                result.argument_details = function_call_arguments.argument_details;
-                result.parameter_names = function_call_arguments.parameter_names;
-                result.parameter_name_locations = function_call_arguments.parameter_name_locations;
+                result = RustExpressionResult::new(function_call.clone(), Vec::new());
+                result.data = RustExpressionData::FunctionCall {
+                    base_expression: callee,
+                    base_expression_detail: Box::new(callee_detail),
+                    base_expression_type: callee_expression_type,
+                    arguments: function_call_arguments.arguments,
+                    argument_details: function_call_arguments.argument_details,
+                    parameter_names: function_call_arguments.parameter_names,
+                    parameter_name_locations: function_call_arguments.parameter_name_locations,
+                };
                 expression = function_call;
             }
             token::TOKEN_LBRACE => {
@@ -10493,17 +14519,17 @@ fn parse_left_hand_side_expression_with_partial_result(
                 }
 
                 let callee = expression.clone();
-                let callee_expression_type = result.expression_type.clone();
+                let callee_expression_type = result.expression_type();
                 let callee_detail = result;
                 let lbrace = expect_token(token::TOKEN_LBRACE);
                 if !lbrace.errors.is_empty() {
                     errors.extend(lbrace.errors);
-                    return empty_expression_result(errors);
+                    return RustExpressionResult::empty(errors);
                 }
-                let mut option_list = parse_named_arguments();
+                let mut option_list = parse_named_arguments_compact();
                 if parser_errors_have_fatal(&option_list.errors) {
                     errors.extend(std::mem::take(&mut option_list.errors));
-                    return empty_expression_result(errors);
+                    return RustExpressionResult::empty(errors);
                 }
                 errors.extend(std::mem::take(&mut option_list.errors));
                 let mut location = expression.location.clone();
@@ -10511,7 +14537,7 @@ fn parse_left_hand_side_expression_with_partial_result(
                 let rbrace = expect_token(token::TOKEN_RBRACE);
                 if !rbrace.errors.is_empty() {
                     errors.extend(rbrace.errors);
-                    return empty_expression_result(errors);
+                    return RustExpressionResult::empty(errors);
                 }
                 let mut nodes = option_list.arguments.clone();
                 nodes.push(callee.clone());
@@ -10522,14 +14548,16 @@ fn parse_left_hand_side_expression_with_partial_result(
                     location,
                     text: empty_string(),
                 };
-                result = expression_result(function_call_options.clone(), Vec::new());
-                result.base_expression = callee;
-                result.base_expression_detail.push(callee_detail);
-                result.base_expression_type = callee_expression_type;
-                result.arguments = option_list.arguments;
-                result.argument_details = option_list.argument_details;
-                result.parameter_names = option_list.parameter_names;
-                result.parameter_name_locations = option_list.parameter_name_locations;
+                result = RustExpressionResult::new(function_call_options.clone(), Vec::new());
+                result.data = RustExpressionData::FunctionCall {
+                    base_expression: callee,
+                    base_expression_detail: Box::new(callee_detail),
+                    base_expression_type: callee_expression_type,
+                    arguments: option_list.arguments,
+                    argument_details: option_list.argument_details,
+                    parameter_names: option_list.parameter_names,
+                    parameter_name_locations: option_list.parameter_name_locations,
+                };
                 expression = function_call_options;
             }
             _ => {
@@ -10562,6 +14590,10 @@ fn token_to_wire_string(token: u32) -> ffi::WireString {
 }
 
 pub fn parse_literal() -> ffi::WireExpressionResult {
+    parse_literal_compact().into_wire()
+}
+
+fn parse_literal_compact() -> RustExpressionResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut errors = Vec::new();
@@ -10587,7 +14619,7 @@ pub fn parse_literal() -> ffi::WireExpressionResult {
             if current_token() == token::TOKEN_ILLEGAL {
                 let message = current_error();
                 errors.push(fatal_parser_error(5428, &message));
-                return empty_expression_result(errors);
+                return RustExpressionResult::empty(errors);
             }
         }
         _ => unreachable!(),
@@ -10606,9 +14638,11 @@ pub fn parse_literal() -> ffi::WireExpressionResult {
         location,
         text: ffi::WireString { bytes: value },
     };
-    let mut result = expression_result(literal, errors);
-    result.literal_token = initial_token;
-    result.literal_subdenomination = literal_subdenomination;
+    let mut result = RustExpressionResult::new(literal, errors);
+    result.data = RustExpressionData::Literal {
+        literal_token: initial_token,
+        literal_subdenomination,
+    };
     result
 }
 
@@ -10617,6 +14651,10 @@ fn is_subdenomination(token: u32) -> bool {
 }
 
 pub fn parse_primary_expression() -> ffi::WireExpressionResult {
+    parse_primary_expression_compact().into_wire()
+}
+
+fn parse_primary_expression_compact() -> RustExpressionResult {
     let _recursion_guard = RecursionGuard::new();
 
     let mut errors = Vec::new();
@@ -10627,12 +14665,12 @@ pub fn parse_primary_expression() -> ffi::WireExpressionResult {
         | token::TOKEN_NUMBER
         | token::TOKEN_STRING_LITERAL
         | token::TOKEN_UNICODE_STRING_LITERAL
-        | token::TOKEN_HEX_STRING_LITERAL => parse_literal(),
+        | token::TOKEN_HEX_STRING_LITERAL => parse_literal_compact(),
         token::TOKEN_IDENTIFIER => {
             let location = current_location();
             let literal = get_literal_and_advance(current_literal());
             advance_by(literal.tokens_consumed);
-            expression_result(
+            RustExpressionResult::new(
                 ffi::WireAstNode {
                     present: true,
                     node_id: allocate_node_id_after(current_node_id()),
@@ -10646,7 +14684,7 @@ pub fn parse_primary_expression() -> ffi::WireExpressionResult {
         token::TOKEN_TYPE => {
             let location = current_location();
             advance();
-            expression_result(
+            RustExpressionResult::new(
                 ffi::WireAstNode {
                     present: true,
                     node_id: allocate_node_id_after(current_node_id()),
@@ -10674,15 +14712,15 @@ pub fn parse_primary_expression() -> ffi::WireExpressionResult {
             if current_token() != opposite_token {
                 loop {
                     if current_token() != token::TOKEN_COMMA && current_token() != opposite_token {
-                        let component = parse_expression();
+                        let component = parse_expression_compact();
                         if parser_errors_have_fatal(&component.errors) {
                             errors.extend(component.errors);
-                            return empty_expression_result(errors);
+                            return RustExpressionResult::empty(errors);
                         }
                         errors.extend(component.errors.clone());
                         let component_node = component.expression.clone();
                         if !component_node.present {
-                            return empty_expression_result(errors);
+                            return RustExpressionResult::empty(errors);
                         }
                         components.push(component_node);
                         component_details.push(component);
@@ -10693,7 +14731,7 @@ pub fn parse_primary_expression() -> ffi::WireExpressionResult {
                         ));
                     } else {
                         components.push(empty_ast_node());
-                        component_details.push(empty_expression_result(Vec::new()));
+                        component_details.push(RustExpressionResult::empty(Vec::new()));
                     }
 
                     if current_token() == opposite_token {
@@ -10703,7 +14741,7 @@ pub fn parse_primary_expression() -> ffi::WireExpressionResult {
                     let comma = expect_token(token::TOKEN_COMMA);
                     if !comma.errors.is_empty() {
                         errors.extend(comma.errors);
-                        return empty_expression_result(errors);
+                        return RustExpressionResult::empty(errors);
                     }
                 }
             }
@@ -10712,7 +14750,7 @@ pub fn parse_primary_expression() -> ffi::WireExpressionResult {
             let close = expect_token(opposite_token);
             if !close.errors.is_empty() {
                 errors.extend(close.errors);
-                return empty_expression_result(errors);
+                return RustExpressionResult::empty(errors);
             }
 
             let tuple_expression = ffi::WireAstNode {
@@ -10726,16 +14764,18 @@ pub fn parse_primary_expression() -> ffi::WireExpressionResult {
                 location,
                 text: empty_string(),
             };
-            let mut result = expression_result(tuple_expression, errors);
-            result.components = components;
-            result.component_details = component_details;
-            result.is_inline_array = is_array;
+            let mut result = RustExpressionResult::new(tuple_expression, errors);
+            result.data = RustExpressionData::Tuple {
+                components,
+                component_details,
+                is_inline_array: is_array,
+            };
             result
         }
         token::TOKEN_ILLEGAL => {
             let message = current_error();
             errors.push(fatal_parser_error(8936, &message));
-            empty_expression_result(errors)
+            RustExpressionResult::empty(errors)
         }
         _ if token::is_elementary_type_name(token) => {
             let result = elementary_type_name_expression_result_from_current_token();
@@ -10744,15 +14784,19 @@ pub fn parse_primary_expression() -> ffi::WireExpressionResult {
         }
         _ => {
             errors.push(fatal_parser_error(6933, "Expected primary expression."));
-            empty_expression_result(errors)
+            RustExpressionResult::empty(errors)
         }
     }
 }
 
 pub fn parse_function_call_arguments() -> ffi::WireFunctionCallArguments {
+    parse_function_call_arguments_compact().into_wire()
+}
+
+fn parse_function_call_arguments_compact() -> RustFunctionCallArguments {
     let _recursion_guard = RecursionGuard::new();
 
-    let mut ret = empty_function_call_arguments();
+    let mut ret = empty_rust_function_call_arguments();
 
     let current = current_token();
     if current == token::TOKEN_LBRACE {
@@ -10763,7 +14807,7 @@ pub fn parse_function_call_arguments() -> ffi::WireFunctionCallArguments {
             return ret;
         }
 
-        let mut named_arguments = parse_named_arguments();
+        let mut named_arguments = parse_named_arguments_compact();
         named_arguments.tokens_consumed += open_brace.tokens_consumed;
         ret = named_arguments;
         if parser_errors_have_fatal(&ret.errors) {
@@ -10774,15 +14818,19 @@ pub fn parse_function_call_arguments() -> ffi::WireFunctionCallArguments {
         ret.tokens_consumed += close_brace.tokens_consumed;
         ret.errors.extend(close_brace.errors);
     } else {
-        ret = parse_function_call_list_arguments_with_errors();
+        ret = parse_function_call_list_arguments_with_errors_compact();
     }
 
     ret
 }
 
 pub fn parse_named_arguments() -> ffi::WireFunctionCallArguments {
+    parse_named_arguments_compact().into_wire()
+}
+
+fn parse_named_arguments_compact() -> RustFunctionCallArguments {
     let start_cursor = parser_cursor();
-    let mut ret = empty_function_call_arguments();
+    let mut ret = empty_rust_function_call_arguments();
 
     let mut first = true;
     while current_token() != token::TOKEN_RBRACE {
@@ -10790,7 +14838,7 @@ pub fn parse_named_arguments() -> ffi::WireFunctionCallArguments {
             let comma = expect_token(token::TOKEN_COMMA);
             if !comma.errors.is_empty() {
                 ret.errors.extend(comma.errors);
-                return function_call_arguments_with_consumed(ret, start_cursor);
+                return rust_function_call_arguments_with_consumed(ret, start_cursor);
             }
         }
 
@@ -10803,7 +14851,7 @@ pub fn parse_named_arguments() -> ffi::WireFunctionCallArguments {
         advance_by(identifier_with_location.tokens_consumed);
         if !identifier_with_location.errors.is_empty() {
             ret.errors.extend(identifier_with_location.errors);
-            return function_call_arguments_with_consumed(ret, start_cursor);
+            return rust_function_call_arguments_with_consumed(ret, start_cursor);
         }
 
         ret.parameter_names
@@ -10814,18 +14862,18 @@ pub fn parse_named_arguments() -> ffi::WireFunctionCallArguments {
         let colon = expect_token(token::TOKEN_COLON);
         if !colon.errors.is_empty() {
             ret.errors.extend(colon.errors);
-            return function_call_arguments_with_consumed(ret, start_cursor);
+            return rust_function_call_arguments_with_consumed(ret, start_cursor);
         }
 
-        let argument = parse_expression();
+        let argument = parse_expression_compact();
         if parser_errors_have_fatal(&argument.errors) {
             ret.errors.extend(argument.errors);
-            return function_call_arguments_with_consumed(ret, start_cursor);
+            return rust_function_call_arguments_with_consumed(ret, start_cursor);
         }
         ret.errors.extend(argument.errors.clone());
         let argument_node = argument.expression.clone();
         if !argument_node.present {
-            return function_call_arguments_with_consumed(ret, start_cursor);
+            return rust_function_call_arguments_with_consumed(ret, start_cursor);
         }
         ret.arguments.push(argument_node);
         ret.argument_details.push(argument);
@@ -10839,7 +14887,7 @@ pub fn parse_named_arguments() -> ffi::WireFunctionCallArguments {
         first = false;
     }
 
-    function_call_arguments_with_consumed(ret, start_cursor)
+    rust_function_call_arguments_with_consumed(ret, start_cursor)
 }
 
 pub fn expect_identifier_with_location(
@@ -10876,6 +14924,14 @@ pub fn variable_declaration_start(current_token: u32, next_token: u32) -> bool {
 pub fn find_license_string(
     source: ffi::WireString,
     nodes: Vec<ffi::WireAstNode>,
+    source_id: i64,
+) -> ffi::WireLicenseStringResult {
+    find_license_string_borrowed(&source, &nodes, source_id)
+}
+
+fn find_license_string_borrowed(
+    source: &ffi::WireString,
+    nodes: &[ffi::WireAstNode],
     source_id: i64,
 ) -> ffi::WireLicenseStringResult {
     let mut sequences_to_search = vec![(0usize, source.bytes.len())];
@@ -11056,8 +15112,9 @@ pub fn parse_index_accessed_path() -> ffi::WireIndexAccessedPath {
         }
     } else if token::is_elementary_type_name(current_token()) {
         let expression = elementary_type_name_expression_result_from_current_token();
+        let expression_type = expression.expression_type();
         iap.path.push(expression.expression);
-        iap.path_expression_types.push(expression.expression_type);
+        iap.path_expression_types.push(expression_type);
         advance();
     } else {
         return iap;
@@ -11963,6 +16020,77 @@ fn modifier_invocation_result(
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ParsedModifierInvocationResult {
+    pub(crate) modifier_invocation: ffi::WireAstNode,
+    pub(crate) modifier_name: ffi::WireAstNode,
+    pub(crate) modifier_name_detail: ffi::WireIdentifierPathResult,
+    pub(crate) has_arguments: bool,
+    pub(crate) arguments: Vec<ffi::WireAstNode>,
+    pub(crate) argument_details: Vec<RustExpressionResult>,
+    pub(crate) tokens_consumed: u64,
+    pub(crate) current_node_id: i64,
+    pub(crate) errors: Vec<ffi::WireParserError>,
+}
+
+impl ParsedModifierInvocationResult {
+    fn into_wire(self) -> ffi::WireModifierInvocationResult {
+        ffi::WireModifierInvocationResult {
+            modifier_invocation: self.modifier_invocation,
+            modifier_name: self.modifier_name,
+            modifier_name_detail: self.modifier_name_detail,
+            has_arguments: self.has_arguments,
+            arguments: self.arguments,
+            argument_details: into_wire_expression_details(self.argument_details),
+            tokens_consumed: self.tokens_consumed,
+            current_node_id: self.current_node_id,
+            errors: self.errors,
+        }
+    }
+}
+
+fn empty_parsed_modifier_invocation_result(
+    tokens_consumed: u64,
+    current_node_id: i64,
+    errors: Vec<ffi::WireParserError>,
+) -> ParsedModifierInvocationResult {
+    ParsedModifierInvocationResult {
+        modifier_invocation: empty_ast_node(),
+        modifier_name: empty_ast_node(),
+        modifier_name_detail: empty_identifier_path_result(current_node_id),
+        has_arguments: false,
+        arguments: Vec::new(),
+        argument_details: Vec::new(),
+        tokens_consumed,
+        current_node_id,
+        errors,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parsed_modifier_invocation_result(
+    modifier_invocation: ffi::WireAstNode,
+    modifier_name_detail: ffi::WireIdentifierPathResult,
+    has_arguments: bool,
+    arguments: Vec<ffi::WireAstNode>,
+    argument_details: Vec<RustExpressionResult>,
+    tokens_consumed: u64,
+    current_node_id: i64,
+    errors: Vec<ffi::WireParserError>,
+) -> ParsedModifierInvocationResult {
+    ParsedModifierInvocationResult {
+        modifier_invocation,
+        modifier_name: modifier_name_detail.identifier_path.clone(),
+        modifier_name_detail,
+        has_arguments,
+        arguments,
+        argument_details,
+        tokens_consumed,
+        current_node_id,
+        errors,
+    }
+}
+
 fn pragma_directive_result(
     pragma_directive: ffi::WireAstNode,
     tokens: Vec<u32>,
@@ -12220,6 +16348,290 @@ fn function_definition_result(
     }
 }
 
+fn parse_compact_impl() -> crate::compact::CompactParseOutput {
+    assert!(!inside_modifier());
+
+    reset_recursion_depth();
+    rewind_parser_input();
+    clear_reported_parser_diagnostics();
+    let mut location = current_location();
+    set_experimental_solidity_enabled_in_current_source_unit(false);
+
+    let mut builder = crate::compact::CompactSourceUnitBuilder::new();
+    let mut nodes = Vec::new();
+    let mut experimental_solidity_enabled = false;
+
+    while current_token() == token::TOKEN_PRAGMA {
+        let pragma = parse_pragma_directive_compact(builder.start_pragma_directive(), false);
+        if parser_errors_have_fatal(&pragma.errors) {
+            return compact_result_from_errors(pragma.errors);
+        }
+        report_nonfatal_parser_errors(&pragma.errors);
+        if !pragma.pragma_directive.present {
+            return compact_result_error("Failed to parse pragma directive.");
+        }
+        experimental_solidity_enabled |= pragma.experimental_solidity_enabled;
+        nodes.push(pragma.pragma_directive);
+    }
+
+    if experimental_solidity_enabled {
+        set_scanner_mode_experimental_solidity();
+    }
+
+    while current_token() != token::TOKEN_EOS {
+        match current_token() {
+            token::TOKEN_PRAGMA => {
+                let pragma = parse_pragma_directive_compact(builder.start_pragma_directive(), true);
+                if parser_errors_have_fatal(&pragma.errors) {
+                    return compact_result_from_errors(pragma.errors);
+                }
+                report_nonfatal_parser_errors(&pragma.errors);
+                if !pragma.pragma_directive.present {
+                    return compact_result_error("Failed to parse pragma directive.");
+                }
+                experimental_solidity_enabled |= pragma.experimental_solidity_enabled;
+                nodes.push(pragma.pragma_directive);
+            }
+            token::TOKEN_IMPORT => {
+                let import = parse_import_directive_compact(builder.start_import_directive());
+                if parser_errors_have_fatal(&import.errors) {
+                    return compact_result_from_errors(import.errors);
+                }
+                report_nonfatal_parser_errors(&import.errors);
+                if !import.import_directive.present {
+                    return compact_result_error("Failed to parse import directive.");
+                }
+                nodes.push(import.import_directive);
+            }
+            token::TOKEN_ABSTRACT
+            | token::TOKEN_INTERFACE
+            | token::TOKEN_CONTRACT
+            | token::TOKEN_LIBRARY => {
+                let contract = parse_contract_definition_compact(&mut builder);
+                if parser_errors_have_fatal(&contract.errors) {
+                    return compact_result_from_errors(contract.errors);
+                }
+                report_nonfatal_parser_errors(&contract.errors);
+                if !contract.contract_definition.present {
+                    return compact_result_error("Failed to parse contract definition.");
+                }
+                nodes.push(contract.contract_definition);
+            }
+            token::TOKEN_STRUCT => {
+                let struct_definition =
+                    parse_struct_definition_compact(builder.start_struct_definition());
+                if parser_errors_have_fatal(&struct_definition.errors) {
+                    return compact_result_from_errors(struct_definition.errors);
+                }
+                report_nonfatal_parser_errors(&struct_definition.errors);
+                if !struct_definition.struct_definition.present {
+                    return compact_result_error("Failed to parse struct definition.");
+                }
+                nodes.push(struct_definition.struct_definition);
+            }
+            token::TOKEN_ENUM => {
+                let enum_definition =
+                    parse_enum_definition_compact(builder.start_enum_definition());
+                if parser_errors_have_fatal(&enum_definition.errors) {
+                    return compact_result_from_errors(enum_definition.errors);
+                }
+                report_nonfatal_parser_errors(&enum_definition.errors);
+                if !enum_definition.enum_definition.present {
+                    return compact_result_error("Failed to parse enum definition.");
+                }
+                nodes.push(enum_definition.enum_definition);
+            }
+            token::TOKEN_TYPE => {
+                if experimental_solidity_enabled {
+                    let type_definition = parse_type_definition_compact();
+                    if parser_errors_have_fatal(&type_definition.errors) {
+                        return compact_result_from_errors(type_definition.errors);
+                    }
+                    report_nonfatal_parser_errors(&type_definition.errors);
+                    if !type_definition.type_definition.present {
+                        return compact_result_error("Failed to parse type definition.");
+                    }
+                    nodes.push(type_definition.type_definition.clone());
+                    builder.add_parsed_type_definition(&type_definition);
+                } else {
+                    let type_definition = parse_user_defined_value_type_definition_compact(
+                        builder.start_user_defined_value_type_definition(),
+                    );
+                    if parser_errors_have_fatal(&type_definition.errors) {
+                        return compact_result_from_errors(type_definition.errors);
+                    }
+                    report_nonfatal_parser_errors(&type_definition.errors);
+                    if !type_definition.user_defined_value_type_definition.present {
+                        return compact_result_error("Failed to parse type definition.");
+                    }
+                    nodes.push(type_definition.user_defined_value_type_definition);
+                }
+            }
+            token::TOKEN_USING => {
+                let using_directive =
+                    parse_using_directive_compact(builder.start_using_directive());
+                if parser_errors_have_fatal(&using_directive.errors) {
+                    return compact_result_from_errors(using_directive.errors);
+                }
+                report_nonfatal_parser_errors(&using_directive.errors);
+                if !using_directive.using_directive.present {
+                    return compact_result_error("Failed to parse using directive.");
+                }
+                nodes.push(using_directive.using_directive);
+            }
+            token::TOKEN_FUNCTION => {
+                let function =
+                    parse_function_definition_compact(builder.start_function(), true, true);
+                if parser_errors_have_fatal(&function.errors) {
+                    report_parser_warnings(&function.warnings);
+                    return compact_result_from_errors(function.errors);
+                }
+                report_nonfatal_parser_errors(&function.errors);
+                report_parser_warnings(&function.warnings);
+                if !function.function_definition.present {
+                    return compact_result_error("Failed to parse function definition.");
+                }
+                nodes.push(function.function_definition);
+            }
+            token::TOKEN_FORALL => {
+                let quantified_function = parse_quantified_function_definition_compact(
+                    builder.start_for_all_quantifier(),
+                );
+                if parser_errors_have_fatal(&quantified_function.errors) {
+                    return compact_result_from_errors(quantified_function.errors);
+                }
+                report_nonfatal_parser_errors(&quantified_function.errors);
+                if !quantified_function.for_all_quantifier.present {
+                    return compact_result_error("Failed to parse quantified function definition.");
+                }
+                nodes.push(quantified_function.for_all_quantifier);
+            }
+            token::TOKEN_EVENT => {
+                let event_definition =
+                    parse_event_definition_compact(builder.start_event_definition());
+                if parser_errors_have_fatal(&event_definition.errors) {
+                    return compact_result_from_errors(event_definition.errors);
+                }
+                report_nonfatal_parser_errors(&event_definition.errors);
+                if !event_definition.event_definition.present {
+                    return compact_result_error("Failed to parse event definition.");
+                }
+                nodes.push(event_definition.event_definition);
+            }
+            token::TOKEN_CLASS => {
+                assert!(experimental_solidity_enabled);
+                let type_class_definition =
+                    parse_type_class_definition_compact(builder.start_type_class_definition());
+                if parser_errors_have_fatal(&type_class_definition.errors) {
+                    return compact_result_from_errors(type_class_definition.errors);
+                }
+                report_nonfatal_parser_errors(&type_class_definition.errors);
+                if !type_class_definition.type_class_definition.present {
+                    return compact_result_error("Failed to parse type class definition.");
+                }
+                nodes.push(type_class_definition.type_class_definition);
+            }
+            token::TOKEN_INSTANTIATION => {
+                assert!(experimental_solidity_enabled);
+                let type_class_instantiation = parse_type_class_instantiation_compact(
+                    builder.start_type_class_instantiation(),
+                );
+                if parser_errors_have_fatal(&type_class_instantiation.errors) {
+                    return compact_result_from_errors(type_class_instantiation.errors);
+                }
+                report_nonfatal_parser_errors(&type_class_instantiation.errors);
+                if !type_class_instantiation.type_class_instantiation.present {
+                    return compact_result_error("Failed to parse type class instantiation.");
+                }
+                nodes.push(type_class_instantiation.type_class_instantiation);
+            }
+            _ => {
+                if current_token() == token::TOKEN_IDENTIFIER
+                    && current_literal().bytes == b"error"
+                    && peek_next_token() == token::TOKEN_IDENTIFIER
+                    && peek_next_next_token() == token::TOKEN_LPAREN
+                {
+                    let error_definition =
+                        parse_error_definition_compact(builder.start_error_definition());
+                    if parser_errors_have_fatal(&error_definition.errors) {
+                        return compact_result_from_errors(error_definition.errors);
+                    }
+                    report_nonfatal_parser_errors(&error_definition.errors);
+                    if !error_definition.error_definition.present {
+                        return compact_result_error("Failed to parse error definition.");
+                    }
+                    nodes.push(error_definition.error_definition);
+                } else if variable_declaration_start(current_token(), peek_next_token())
+                    && peek_next_token() != token::TOKEN_EOS
+                {
+                    let options = VarDeclParserOptions {
+                        kind: VAR_DECL_KIND_FILE_LEVEL,
+                        allow_initial_value: true,
+                        ..VarDeclParserOptions::default()
+                    };
+                    let variable_current_node_id = max_node_id(current_node_id(), &nodes);
+                    let variable_declaration = parse_variable_declaration_compact(
+                        builder.start_variable(),
+                        options,
+                        empty_ast_node(),
+                        variable_current_node_id,
+                    );
+                    if parser_errors_have_fatal(&variable_declaration.errors) {
+                        return compact_result_from_errors(variable_declaration.errors);
+                    }
+                    report_nonfatal_parser_errors(&variable_declaration.errors);
+                    if !variable_declaration.variable_declaration.present {
+                        return compact_result_error("Failed to parse variable declaration.");
+                    }
+                    nodes.push(variable_declaration.variable_declaration);
+
+                    let semicolon = expect_token(token::TOKEN_SEMICOLON);
+                    if !semicolon.errors.is_empty() {
+                        return compact_result_from_errors(semicolon.errors);
+                    }
+                } else {
+                    return compact_result_from_errors(vec![fatal_parser_error(
+                        7858,
+                        "Expected pragma, import directive or contract/interface/library/user-defined type/constant/function/error/event definition.",
+                    )]);
+                }
+            }
+        }
+    }
+
+    location.end = current_location().end;
+    let max_node_id = max_node_id(current_node_id(), &nodes);
+    let license_result = parser_state(|state| {
+        find_license_string_borrowed(&state.source, &nodes, location.source_id)
+    });
+    report_parser_diagnostics(&license_result.diagnostics);
+    let license = license_result.license;
+    let has_license = license.has_value;
+    let license_value = if license.has_value {
+        license.value
+    } else {
+        empty_string()
+    };
+    let source_unit_id = allocate_node_id_after(max_node_id);
+    let source_unit = ffi::WireAstNode {
+        present: true,
+        node_id: source_unit_id,
+        kind: AST_NODE_KIND_SOURCE_UNIT,
+        location,
+        text: license_value.clone(),
+    };
+
+    builder.finish_success(
+        &source_unit,
+        has_license,
+        &license_value,
+        experimental_solidity_enabled,
+        source_unit_id,
+        reported_parser_errors(),
+        reported_parser_warnings(),
+    )
+}
+
 fn parser_result_from_errors(errors: Vec<ffi::WireParserError>) -> ffi::WireParserResult {
     let first_fatal = errors.iter().find(|error| error.fatal);
     let message = first_fatal
@@ -12232,8 +16644,30 @@ fn parser_result_from_errors(errors: Vec<ffi::WireParserError>) -> ffi::WirePars
     parser_result_error_with_diagnostics(&message, reported_errors, reported_parser_warnings())
 }
 
+fn compact_result_from_errors(
+    errors: Vec<ffi::WireParserError>,
+) -> crate::compact::CompactParseOutput {
+    let first_fatal = errors.iter().find(|error| error.fatal);
+    let message = first_fatal
+        .or_else(|| errors.first())
+        .map(|error| error.message.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let mut reported_errors = reported_parser_errors();
+    reported_errors.extend(errors);
+    compact_result_error_with_diagnostics(&message, reported_errors, reported_parser_warnings())
+}
+
 fn parser_result_error(message: &str) -> ffi::WireParserResult {
     parser_result_error_with_diagnostics(
+        message,
+        reported_parser_errors(),
+        reported_parser_warnings(),
+    )
+}
+
+fn compact_result_error(message: &str) -> crate::compact::CompactParseOutput {
+    compact_result_error_with_diagnostics(
         message,
         reported_parser_errors(),
         reported_parser_warnings(),
@@ -12273,6 +16707,20 @@ fn parser_result_error_with_diagnostics(
         experimental_solidity: experimental_solidity_enabled_in_current_source_unit(),
         max_id: current_node_id(),
     }
+}
+
+fn compact_result_error_with_diagnostics(
+    message: &str,
+    errors: Vec<ffi::WireParserError>,
+    warnings: Vec<ffi::WireParserError>,
+) -> crate::compact::CompactParseOutput {
+    crate::compact::CompactSourceUnitBuilder::new().finish_error(
+        message,
+        experimental_solidity_enabled_in_current_source_unit(),
+        current_node_id(),
+        errors,
+        warnings,
+    )
 }
 
 fn expected_token_error_at(
@@ -12455,36 +16903,35 @@ fn reset_recursion_depth() {
 }
 
 fn rewind_parser_input() {
-    PARSER_STATE.with(|state| {
-        state.borrow_mut().cursor = 0;
+    parser_state_mut(|state| {
+        state.cursor = 0;
     });
 }
 
 fn clear_reported_parser_diagnostics() {
-    PARSER_STATE.with(|state| {
-        let mut state = state.borrow_mut();
+    parser_state_mut(|state| {
         state.reported_errors.clear();
         state.reported_warnings.clear();
     });
 }
 
 fn reported_parser_errors() -> Vec<ffi::WireParserError> {
-    PARSER_STATE.with(|state| state.borrow().reported_errors.clone())
+    parser_state(|state| state.reported_errors.clone())
 }
 
 fn reported_parser_warnings() -> Vec<ffi::WireParserError> {
-    PARSER_STATE.with(|state| state.borrow().reported_warnings.clone())
+    parser_state(|state| state.reported_warnings.clone())
 }
 
 fn record_parser_error(error: ffi::WireParserError) {
-    PARSER_STATE.with(|state| {
-        state.borrow_mut().reported_errors.push(error);
+    parser_state_mut(|state| {
+        state.reported_errors.push(error);
     });
 }
 
 fn record_parser_warning(warning: ffi::WireParserError) {
-    PARSER_STATE.with(|state| {
-        state.borrow_mut().reported_warnings.push(warning);
+    parser_state_mut(|state| {
+        state.reported_warnings.push(warning);
     });
 }
 
@@ -12518,10 +16965,18 @@ fn function_call_arguments_with_consumed(
     arguments
 }
 
-fn function_header_with_consumed(
-    mut header: ffi::WireFunctionHeaderParserResult,
+fn rust_function_call_arguments_with_consumed(
+    mut arguments: RustFunctionCallArguments,
     start_cursor: usize,
-) -> ffi::WireFunctionHeaderParserResult {
+) -> RustFunctionCallArguments {
+    arguments.tokens_consumed = tokens_consumed_since(start_cursor);
+    arguments
+}
+
+fn function_header_with_consumed(
+    mut header: ParsedFunctionHeaderParserResult,
+    start_cursor: usize,
+) -> ParsedFunctionHeaderParserResult {
     header.tokens_consumed = tokens_consumed_since(start_cursor);
     header
 }
@@ -12653,8 +17108,8 @@ fn expect_token_no_advance(expected: u32) -> ParserActionResult {
 }
 
 fn current_token() -> u32 {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state_mut(|state| {
+        state.ensure_current_token();
         state
             .tokens
             .get(state.cursor)
@@ -12664,7 +17119,7 @@ fn current_token() -> u32 {
 }
 
 fn parser_cursor() -> usize {
-    PARSER_STATE.with(|state| state.borrow().cursor)
+    parser_state(|state| state.cursor)
 }
 
 fn tokens_consumed_since(start_cursor: usize) -> u64 {
@@ -12680,8 +17135,8 @@ fn peek_next_location() -> ffi::WireSourceLocation {
 }
 
 fn peek_nth_token(offset: usize) -> u32 {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state_mut(|state| {
+        state.ensure_token_index(state.cursor + offset);
         state
             .tokens
             .get(state.cursor + offset)
@@ -12691,8 +17146,8 @@ fn peek_nth_token(offset: usize) -> u32 {
 }
 
 fn peek_nth_location(offset: usize) -> ffi::WireSourceLocation {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state_mut(|state| {
+        state.ensure_token_index(state.cursor + offset);
         state
             .tokens
             .get(state.cursor + offset)
@@ -12702,8 +17157,8 @@ fn peek_nth_location(offset: usize) -> ffi::WireSourceLocation {
 }
 
 fn peek_next_next_token() -> u32 {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state_mut(|state| {
+        state.ensure_token_index(state.cursor + 2);
         state
             .tokens
             .get(state.cursor + 2)
@@ -12713,19 +17168,33 @@ fn peek_next_next_token() -> u32 {
 }
 
 fn current_literal() -> ffi::WireString {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state_mut(|state| {
+        state.ensure_current_token();
         state
             .tokens
             .get(state.cursor)
-            .map(|token| token.literal.clone())
+            .map(|token| current_literal_from_token(token, &state.source.bytes))
             .unwrap_or_else(empty_string)
     })
 }
 
+fn current_literal_from_token(token: &ffi::WireLocatedToken, source: &[u8]) -> ffi::WireString {
+    if !token.literal.bytes.is_empty() {
+        return token.literal.clone();
+    }
+
+    if token_literal_can_be_recovered_from_source(token.token) {
+        return ffi::WireString {
+            bytes: token_literal_or_source_text(token, source),
+        };
+    }
+
+    empty_string()
+}
+
 fn current_error() -> String {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state_mut(|state| {
+        state.ensure_current_token();
         state
             .tokens
             .get(state.cursor)
@@ -12741,12 +17210,12 @@ fn current_error() -> String {
 }
 
 fn current_source() -> ffi::WireString {
-    PARSER_STATE.with(|state| state.borrow().source.clone())
+    parser_state(|state| state.source.clone())
 }
 
 fn current_comment_literal() -> ffi::WireString {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state_mut(|state| {
+        state.ensure_current_token();
         state
             .comments
             .get(state.cursor)
@@ -12756,8 +17225,8 @@ fn current_comment_literal() -> ffi::WireString {
 }
 
 fn current_comment_location() -> ffi::WireSourceLocation {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state_mut(|state| {
+        state.ensure_current_token();
         state
             .comments
             .get(state.cursor)
@@ -12767,8 +17236,8 @@ fn current_comment_location() -> ffi::WireSourceLocation {
 }
 
 fn current_token_name() -> String {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state_mut(|state| {
+        state.ensure_current_token();
         if let Some(token) = state.tokens.get(state.cursor) {
             if !token.token_name.is_empty() {
                 return token.token_name.clone();
@@ -12798,8 +17267,8 @@ fn current_token_name() -> String {
 }
 
 fn current_location() -> ffi::WireSourceLocation {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state_mut(|state| {
+        state.ensure_current_token();
         state
             .tokens
             .get(state.cursor)
@@ -12809,23 +17278,23 @@ fn current_location() -> ffi::WireSourceLocation {
 }
 
 fn current_node_id() -> i64 {
-    PARSER_STATE.with(|state| state.borrow().current_node_id)
+    parser_state(|state| state.current_node_id)
 }
 
 fn experimental_solidity_enabled_in_current_source_unit() -> bool {
-    PARSER_STATE.with(|state| state.borrow().experimental_solidity_enabled)
+    parser_state(|state| state.experimental_solidity_enabled)
 }
 
 fn set_experimental_solidity_enabled_in_current_source_unit(enabled: bool) {
-    PARSER_STATE.with(|state| {
-        state.borrow_mut().experimental_solidity_enabled = enabled;
+    parser_state_mut(|state| {
+        state.experimental_solidity_enabled = enabled;
     });
 }
 
 fn set_scanner_mode_experimental_solidity() {
-    PARSER_STATE.with(|state| {
-        let mut state = state.borrow_mut();
+    parser_state_mut(|state| {
         state.experimental_solidity_enabled = true;
+
         let source = state.source.bytes.clone();
 
         let tokens_len = state.tokens.len();
@@ -12846,10 +17315,10 @@ fn set_scanner_mode_experimental_solidity() {
             ) {
                 index += 1;
             } else if split_experimental_solidity_hex_string_literal_for_scanner_mode(
-                &mut state, index, &source,
+                state, index, &source,
             ) || split_experimental_solidity_unicode_string_literal_for_scanner_mode(
-                &mut state, index, &source,
-            ) || split_leading_dot_number_for_experimental_solidity(&mut state, index)
+                state, index, &source,
+            ) || split_leading_dot_number_for_experimental_solidity(state, index)
             {
                 index += 2;
             } else {
@@ -12933,8 +17402,7 @@ fn split_experimental_solidity_unicode_string_literal_for_scanner_mode(
 }
 
 fn set_scanner_mode_yul_for_current_inline_block() {
-    PARSER_STATE.with(|state| {
-        let mut state = state.borrow_mut();
+    parser_state_mut(|state| {
         let source = state.source.bytes.clone();
         let tokens_len = state.tokens.len();
         if state.comments.len() < tokens_len {
@@ -12950,9 +17418,9 @@ fn set_scanner_mode_yul_for_current_inline_block() {
                 &source,
                 b"unicode",
             );
-            split_yul_unicode_string_literal_for_scanner_mode(&mut state, index, &source);
-            merge_yul_leading_dot_number_for_scanner_mode(&mut state, index, &source);
-            merge_yul_dotted_identifier_for_scanner_mode(&mut state, index, &source);
+            split_yul_unicode_string_literal_for_scanner_mode(state, index, &source);
+            merge_yul_leading_dot_number_for_scanner_mode(state, index, &source);
+            merge_yul_dotted_identifier_for_scanner_mode(state, index, &source);
             normalize_yul_illegal_token_for_scanner_mode(&mut state.tokens[index]);
             reclassify_token_for_yul_scanner_mode(&mut state.tokens[index], &source);
 
@@ -13590,6 +18058,10 @@ fn token_can_come_from_identifier_or_keyword(token_id: u32) -> bool {
         || token::is_experimental_solidity_only_keyword(token_id)
 }
 
+fn token_literal_can_be_recovered_from_source(token_id: u32) -> bool {
+    token_id == token::TOKEN_NUMBER || token_can_come_from_identifier_or_keyword(token_id)
+}
+
 fn exact_keyword_literal(token_id: u32) -> Option<Vec<u8>> {
     if matches!(
         token_id,
@@ -13632,7 +18104,7 @@ fn is_identifier_part_byte(byte: u8) -> bool {
 }
 
 fn evm_version() -> EvmVersion {
-    PARSER_STATE.with(|state| state.borrow().evm_version)
+    parser_state(|state| state.evm_version)
 }
 
 fn evm_version_at_least(version: EvmVersion) -> bool {
@@ -13644,16 +18116,16 @@ fn evm_version_at_least_constantinople() -> bool {
 }
 
 fn current_compiler_version() -> String {
-    PARSER_STATE.with(|state| state.borrow().current_compiler_version.clone())
+    parser_state(|state| state.current_compiler_version.clone())
 }
 
 fn inside_modifier() -> bool {
-    PARSER_STATE.with(|state| state.borrow().inside_modifier)
+    parser_state(|state| state.inside_modifier)
 }
 
 fn set_inside_modifier(enabled: bool) {
-    PARSER_STATE.with(|state| {
-        state.borrow_mut().inside_modifier = enabled;
+    parser_state_mut(|state| {
+        state.inside_modifier = enabled;
     });
 }
 
@@ -13716,15 +18188,7 @@ fn get_current_stdlib_import_path_and_advance() -> ffi::WireIdentifierResult {
 }
 
 fn advance() -> u64 {
-    PARSER_STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        if state.cursor < state.tokens.len() {
-            state.cursor += 1;
-            1
-        } else {
-            0
-        }
-    })
+    parser_state_mut(ParserState::advance_cursor)
 }
 
 fn advance_by(tokens: u64) {
@@ -13758,8 +18222,7 @@ fn token_to_string(token_id: u32) -> Option<&'static str> {
 }
 
 fn current_token_numbers() -> (u32, u32) {
-    PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    parser_state(|state| {
         state
             .tokens
             .get(state.cursor)
@@ -13774,8 +18237,7 @@ fn current_elementary_type_text(token_id: u32) -> Vec<u8> {
         return literal;
     }
 
-    let token_info_text = PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    let token_info_text = parser_state(|state| {
         state
             .tokens
             .get(state.cursor)
@@ -13797,8 +18259,7 @@ fn current_elementary_type_text(token_id: u32) -> Vec<u8> {
         return token_info_text.into_bytes();
     }
 
-    let source_text = PARSER_STATE.with(|state| {
-        let state = state.borrow();
+    let source_text = parser_state(|state| {
         state
             .tokens
             .get(state.cursor)
@@ -13978,6 +18439,88 @@ fn parse_current_inheritance_specifier_with_node_id(
         current_node_id: node_id,
         errors,
     }
+}
+
+struct CompactInheritanceSpecifierParseResult {
+    inheritance_specifier: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+}
+
+fn compact_inheritance_specifier_parse_result(
+    inheritance_specifier: ffi::WireAstNode,
+    errors: Vec<ffi::WireParserError>,
+) -> CompactInheritanceSpecifierParseResult {
+    CompactInheritanceSpecifierParseResult {
+        inheritance_specifier,
+        errors,
+    }
+}
+
+fn parse_current_inheritance_specifier_compact(
+    builder: crate::compact::CompactInheritanceSpecifierBuilder<'_>,
+    current_node_id: i64,
+) -> CompactInheritanceSpecifierParseResult {
+    let _recursion_guard = RecursionGuard::new();
+
+    let name = parse_current_identifier_path_with_node_id(current_node_id);
+    if !name.errors.is_empty() {
+        return compact_inheritance_specifier_parse_result(empty_ast_node(), name.errors);
+    }
+
+    let base_name_path = name.path;
+    let base_name_path_locations = name.path_locations;
+    let base_name = name.identifier_path;
+    let mut node_location = base_name.location.clone();
+    let mut has_arguments = false;
+    let mut arguments = Vec::new();
+    let mut argument_details = Vec::new();
+    let mut node_id = name.current_node_id;
+    let mut errors = Vec::new();
+
+    if current_token() == token::TOKEN_LPAREN {
+        has_arguments = true;
+        advance();
+
+        let parsed_arguments = parse_function_call_list_arguments_with_errors_compact();
+        if parser_errors_have_fatal(&parsed_arguments.errors) {
+            return compact_inheritance_specifier_parse_result(
+                empty_ast_node(),
+                parsed_arguments.errors,
+            );
+        }
+        errors.extend(parsed_arguments.errors);
+        arguments = parsed_arguments.arguments;
+        argument_details = parsed_arguments.argument_details;
+        node_id = max_node_id(node_id, &arguments);
+
+        node_location.end = current_location().end;
+        let rparen = expect_token(token::TOKEN_RPAREN);
+        if !rparen.errors.is_empty() {
+            errors.extend(rparen.errors);
+            return compact_inheritance_specifier_parse_result(empty_ast_node(), errors);
+        }
+    }
+
+    let node_id = allocate_node_id_after(node_id);
+    let inheritance_specifier = ffi::WireAstNode {
+        present: true,
+        node_id,
+        kind: AST_NODE_KIND_INHERITANCE_SPECIFIER,
+        location: node_location,
+        text: base_name.text.clone(),
+    };
+
+    builder.finish(
+        &inheritance_specifier,
+        &base_name,
+        &base_name_path,
+        &base_name_path_locations,
+        has_arguments,
+        &arguments,
+        &argument_details,
+    );
+
+    compact_inheritance_specifier_parse_result(inheritance_specifier, errors)
 }
 
 fn parse_current_identifier_path() -> ffi::WireIdentifierPathResult {
@@ -14172,17 +18715,23 @@ fn parse_current_type_class_name_with_node_id(
 }
 
 fn parse_current_modifier_invocation() -> ffi::WireModifierInvocationResult {
-    parse_current_modifier_invocation_with_node_id(current_node_id())
+    parse_current_modifier_invocation_parts_with_node_id(current_node_id()).into_wire()
 }
 
 fn parse_current_modifier_invocation_with_node_id(
     current_node_id: i64,
 ) -> ffi::WireModifierInvocationResult {
+    parse_current_modifier_invocation_parts_with_node_id(current_node_id).into_wire()
+}
+
+fn parse_current_modifier_invocation_parts_with_node_id(
+    current_node_id: i64,
+) -> ParsedModifierInvocationResult {
     let _recursion_guard = RecursionGuard::new();
 
     let name = parse_current_identifier_path_with_node_id(current_node_id);
     if !name.errors.is_empty() {
-        return empty_modifier_invocation_result(
+        return empty_parsed_modifier_invocation_result(
             name.tokens_consumed,
             current_node_id,
             name.errors,
@@ -14203,10 +18752,10 @@ fn parse_current_modifier_invocation_with_node_id(
         has_arguments = true;
         tokens_consumed += advance();
 
-        let parsed_arguments = parse_function_call_list_arguments_with_errors();
+        let parsed_arguments = parse_function_call_list_arguments_with_errors_compact();
         tokens_consumed += parsed_arguments.tokens_consumed;
         if parser_errors_have_fatal(&parsed_arguments.errors) {
-            return modifier_invocation_result(
+            return parsed_modifier_invocation_result(
                 empty_ast_node(),
                 modifier_name_detail,
                 true,
@@ -14227,7 +18776,7 @@ fn parse_current_modifier_invocation_with_node_id(
         tokens_consumed += rparen.tokens_consumed;
         if !rparen.errors.is_empty() {
             errors.extend(rparen.errors);
-            return modifier_invocation_result(
+            return parsed_modifier_invocation_result(
                 empty_ast_node(),
                 modifier_name_detail,
                 true,
@@ -14241,7 +18790,7 @@ fn parse_current_modifier_invocation_with_node_id(
     }
 
     node_id = allocate_node_id_after(node_id);
-    modifier_invocation_result(
+    parsed_modifier_invocation_result(
         ffi::WireAstNode {
             present: true,
             node_id,
@@ -14366,7 +18915,7 @@ fn identifier_from_current_literal_and_advance_with_node_id(
     }
 }
 
-fn elementary_type_name_expression_result_from_current_token() -> ffi::WireExpressionResult {
+fn elementary_type_name_expression_result_from_current_token() -> RustExpressionResult {
     let location = current_location();
     let text = current_elementary_type_text(current_token());
     let node_id = allocate_node_id_after_reserving(current_node_id(), 2);
@@ -14385,8 +18934,8 @@ fn elementary_type_name_expression_result_from_current_token() -> ffi::WireExpre
         location,
         text: expression_type.text.clone(),
     };
-    let mut result = expression_result(expression, Vec::new());
-    result.expression_type = expression_type;
+    let mut result = RustExpressionResult::new(expression, Vec::new());
+    result.data = RustExpressionData::ElementaryTypeNameExpression { expression_type };
     result
 }
 
@@ -14401,8 +18950,7 @@ fn allocate_node_id_after(previous_max: i64) -> i64 {
 }
 
 fn allocate_node_id_after_reserving(previous_max: i64, count: i64) -> i64 {
-    PARSER_STATE.with(|state| {
-        let mut state = state.borrow_mut();
+    parser_state_mut(|state| {
         let next_node_id = state.current_node_id.max(previous_max) + count;
         state.current_node_id = state.current_node_id.max(next_node_id);
         next_node_id
@@ -14623,7 +19171,7 @@ fn expression_result(
         end_index_expression: empty_ast_node(),
         end_index_expression_detail: Vec::new(),
         type_name: empty_ast_node(),
-        type_name_detail: empty_type_name_result(Vec::new()),
+        type_name_details: Vec::new(),
         expression_type: empty_ast_node(),
         member_name_location: empty_source_location(),
         arguments: Vec::new(),
@@ -14655,7 +19203,7 @@ fn statement_result(
         inline_assembly_flags: Vec::new(),
         inline_assembly_block_location: empty_source_location(),
         condition_expression: empty_ast_node(),
-        condition_expression_detail: empty_expression_result(Vec::new()),
+        condition_expression_detail: Vec::new(),
         true_body: empty_ast_node(),
         true_body_detail: Vec::new(),
         false_body: empty_ast_node(),
@@ -14664,7 +19212,7 @@ fn statement_result(
         body_detail: Vec::new(),
         is_do_while: false,
         external_call: empty_ast_node(),
-        external_call_detail: empty_expression_result(Vec::new()),
+        external_call_detail: Vec::new(),
         clauses: Vec::new(),
         clause_details: Vec::new(),
         clause_block_statement_details: Vec::new(),
@@ -14677,24 +19225,24 @@ fn statement_result(
         loop_expression_detail: Vec::new(),
         event_call: empty_ast_node(),
         event_call_callee: empty_ast_node(),
-        event_call_callee_detail: empty_expression_result(Vec::new()),
+        event_call_callee_detail: Vec::new(),
         event_call_arguments: Vec::new(),
         event_call_argument_details: Vec::new(),
         event_call_parameter_names: Vec::new(),
         event_call_parameter_name_locations: Vec::new(),
         error_call: empty_ast_node(),
         error_call_callee: empty_ast_node(),
-        error_call_callee_detail: empty_expression_result(Vec::new()),
+        error_call_callee_detail: Vec::new(),
         error_call_arguments: Vec::new(),
         error_call_argument_details: Vec::new(),
         error_call_parameter_names: Vec::new(),
         error_call_parameter_name_locations: Vec::new(),
         expression: empty_ast_node(),
-        expression_detail: empty_expression_result(Vec::new()),
+        expression_detail: Vec::new(),
         variables: Vec::new(),
         variable_details: Vec::new(),
         initial_value: empty_ast_node(),
-        initial_value_detail: empty_expression_result(Vec::new()),
+        initial_value_detail: Vec::new(),
         errors,
     }
 }
@@ -14818,6 +19366,106 @@ mod tests {
             String::new(),
             evm_version_name.to_string(),
         );
+    }
+
+    fn set_source_with_evm_version(source: &[u8], evm_version_name: &str) {
+        set_parser_source_input_with_evm_version(
+            ffi::WireString {
+                bytes: source.to_vec(),
+            },
+            0,
+            String::new(),
+            evm_version_name.to_string(),
+        );
+    }
+
+    fn set_source(source: &[u8]) {
+        set_source_with_evm_version(source, "osaka");
+    }
+
+    #[test]
+    fn source_backed_parser_input_scans_and_parses_contract() {
+        reset_parser_input();
+        set_source(b"contract C { function f() public {} }");
+
+        PARSER_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(!state.tokens.is_empty());
+            assert_eq!(state.tokens.last().unwrap().token, token::TOKEN_EOS);
+            assert_eq!(state.comments.len(), state.tokens.len());
+        });
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_contracts.len(), 1);
+        assert_eq!(result.source_unit_contracts[0].name.bytes, b"C");
+    }
+
+    #[test]
+    fn injected_vector_parser_input_still_works() {
+        reset_parser_input();
+        let tokens = vec![
+            test_token(0, token::TOKEN_CONTRACT, b""),
+            test_token(1, token::TOKEN_IDENTIFIER, b"C"),
+            test_token(2, token::TOKEN_LBRACE, b""),
+            test_token(3, token::TOKEN_RBRACE, b""),
+            test_token(4, token::TOKEN_EOS, b""),
+        ];
+        set_tokens_with_evm_version(tokens, "osaka");
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_contracts.len(), 1);
+        assert_eq!(result.source_unit_contracts[0].name.bytes, b"C");
+    }
+
+    #[test]
+    fn source_backed_experimental_pragma_switches_scanner_mode() {
+        reset_parser_input();
+        set_source(b"pragma experimental solidity; type fun(T, U) = __builtin(\"fun\");");
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_type_definitions.len(), 1);
+        let definition = &result.source_unit_type_definitions[0];
+        assert_eq!(definition.name.bytes, b"fun");
+        assert_eq!(definition.argument_parameters.len(), 2);
+        assert_eq!(definition.expression.kind, AST_NODE_KIND_BUILTIN);
+    }
+
+    #[test]
+    fn source_backed_inline_assembly_restores_solidity_mode_after_block() {
+        reset_parser_input();
+        set_source(
+            b"contract C { function f() public { assembly { let x := add(1, 2) } uint x; } }",
+        );
+
+        let result = parse();
+
+        assert!(result.ok, "{}", result.error_message);
+        assert_eq!(result.source_unit_contracts.len(), 1);
+        let contract = &result.source_unit_contracts[0];
+        assert_eq!(contract.sub_nodes.len(), 1);
+    }
+
+    #[test]
+    fn source_backed_parser_reports_illegal_scanner_token_error() {
+        reset_parser_input();
+        set_source(b"\"\x80\"");
+
+        let result = parse_primary_expression();
+
+        assert!(!result.expression.present);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_id, 8936);
+        assert_eq!(
+            result.errors[0].message,
+            "Invalid character in string. If you are trying to use Unicode characters, use a unicode\"...\" string literal."
+        );
+        assert!(result.errors[0].fatal);
     }
 
     fn yul_assignment_rhs_identifier_tokens(identifier: &[u8]) -> Vec<ffi::WireLocatedToken> {
@@ -16594,8 +21242,9 @@ mod tests {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.statement.kind, AST_NODE_KIND_TRY_STATEMENT);
         assert_eq!(result.external_call.kind, AST_NODE_KIND_FUNCTION_CALL);
+        assert_eq!(result.external_call_detail.len(), 1);
         assert_eq!(
-            result.external_call_detail.expression.kind,
+            result.external_call_detail[0].expression.kind,
             AST_NODE_KIND_FUNCTION_CALL
         );
         assert_eq!(result.clauses.len(), 3);
@@ -20166,8 +24815,9 @@ mod tests {
             AST_NODE_KIND_IDENTIFIER
         );
         assert_eq!(result.initial_value.kind, AST_NODE_KIND_IDENTIFIER);
+        assert_eq!(result.initial_value_detail.len(), 1);
         assert_eq!(
-            result.initial_value_detail.expression.node_id,
+            result.initial_value_detail[0].expression.node_id,
             result.initial_value.node_id
         );
     }

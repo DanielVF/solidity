@@ -10,3 +10,4 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 cxx = "1"
+langutil = { path = "../langutil" }

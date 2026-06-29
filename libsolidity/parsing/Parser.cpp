@@ -96,13 +96,17 @@ ASTPointer<SourceUnit> Parser::parse(CharStream& _charStream)
 	{
 #if defined(SOLIDITY_USE_RUST_SOLIDITY_PARSER)
 		{
-			RustParserResult rustResult = parseSourceUnitWithRust(_charStream, m_evmVersion, m_currentNodeID);
-			if (ASTPointer<SourceUnit> rustSourceUnit = createSourceUnitAstFromRustIfSupported(rustResult))
+			RustParserSourceUnitResult rustResult = parseSourceUnitWithRustIfSupported(
+				_charStream,
+				m_evmVersion,
+				m_currentNodeID
+			);
+			if (rustResult.sourceUnit)
 			{
-				reportRustParserDiagnostics(m_errorReporter, rustResult);
-				m_currentNodeID = rustResult.maxID;
-				m_experimentalSolidityEnabledInCurrentSourceUnit = rustResult.experimentalSolidity;
-				return rustSourceUnit;
+				reportRustParserDiagnostics(m_errorReporter, rustResult.result);
+				m_currentNodeID = rustResult.result.maxID;
+				m_experimentalSolidityEnabledInCurrentSourceUnit = rustResult.result.experimentalSolidity;
+				return rustResult.sourceUnit;
 			}
 		}
 #endif

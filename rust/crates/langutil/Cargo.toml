@@ -1,0 +1,11 @@
+[package]
+name = "langutil"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "langutil"
+crate-type = ["rlib"]
+
+[dependencies]
